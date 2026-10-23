@@ -48,6 +48,35 @@ General official CLI reference: https://code.claude.com/docs/en/cli-reference
 
 ## Verification and limitations
 
+### Fable display preference
+
+Settings → Fournisseurs → Claude now includes an explicit Fable quota switch.
+`fableEnabled` is persisted with the existing atomic `prefs.json` writer and defaults
+to true for existing installations. It controls Quota Monitor only, not Anthropic
+model access or a subscription. Turning Claude off preserves the Fable preference.
+Disabled Fable is removed from frontend snapshots, the native macOS panel and the
+fallback menu; other quotas remain unchanged. No additional provider call is made.
+
+The notification ledger persists a muted baseline, including when delivery is
+globally disabled. Hidden samples and missing/invalid data cannot replay a hidden
+crossing on reactivation. The first valid enabled sample establishes a silent
+baseline; subsequent real below-100 → 100 transitions notify normally. Existing
+ledger entries without the new muted flag remain readable.
+
+Only the word “Fable” is rendered at opacity 0.8 in React and in the native macOS
+panel. The native countdown label now retains that word instead of dropping it
+when a reset date is available. Its countdown (potentially 5h or 30h remaining)
+is distinct from the bucket's weekly duration. The distributed schema documented
+above and the fixtures supply no separate 5h/30h Fable buckets: none are invented,
+and existing general Claude 5h/weekly quotas are not relabelled as Fable.
+
+Clarification before any further relabelling: **30h = durée souhaitée ou autre
+libellé ?** The request's token `30h` is intentionally not replaced with `7j`.
+No live account response, running-app restart, installation, release or real
+notification was used for this follow-up. React markup, native panel labels,
+snapshot filtering, preference migration and muted-ledger transitions are tested
+offline; interactive installed-app UI remains a manual review check.
+
 Unit fixtures are synthetic test values following the inspected official schema,
 not claimed captured account responses. Tests cover present/absent/null/invalid
 Fable, real zero, exact exhaustion, reset, unchanged old quotas, grouped alerts,

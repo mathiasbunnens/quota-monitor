@@ -28,6 +28,7 @@ export function quotaLabel(snapshot: QuotaSnapshot) {
 export type QuotaRow = {
   id: string;
   label: string;
+  modelLabel?: string;
   /** Remaining percentage, or null when the provider did not report it. */
   remaining: number | null;
   exhausted: boolean;
@@ -46,11 +47,12 @@ export function codexRows(snapshots: QuotaSnapshot[]): QuotaRow[] {
   });
 }
 
-export function claudeRows(snapshot: ClaudeSnapshot): QuotaRow[] {
-  return snapshot.metrics.map((metric) => {
+export function claudeRows(snapshot: ClaudeSnapshot, fableEnabled = true): QuotaRow[] {
+  return snapshot.metrics.filter((metric) => fableEnabled || metric.id !== "claude:weekly_fable").map((metric) => {
     const available = metric.availability === "available" && metric.usedPercent !== null;
     return {
       id: metric.id, label: metric.label,
+      ...(metric.id === "claude:weekly_fable" ? { modelLabel: "Fable" } : {}),
       remaining: available ? Math.round(Math.max(0, Math.min(100, 100 - (metric.usedPercent as number)))) : null,
       exhausted: available && metric.exhausted,
       missing: metric.availability === "unavailable" ? "Réinitialisée · en attente" : "Non communiquée",

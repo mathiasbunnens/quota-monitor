@@ -448,6 +448,17 @@ static LIVE: std::sync::Mutex<Option<ClaudeSnapshot>> = std::sync::Mutex::new(No
 static REFRESH_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 pub fn snapshot(app: &tauri::AppHandle) -> ClaudeSnapshot {
+    filter_fable(raw_snapshot(app), prefs::current(app).fable_enabled)
+}
+
+fn filter_fable(mut snap: ClaudeSnapshot, enabled: bool) -> ClaudeSnapshot {
+    if !enabled {
+        snap.metrics.retain(|m| m.id != "claude:weekly_fable");
+    }
+    snap
+}
+
+pub(crate) fn raw_snapshot(app: &tauri::AppHandle) -> ClaudeSnapshot {
     let enabled = prefs::current(app).claude_enabled;
     let mut snap = LIVE.lock().unwrap().clone().unwrap_or_else(|| {
         compute(
@@ -652,6 +663,31 @@ mod tests {
             five_hour: w(five),
             seven_day: w(seven),
         })
+    }
+
+    #[test]
+    fn fable_preference_filters_display_without_mutating_raw_data() {
+        let raw = usage_snapshot(
+            &json!({"rate_limits":{
+                "five_hour":{"utilization":20}, "seven_day":{"utilization":30},
+                "model_scoped":[{"display_name":"Fable","utilization":40}]
+            }}),
+            NOW,
+        );
+        let hidden = filter_fable(raw.clone(), false);
+        assert_eq!(hidden.metrics.len(), 2);
+        assert_eq!(hidden.metrics[0].used_percent, raw.metrics[0].used_percent);
+        assert_eq!(hidden.metrics[1].used_percent, raw.metrics[1].used_percent);
+        assert_eq!(filter_fable(raw, true).metrics.len(), 3);
+        for value in [json!({}), json!({"rate_limits":{"model_scoped":null}})] {
+            let snap = usage_snapshot(&value, NOW);
+            for enabled in [true, false] {
+                assert!(!filter_fable(snap.clone(), enabled)
+                    .metrics
+                    .iter()
+                    .any(|m| m.id == "claude:weekly_fable"));
+            }
+        }
     }
 
     #[test]

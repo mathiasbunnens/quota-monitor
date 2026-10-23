@@ -105,7 +105,7 @@ export default function Dashboard() {
       {codexOn && <ProviderCard name="Codex" badge={status?.planType} rows={codexRows(snapshots)} compact={both}
         status={codexStatus} error={codexFailure}
         empty={status?.phase === "ready" ? "Aucun quota à afficher. La réserve peut ne pas être communiquée par Codex." : "Quotas indisponibles."} />}
-      {claudeOn && claude && <ProviderCard name="Claude" rows={claudeRows(claude)} compact={both}
+      {claudeOn && claude && <ProviderCard name="Claude" rows={claudeRows(claude, prefs?.fableEnabled ?? true)} compact={both}
         status={claudeStatusText(claude)} error={claudeError} empty="Aucune limite communiquée par Claude Code." />}
     </div>
     {codexOn && <ResetCredits status={status} onChange={reload} />}

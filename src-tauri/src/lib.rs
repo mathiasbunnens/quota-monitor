@@ -841,7 +841,12 @@ fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
                 "—"
             };
             PanelRow {
-                label: if remaining.is_some() {
+                label: if m.id == "claude:weekly_fable" && remaining.is_some() {
+                    format!(
+                        "{} Fable",
+                        limit_label(m.reset_at.as_deref(), "Limite hebdomadaire")
+                    )
+                } else if remaining.is_some() {
                     limit_label(m.reset_at.as_deref(), m.label)
                 } else {
                     m.label.to_string()
@@ -1076,13 +1081,32 @@ fn make_panel_view(
         let mut row_top = top + 8.0;
         for row in &provider.rows {
             let low = row.remaining.is_some_and(|p| p <= 20);
+            let fable_label = if provider.name == "Claude" {
+                row.label.strip_suffix(" Fable")
+            } else {
+                None
+            };
             let label = panel_label(
                 mtm,
-                &row.label,
+                fable_label.unwrap_or(&row.label),
                 &NSFont::systemFontOfSize_weight(12.0, regular),
                 &NSColor::labelColor(),
             );
-            place(&label, 20.0, row_top + 3.0, 180.0, 16.0);
+            if fable_label.is_some() {
+                label.sizeToFit();
+                let width = label.frame().size.width.min(140.0);
+                place(&label, 20.0, row_top + 3.0, width, 16.0);
+                let model = panel_label(
+                    mtm,
+                    "Fable",
+                    &NSFont::systemFontOfSize_weight(12.0, regular),
+                    &NSColor::labelColor(),
+                );
+                model.setAlphaValue(0.8);
+                place(&model, 24.0 + width, row_top + 3.0, 36.0, 16.0);
+            } else {
+                place(&label, 20.0, row_top + 3.0, 180.0, 16.0);
+            }
             let value_color = if low {
                 NSColor::systemRedColor()
             } else {
@@ -2064,6 +2088,39 @@ mod tests {
             label: None,
             window_minutes: minutes,
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_fable_label_keeps_model_on_countdowns_and_unknown_resets() {
+        let now = Local::now().timestamp();
+        let reset = (Local::now() + chrono::Duration::hours(30)).to_rfc3339();
+        let snap = claude::usage_snapshot(
+            &serde_json::json!({"rate_limits":{
+                "five_hour":{"utilization":10,"resets_at":reset},
+                "seven_day":{"utilization":20,"resets_at":reset},
+                "model_scoped":[{"display_name":"Fable","utilization":30,"resets_at":reset}]
+            }}),
+            now,
+        );
+        let panel = claude_panel(&snap);
+        assert_eq!(panel.rows.len(), 3);
+        assert!(!panel.rows[0].label.contains("Fable"));
+        assert!(!panel.rows[1].label.contains("Fable"));
+        assert!(panel.rows[2].label.starts_with("Limite sur "));
+        assert!(panel.rows[2].label.ends_with(" Fable"));
+        // A countdown is not a new 30h quota window: duration remains weekly.
+        assert_eq!(snap.metrics[2].period_duration_seconds, 604800);
+        let unknown = claude::usage_snapshot(
+            &serde_json::json!({"rate_limits":{
+                "model_scoped":[{"display_name":"Fable","utilization":30}]
+            }}),
+            now,
+        );
+        assert_eq!(
+            claude_panel(&unknown).rows[2].label,
+            "Limite hebdomadaire Fable"
+        );
     }
 
     #[cfg(target_os = "macos")]

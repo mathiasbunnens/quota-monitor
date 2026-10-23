@@ -51,6 +51,11 @@ html:has(.prefs), html:has(.prefs) body { background: var(--desktop-bg); }
 .prefs-state--error { color: #d93c41 !important; }
 @media (prefers-color-scheme: dark) { .prefs-state--error { color: #ff7b80 !important; } }
 .prefs-footnote { font-size: 11px !important; }
+.prefs-fable {
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--desktop-border);
+  > div { display: block; }
+  h3 { margin: 0; font-size: 12px; font-weight: 600; }
+}
 .prefs-actions, .prefs .settings-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 6px; }
 .prefs .prefs-external { display: inline-flex; align-items: center; gap: 4px; margin: 6px 0 0 -4px; }
 .external-icon { flex: none; vertical-align: -1px; }

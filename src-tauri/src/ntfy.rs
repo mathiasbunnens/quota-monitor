@@ -150,7 +150,7 @@ fn observations(app: &tauri::AppHandle, p: &prefs::Prefs) -> Vec<Observation> {
         }
     }
     if p.claude_enabled {
-        out.extend(claude_observations(&claude::snapshot(app)));
+        out.extend(claude_observations(&claude::raw_snapshot(app)));
     }
     out
 }
@@ -175,7 +175,12 @@ fn claude_observations(snap: &claude::ClaudeSnapshot) -> Vec<Observation> {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 enum Counter {
-    Observed { reset: Option<i64>, exhausted: bool },
+    Observed {
+        reset: Option<i64>,
+        exhausted: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        muted: bool,
+    },
     Legacy(Option<i64>),
 }
 // Persist before sending: an interrupted process must not repeatedly notify.
@@ -192,7 +197,9 @@ impl Ledger {
         }
         let used = o.used.filter(|v| v.is_finite() && *v >= 0.0)?;
         let previous = self.0.get(&o.key).map(|counter| match counter {
-            Counter::Observed { reset, exhausted } => (*reset, *exhausted),
+            Counter::Observed {
+                reset, exhausted, ..
+            } => (*reset, *exhausted),
             Counter::Legacy(reset) => (*reset, true),
         });
         let exhausted = used >= 100.0;
@@ -200,14 +207,24 @@ impl Ledger {
             reset.is_some_and(|at| o.checked.is_some_and(|checked| checked >= at))
                 || matches!((reset, o.reset), (Some(a), Some(b)) if a != b)
         });
-        let notify = exhausted && previous.is_some_and(|(_, was)| !was || new_cycle);
+        let was_muted = matches!(
+            self.0.get(&o.key),
+            Some(Counter::Observed { muted: true, .. })
+        );
+        let notify = !was_muted && exhausted && previous.is_some_and(|(_, was)| !was || new_cycle);
         // Missing reset metadata never rearms. Keep a known future reset so it
         // can still establish a new cycle after a temporary metadata omission.
         let reset = o
             .reset
             .or_else(|| previous.and_then(|(reset, _)| reset.filter(|at| *at > now)));
-        self.0
-            .insert(o.key.clone(), Counter::Observed { reset, exhausted });
+        self.0.insert(
+            o.key.clone(),
+            Counter::Observed {
+                reset,
+                exhausted,
+                muted: false,
+            },
+        );
         if !notify {
             return None;
         }
@@ -221,11 +238,47 @@ impl Ledger {
             o.provider, o.window, reset
         ))
     }
+    #[cfg(test)]
     fn observe_all(&mut self, observations: &[Observation], now: i64) -> Option<String> {
+        self.observe_all_with_fable(observations, now, true)
+    }
+    fn mute_fable(&mut self) {
+        if let Some(counter) = self.0.get_mut("Claude:claude:weekly_fable") {
+            let reset = match counter {
+                Counter::Observed { reset, .. } | Counter::Legacy(reset) => *reset,
+            };
+            *counter = Counter::Observed {
+                reset,
+                exhausted: true,
+                muted: true,
+            };
+        }
+    }
+    fn observe_all_with_fable(
+        &mut self,
+        observations: &[Observation],
+        now: i64,
+        fable_enabled: bool,
+    ) -> Option<String> {
+        // Preserve a silent baseline even when Fable is absent/invalid. The first
+        // valid sample after re-enabling cannot turn a hidden crossing into an alert.
+        if !fable_enabled {
+            self.mute_fable();
+        }
         let messages: Vec<_> = observations
             .iter()
-            .filter_map(|o| self.observe(true, o, now))
+            .filter_map(|o| {
+                let message = self.observe(true, o, now);
+                if !fable_enabled && o.key == "Claude:claude:weekly_fable" {
+                    None
+                } else {
+                    message
+                }
+            })
             .collect();
+        if !fable_enabled {
+            self.mute_fable();
+        }
         (!messages.is_empty()).then(|| messages.join("\n"))
     }
     fn save(&self, path: &Path) -> Result<(), String> {
@@ -266,15 +319,27 @@ pub fn start(app: tauri::AppHandle) {
         };
         while rx.recv().is_ok() {
             let p = prefs::current(&app);
+            let before = ledger.0.clone();
+            if !p.fable_enabled {
+                ledger.mute_fable();
+            }
             if !p.ntfy.enabled || p.ntfy.endpoint().is_err() {
+                // Fable's opt-out survives even when global delivery is off.
+                if before != ledger.0 && ledger.save(&path).is_err() {
+                    eprintln!("Notifications ntfy suspendues : enregistrement impossible.");
+                    return;
+                }
                 continue;
             }
             let rows = observations(&app, &p);
             if prefs::current(&app) != p {
                 continue;
             }
-            let before = ledger.0.clone();
-            let message = ledger.observe_all(&rows, chrono::Utc::now().timestamp());
+            let message = ledger.observe_all_with_fable(
+                &rows,
+                chrono::Utc::now().timestamp(),
+                p.fable_enabled,
+            );
             if before != ledger.0 && ledger.save(&path).is_err() {
                 eprintln!("Notifications ntfy suspendues : enregistrement impossible.");
                 return;
@@ -588,6 +653,62 @@ mod tests {
             assert!(ledger.observe(true, &sample(100.0), 1000).is_some());
             assert!(ledger.observe(true, &sample(100.0), 1000).is_none());
         }
+    }
+
+    #[test]
+    fn fable_disable_restart_missing_and_reenable_never_replay_hidden_crossings() {
+        let mut fable = sample(90.0);
+        fable.key = "Claude:claude:weekly_fable".into();
+        fable.provider = "Claude";
+        fable.window = "Limite hebdomadaire Fable";
+        let mut ledger = Ledger::default();
+        assert!(ledger
+            .observe_all_with_fable(&[fable.clone()], 1000, true)
+            .is_none());
+        assert!(ledger.observe_all_with_fable(&[], 1000, false).is_none());
+        fable.used = Some(100.0);
+        assert!(ledger
+            .observe_all_with_fable(&[fable.clone()], 1000, false)
+            .is_none());
+        let mut ledger: Ledger =
+            serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+        // An invalid first sample must not consume the muted baseline.
+        fable.valid = false;
+        assert!(ledger
+            .observe_all_with_fable(&[fable.clone()], 1000, true)
+            .is_none());
+        fable.valid = true;
+        fable.reset = Some(3000);
+        assert!(ledger
+            .observe_all_with_fable(&[fable.clone()], 1000, true)
+            .is_none());
+        assert!(ledger
+            .observe_all_with_fable(&[fable.clone()], 1000, true)
+            .is_none());
+        fable.used = Some(99.0);
+        assert!(ledger
+            .observe_all_with_fable(&[fable.clone()], 1000, true)
+            .is_none());
+        fable.used = Some(100.0);
+        assert!(ledger
+            .observe_all_with_fable(&[fable.clone()], 1000, true)
+            .unwrap()
+            .contains("Fable"));
+        // Other quotas still cross normally while Fable is muted.
+        ledger.observe_all_with_fable(&[sample(90.0)], 1000, false);
+        let message = ledger
+            .observe_all_with_fable(&[sample(100.0), fable.clone()], 1000, false)
+            .unwrap();
+        assert!(message.contains("Codex"));
+        assert!(!message.contains("Fable"));
+        // Hidden drops/reset changes cannot rearm an alert on enable either.
+        fable.used = Some(0.0);
+        ledger.observe_all_with_fable(&[fable.clone()], 1000, false);
+        fable.reset = Some(4000);
+        fable.used = Some(100.0);
+        assert!(ledger
+            .observe_all_with_fable(&[fable], 1000, true)
+            .is_none());
     }
 
     #[test]
