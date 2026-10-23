@@ -68,23 +68,42 @@ const moduleSource = compiled.replaceAll('"react/jsx-runtime"', JSON.stringify(i
   .replaceAll('"react"', JSON.stringify(import.meta.resolve("react")));
 const { default: ProviderCard } = await import("data:text/javascript;base64," + Buffer.from(moduleSource).toString("base64"));
 
-test("the whole Fable progress row receives 0.8 opacity, other rows stay opaque", () => {
-  const input = snapshot([metric("claude:five_hour", 20), metric("claude:weekly_fable", 30)]);
+test("Fable row is fully opaque and marked by a model class and a decorative dot only", () => {
+  const input = snapshot([metric("claude:five_hour", 20), metric("claude:weekly_fable", 50)]);
   const render = (enabled, compact = false, data = input) => renderToStaticMarkup(createElement(ProviderCard, {
     name: "Claude", rows: claudeRows(data, enabled), compact,
   }));
   const html = render(true);
-  const rows = html.split('<div class="provider-row"').slice(1);
+  assert.doesNotMatch(html, /opacity/);
+  const rows = html.split('<div class="provider-row').slice(1);
   assert.equal(rows.length, 2);
-  assert.doesNotMatch(rows[0], /opacity:/);
-  // One wrapper covers label, value, track/fill and reset of the Fable row.
-  assert.match(rows[1], /^ style="opacity:0.8"><div class="dashboard__quota-heading"><span>Limite hebdomadaire Fable<\/span><strong>/);
-  assert.match(rows[1], /role="progressbar" aria-label="Limite hebdomadaire Fable"/);
+  assert.match(rows[0], /^"><div class="dashboard__quota-heading"><span>Limite 5 heures<\/span>/);
+  assert.doesNotMatch(rows[0], /model/);
+  assert.match(rows[1], /^ provider-row--model"><div class="dashboard__quota-heading"><span><i class="provider-row__model-dot" aria-hidden="true"><\/i>Limite hebdomadaire Fable<\/span><strong>/);
+  // Accessible name and state classes are unchanged: the tint only overrides the healthy fill in CSS.
+  assert.match(rows[1], /class="dashboard__progress dashboard__progress--healthy" role="progressbar" aria-label="Limite hebdomadaire Fable"/);
   assert.match(rows[1], /provider-row__reset/);
-  assert.equal((html.match(/opacity:/g) || []).length, 1);
-  assert.doesNotMatch(render(false), /Fable|opacity:/);
-  assert.doesNotMatch(render(true, true), /Fable|opacity:/); // Secondary rows remain in details.
+  assert.equal((html.match(/provider-row__model-dot/g) || []).length, 1);
+  const low = render(true, false, snapshot([metric("claude:weekly_fable", 90)]));
+  assert.match(low, /provider-row--model.*dashboard__progress--low/);
+  assert.doesNotMatch(render(false), /Fable|model/);
+  assert.doesNotMatch(render(true, true), /Fable|model/); // Secondary rows remain in details.
   const fableOnly = render(true, true, snapshot([metric("claude:weekly_fable", 30)]));
-  assert.match(fableOnly, /<div class="provider-row" style="opacity:0.8">/);
+  assert.match(fableOnly, /<div class="provider-row provider-row--model">/);
   assert.doesNotMatch(html, /30h/);
+});
+
+test("model tint overrides only the healthy fill and has light and dark values", () => {
+  const css = fs.readFileSync(new URL("../src/pages/Dashboard/dashboard.scss", import.meta.url), "utf8");
+  assert.match(css, /\.provider-row--model \.dashboard__progress--healthy span \{ background: var\(--model-accent\); \}/);
+  assert.doesNotMatch(css, /provider-row--model \.dashboard__progress--(warning|low)/);
+  assert.equal((css.match(/--model-accent: #[0-9a-f]{6};/g) || []).length, 2);
+  assert.doesNotMatch(css, /provider-row[^{]*\{[^}]*opacity/);
+});
+
+test("Settings keeps the Fable switch label but no help text", () => {
+  const settings = fs.readFileSync(new URL("../src/features/settings/Settings.tsx", import.meta.url), "utf8");
+  assert.match(settings, /<Switch label="Afficher le quota Fable et ses alertes"/);
+  assert.match(settings, /<h3>Quota Fable<\/h3>/);
+  assert.doesNotMatch(settings, /si Claude Code le communique|Ne modifie pas votre forfait/);
 });

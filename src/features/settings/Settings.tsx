@@ -233,7 +233,7 @@ export default function Settings() {
           </header>
           {(!prefs.claudeEnabled || !claudeReady) && <p className={"prefs-state prefs-state--" + claudeTone} role="status">{claudeMessage}</p>}
           <div className="prefs-group__head prefs-fable">
-            <div><h3>Quota Fable</h3><p className="prefs-footnote">Afficher le quota hebdomadaire et ses alertes, si Claude Code le communique. Ne modifie pas votre forfait Anthropic.</p></div>
+            <div><h3>Quota Fable</h3></div>
             <Switch label="Afficher le quota Fable et ses alertes" checked={prefs.fableEnabled} disabled={busy || !prefs.claudeEnabled}
               onChange={(value) => void update({ fableEnabled: value })} />
           </div>

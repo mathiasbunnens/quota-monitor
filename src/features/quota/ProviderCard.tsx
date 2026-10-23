@@ -19,16 +19,16 @@ function level(remaining: number) {
   return remaining <= 20 ? "low" : remaining <= 40 ? "warning" : "healthy";
 }
 
-/** Model-specific rows (Fable) are muted as a whole: label, value, bar and reset. */
-function mutedStyle(row: QuotaRow) {
-  return row.modelLabel ? { opacity: 0.8 } : undefined;
+/** Model-specific rows (Fable) keep full opacity; a model tint and dot set them apart. */
+function rowClass(row: QuotaRow) {
+  return "provider-row" + (row.modelLabel ? " provider-row--model" : "");
 }
 
 function Row({ row, showReset = true }: { row: QuotaRow; showReset?: boolean }) {
   const known = row.remaining !== null;
-  return <div className="provider-row" style={mutedStyle(row)}>
+  return <div className={rowClass(row)}>
     <div className="dashboard__quota-heading">
-      <span>{row.label}</span>
+      <span>{row.modelLabel && <i className="provider-row__model-dot" aria-hidden="true" />}{row.label}</span>
       {known
         ? <strong>{row.exhausted ? "Épuisé" : <>{row.remaining} % <small>restants</small></>}</strong>
         : <strong className="provider-row__missing">{row.missing}</strong>}
@@ -79,7 +79,7 @@ export default function ProviderCard({ name, badge, rows, status, error, compact
     {!rows.length && !error && <p className="provider-card__note">{empty ?? "Aucun quota à afficher."}</p>}
     {status && <p className="provider-card__note" role="status">{status}</p>}
     {hasDetails && open && <div id={detailsId} className="provider-card__details" role="region" aria-label={"Détails " + name}>
-      {first && <p className="provider-row__reset" style={mutedStyle(first)}>{first.label} · réinitialisation : {first.resetText}</p>}
+      {first && <p className="provider-row__reset">{first.label} · réinitialisation : {first.resetText}</p>}
       {rest.map((row) => <Row key={row.id} row={row} />)}
       {!rest.length && <p className="provider-card__note">Aucune autre limite communiquée.</p>}
     </div>}

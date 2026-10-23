@@ -63,8 +63,12 @@ crossing on reactivation. The first valid enabled sample establishes a silent
 baseline; subsequent real below-100 → 100 transitions notify normally. Existing
 ledger entries without the new muted flag remain readable.
 
-Only the word “Fable” is rendered at opacity 0.8 in React and in the native macOS
-panel. The native countdown label now retains that word instead of dropping it
+The Fable row is fully opaque (no dimming); it is set apart in React and in the
+native macOS panel by a small teal dot before its label and a teal bar fill while
+healthy (system teal, light/dark variants) — warning and low states keep the
+regular orange/red so alert colours are never altered. The Settings switch keeps
+its accessible label without a help sentence. The native countdown label now
+retains that word instead of dropping it
 when a reset date is available. Its countdown (potentially 5h or 30h remaining)
 is distinct from the bucket's weekly duration. The distributed schema documented
 above and the fixtures supply no separate 5h/30h Fable buckets: none are invented,

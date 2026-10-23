@@ -656,11 +656,13 @@ fn quota_color_transition(percentage: u32) -> (&'static str, &'static str, f64) 
 }
 
 #[cfg(target_os = "macos")]
-fn quota_color(percentage: u32) -> Retained<NSColor> {
+fn quota_color(percentage: u32, model: bool) -> Retained<NSColor> {
     let (from, to, fraction) = quota_color_transition(percentage);
+    // Model-scoped rows swap only the healthy hue for teal; warning/low stay identical.
     let color = |name| match name {
         "red" => NSColor::systemRedColor(),
         "orange" => NSColor::systemOrangeColor(),
+        _ if model => NSColor::systemTealColor(),
         _ => NSColor::systemGreenColor(),
     };
     let from_color = color(from);
@@ -701,7 +703,8 @@ enum Tone {
 #[cfg(target_os = "macos")]
 #[derive(Clone, Debug, PartialEq)]
 struct PanelRow {
-    opacity: f64,
+    /// Model-scoped row (Fable): teal fill while healthy and a leading dot, full opacity.
+    model: bool,
     label: String,
     remaining: Option<u32>,
     value: String,
@@ -800,7 +803,7 @@ fn codex_panel(
             let short = rank(p) == 0;
             let remaining = p.remaining.min(100);
             PanelRow {
-                opacity: 1.0,
+                model: false,
                 label: match rank(p) {
                     0 => limit_label(Some(&p.reset_at), "Limite 5 heures"),
                     1 => limit_label(Some(&p.reset_at), "Limite hebdomadaire"),
@@ -854,11 +857,7 @@ fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
                 "—"
             };
             PanelRow {
-                opacity: if m.id == "claude:weekly_fable" {
-                    0.8
-                } else {
-                    1.0
-                },
+                model: m.id == "claude:weekly_fable",
                 label: if m.id == "claude:weekly_fable" && remaining.is_some() {
                     format!(
                         "{} Fable",
@@ -1108,7 +1107,6 @@ fn make_panel_view(
                     PANEL_ROW_HEIGHT,
                 ),
             );
-            group.setAlphaValue(row.opacity);
             root.addSubview(&group);
             let place = |view: &NSView, x: f64, top: f64, w: f64, h: f64| {
                 view.setFrame(frame(x, PANEL_ROW_HEIGHT - (top - row_top) - h, w, h));
@@ -1121,7 +1119,14 @@ fn make_panel_view(
                 &NSFont::systemFontOfSize_weight(12.0, regular),
                 &NSColor::labelColor(),
             );
-            place(&label, 20.0, row_top + 3.0, 180.0, 16.0);
+            if row.model {
+                // Same 6 pt teal dot as the React card, label nudged right of it.
+                let dot = rounded_box(mtm, &NSColor::systemTealColor(), 3.0);
+                place(&dot, 22.0, row_top + 8.0, 6.0, 6.0);
+                place(&label, 32.0, row_top + 3.0, 168.0, 16.0);
+            } else {
+                place(&label, 20.0, row_top + 3.0, 180.0, 16.0);
+            }
             let value_color = if low {
                 NSColor::systemRedColor()
             } else {
@@ -1152,7 +1157,11 @@ fn make_panel_view(
             let fill_width =
                 PANEL_INNER_WIDTH * f64::from(row.remaining.unwrap_or(0).min(100)) / 100.0;
             if fill_width >= 5.0 {
-                let fill = rounded_box(mtm, &quota_color(row.remaining.unwrap_or(0)), 2.5);
+                let fill = rounded_box(
+                    mtm,
+                    &quota_color(row.remaining.unwrap_or(0), row.model),
+                    2.5,
+                );
                 place(&fill, 22.0, row_top + 23.0, fill_width, 5.0);
             }
             let reset = panel_label(
@@ -1543,21 +1552,21 @@ pub fn quota_ui_smoke(directory: &str) {
         badge: Some("pro".into()),
         rows: vec![
             PanelRow {
-                opacity: 1.0,
+                model: false,
                 label: limit_label(Some(&soon), "Limite 5 heures"),
                 remaining: Some(12),
                 value: "12 %".into(),
                 reset: reset_phrase(&soon, true).unwrap(),
             },
             PanelRow {
-                opacity: 1.0,
+                model: false,
                 label: limit_label(Some(&week), "Limite hebdomadaire"),
                 remaining: Some(86),
                 value: "86 %".into(),
                 reset: reset_phrase(&week, false).unwrap(),
             },
             PanelRow {
-                opacity: 0.8,
+                model: true,
                 label: format!("{} Fable", limit_label(Some(&week), "Limite hebdomadaire")),
                 remaining: Some(63),
                 value: "63 %".into(),
@@ -2131,9 +2140,9 @@ mod tests {
         assert_eq!(panel.rows.len(), 3);
         assert!(!panel.rows[0].label.contains("Fable"));
         assert!(!panel.rows[1].label.contains("Fable"));
-        assert_eq!(panel.rows[0].opacity, 1.0);
-        assert_eq!(panel.rows[1].opacity, 1.0);
-        assert_eq!(panel.rows[2].opacity, 0.8);
+        assert!(!panel.rows[0].model);
+        assert!(!panel.rows[1].model);
+        assert!(panel.rows[2].model);
         assert!(panel.rows[2].label.starts_with("Limite sur "));
         assert!(panel.rows[2].label.ends_with(" Fable"));
         // A countdown is not a new 30h quota window: duration remains weekly.
