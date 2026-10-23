@@ -490,6 +490,34 @@ pub fn snapshot(app: &tauri::AppHandle) -> ClaudeSnapshot {
     snap
 }
 
+pub(crate) fn usage_snapshot(value: &Value, now: i64) -> ClaudeSnapshot {
+    let limits = &value["rate_limits"];
+    let data = RelayFile {
+        schema_version: 1,
+        received_at: now,
+        five_hour: crate::claude_cli::window(&limits["five_hour"]),
+        seven_day: crate::claude_cli::window(&limits["seven_day"]),
+    };
+    let mut snap = compute(true, true, FileState::Data(data), now);
+    if let Some(fable) = crate::claude_cli::fable_window(limits) {
+        let fable = metric(
+            "claude:weekly_fable",
+            "Limite hebdomadaire Fable",
+            SEVEN_DAY_SECS,
+            Some(&fable),
+            now,
+        );
+        if fable.availability == "available" {
+            snap.state = "ready";
+        }
+        snap.metrics.push(fable);
+    }
+    snap.message = "Quotas lus à la demande via Claude Code.".into();
+    snap.plan_type = plan_token(&value["subscription_type"]);
+    snap.extra_usage = extra_usage(&limits["extra_usage"]);
+    snap
+}
+
 fn refresh_live(app: &tauri::AppHandle) {
     let generation = GENERATION.load(Ordering::Acquire);
     let Some(executable) = crate::claude_cli::discover() else {
@@ -510,20 +538,7 @@ fn refresh_live(app: &tauri::AppHandle) {
     }
     let now = unix_now();
     let mut snap = match result {
-        Ok(value) if value["rate_limits_available"] == true => {
-            let limits = &value["rate_limits"];
-            let data = RelayFile {
-                schema_version: 1,
-                received_at: now,
-                five_hour: crate::claude_cli::window(&limits["five_hour"]),
-                seven_day: crate::claude_cli::window(&limits["seven_day"]),
-            };
-            let mut s = compute(true, true, FileState::Data(data), now);
-            s.message = "Quotas lus à la demande via Claude Code.".into();
-            s.plan_type = plan_token(&value["subscription_type"]);
-            s.extra_usage = extra_usage(&limits["extra_usage"]);
-            s
-        }
+        Ok(value) if value["rate_limits_available"] == true => usage_snapshot(&value, now),
         Ok(_) => {
             let mut s = compute(true, true, FileState::Missing, now);
             s.state = "error";
@@ -637,6 +652,68 @@ mod tests {
             five_hour: w(five),
             seven_day: w(seven),
         })
+    }
+
+    #[test]
+    fn fable_model_scoped_window_preserves_percentage_reset_and_old_quotas() {
+        let reset = iso(NOW + 3600).unwrap();
+        let payload = json!({"subscription_type":"max", "rate_limits": {
+            "five_hour":{"utilization":23.5,"resets_at":reset},
+            "seven_day":{"utilization":42,"resets_at":reset},
+            "model_scoped":[{"display_name":"Fable","utilization":99.6,"resets_at":reset}]
+        }});
+        let snap = usage_snapshot(&payload, NOW);
+        assert_eq!(snap.state, "ready");
+        assert_eq!(snap.metrics.len(), 3);
+        assert_eq!(snap.metrics[0].used_percent, Some(23.5));
+        assert_eq!(snap.metrics[1].used_percent, Some(42.0));
+        let fable = &snap.metrics[2];
+        assert_eq!(fable.id, "claude:weekly_fable");
+        assert_eq!(fable.label, "Limite hebdomadaire Fable");
+        assert_eq!(fable.used_percent, Some(99.6));
+        assert_eq!(fable.reset_at.as_deref(), Some(reset.as_str()));
+        assert_eq!(fable.period_duration_seconds, SEVEN_DAY_SECS);
+        assert!(!fable.exhausted);
+        let expired = usage_snapshot(&payload, NOW + 3600);
+        assert_eq!(expired.metrics[2].availability, "unavailable");
+        assert_eq!(expired.metrics[2].used_percent, None);
+    }
+
+    #[test]
+    fn fable_absent_null_invalid_or_other_model_never_fabricates_a_counter() {
+        for scoped in [
+            Value::Null,
+            json!([]),
+            json!({}),
+            json!([null]),
+            json!([{"display_name":"Fable","utilization":null}]),
+            json!([{"display_name":"Fable","utilization":-1}]),
+            json!([{"display_name":"Fable","utilization":101}]),
+            json!([{"display_name":"Opus","utilization":10}]),
+        ] {
+            let snap = usage_snapshot(&json!({"rate_limits":{"model_scoped":scoped}}), NOW);
+            assert_eq!(snap.metrics.len(), 2);
+        }
+        let old = usage_snapshot(
+            &json!({"rate_limits":{"five_hour":{"utilization":50}}}),
+            NOW,
+        );
+        assert_eq!(old.metrics.len(), 2);
+        assert_eq!(old.metrics[0].used_percent, Some(50.0));
+        assert_eq!(old.metrics[1].used_percent, None);
+        for (used, exhausted) in [(0, false), (100, true)] {
+            let snap = usage_snapshot(
+                &json!({"rate_limits":{"model_scoped":[
+                    {"display_name":"Fable","utilization":used,"resets_at":null}
+                ]}}),
+                NOW,
+            );
+            assert_eq!(snap.state, "ready");
+            assert_eq!(snap.metrics.len(), 3);
+            assert_eq!(snap.metrics[2].used_percent, Some(used as f64));
+            assert_eq!(snap.metrics[2].reset_at, None);
+            assert_eq!(snap.metrics[2].exhausted, exhausted);
+        }
     }
 
     #[test]
