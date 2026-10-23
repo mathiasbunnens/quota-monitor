@@ -68,16 +68,23 @@ const moduleSource = compiled.replaceAll('"react/jsx-runtime"', JSON.stringify(i
   .replaceAll('"react"', JSON.stringify(import.meta.resolve("react")));
 const { default: ProviderCard } = await import("data:text/javascript;base64," + Buffer.from(moduleSource).toString("base64"));
 
-test("only the Fable word receives 0.8 opacity in real row markup", () => {
+test("the whole Fable progress row receives 0.8 opacity, other rows stay opaque", () => {
   const input = snapshot([metric("claude:five_hour", 20), metric("claude:weekly_fable", 30)]);
-  const render = (enabled, compact = false) => renderToStaticMarkup(createElement(ProviderCard, {
-    name: "Claude", rows: claudeRows(input, enabled), compact,
+  const render = (enabled, compact = false, data = input) => renderToStaticMarkup(createElement(ProviderCard, {
+    name: "Claude", rows: claudeRows(data, enabled), compact,
   }));
   const html = render(true);
-  assert.match(html, /Limite hebdomadaire <span class="provider-row__model" style="opacity:0.8">Fable<\/span>/);
+  const rows = html.split('<div class="provider-row"').slice(1);
+  assert.equal(rows.length, 2);
+  assert.doesNotMatch(rows[0], /opacity:/);
+  // One wrapper covers label, value, track/fill and reset of the Fable row.
+  assert.match(rows[1], /^ style="opacity:0.8"><div class="dashboard__quota-heading"><span>Limite hebdomadaire Fable<\/span><strong>/);
+  assert.match(rows[1], /role="progressbar" aria-label="Limite hebdomadaire Fable"/);
+  assert.match(rows[1], /provider-row__reset/);
   assert.equal((html.match(/opacity:/g) || []).length, 1);
-  assert.match(html, /aria-label="Limite hebdomadaire Fable"/);
   assert.doesNotMatch(render(false), /Fable|opacity:/);
-  assert.doesNotMatch(render(true, true), /provider-row__model/); // Secondary rows remain in details.
+  assert.doesNotMatch(render(true, true), /Fable|opacity:/); // Secondary rows remain in details.
+  const fableOnly = render(true, true, snapshot([metric("claude:weekly_fable", 30)]));
+  assert.match(fableOnly, /<div class="provider-row" style="opacity:0.8">/);
   assert.doesNotMatch(html, /30h/);
 });

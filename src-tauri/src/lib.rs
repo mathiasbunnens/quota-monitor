@@ -5,6 +5,10 @@ mod codex;
 mod indicator;
 mod ntfy;
 mod prefs;
+#[cfg(target_os = "macos")]
+mod settings_smoke;
+#[cfg(target_os = "macos")]
+pub use settings_smoke::settings_ui_smoke;
 #[cfg(any(not(target_os = "macos"), test))]
 mod tray_percentage;
 
@@ -543,20 +547,27 @@ fn request_quota_refresh(app: tauri::AppHandle) {
     }
 }
 
-fn show_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let window = if let Some(window) = app.get_webview_window("settings") {
-        window
-    } else {
-        tauri::WebviewWindowBuilder::new(
-            app,
-            "settings",
-            tauri::WebviewUrl::App("index.html".into()),
-        )
+/// Settings window as opened by the menu (shared with the settings smoke).
+fn settings_window_builder(
+    app: &tauri::AppHandle,
+) -> tauri::WebviewWindowBuilder<'_, tauri::Wry, tauri::AppHandle> {
+    tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App("index.html".into()))
         .title("Réglages de Quota Monitor")
         .inner_size(600.0, 520.0)
         .min_inner_size(520.0, 240.0)
         .center()
-        .build()?
+}
+
+/// Application context; generated once so assets are embedded a single time.
+fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
+fn show_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let window = if let Some(window) = app.get_webview_window("settings") {
+        window
+    } else {
+        settings_window_builder(app).build()?
     };
     window.show()?;
     window.unminimize()?;
@@ -690,6 +701,7 @@ enum Tone {
 #[cfg(target_os = "macos")]
 #[derive(Clone, Debug, PartialEq)]
 struct PanelRow {
+    opacity: f64,
     label: String,
     remaining: Option<u32>,
     value: String,
@@ -788,6 +800,7 @@ fn codex_panel(
             let short = rank(p) == 0;
             let remaining = p.remaining.min(100);
             PanelRow {
+                opacity: 1.0,
                 label: match rank(p) {
                     0 => limit_label(Some(&p.reset_at), "Limite 5 heures"),
                     1 => limit_label(Some(&p.reset_at), "Limite hebdomadaire"),
@@ -841,6 +854,11 @@ fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
                 "—"
             };
             PanelRow {
+                opacity: if m.id == "claude:weekly_fable" {
+                    0.8
+                } else {
+                    1.0
+                },
                 label: if m.id == "claude:weekly_fable" && remaining.is_some() {
                     format!(
                         "{} Fable",
@@ -1080,33 +1098,30 @@ fn make_panel_view(
 
         let mut row_top = top + 8.0;
         for row in &provider.rows {
-            let low = row.remaining.is_some_and(|p| p <= 20);
-            let fable_label = if provider.name == "Claude" {
-                row.label.strip_suffix(" Fable")
-            } else {
-                None
+            // Composite the complete row once: track, fill, value, label and reset.
+            let group = NSView::initWithFrame(
+                mtm.alloc(),
+                frame(
+                    0.0,
+                    height - row_top - PANEL_ROW_HEIGHT,
+                    PANEL_WIDTH,
+                    PANEL_ROW_HEIGHT,
+                ),
+            );
+            group.setAlphaValue(row.opacity);
+            root.addSubview(&group);
+            let place = |view: &NSView, x: f64, top: f64, w: f64, h: f64| {
+                view.setFrame(frame(x, PANEL_ROW_HEIGHT - (top - row_top) - h, w, h));
+                group.addSubview(view);
             };
+            let low = row.remaining.is_some_and(|p| p <= 20);
             let label = panel_label(
                 mtm,
-                fable_label.unwrap_or(&row.label),
+                &row.label,
                 &NSFont::systemFontOfSize_weight(12.0, regular),
                 &NSColor::labelColor(),
             );
-            if fable_label.is_some() {
-                label.sizeToFit();
-                let width = label.frame().size.width.min(140.0);
-                place(&label, 20.0, row_top + 3.0, width, 16.0);
-                let model = panel_label(
-                    mtm,
-                    "Fable",
-                    &NSFont::systemFontOfSize_weight(12.0, regular),
-                    &NSColor::labelColor(),
-                );
-                model.setAlphaValue(0.8);
-                place(&model, 24.0 + width, row_top + 3.0, 36.0, 16.0);
-            } else {
-                place(&label, 20.0, row_top + 3.0, 180.0, 16.0);
-            }
+            place(&label, 20.0, row_top + 3.0, 180.0, 16.0);
             let value_color = if low {
                 NSColor::systemRedColor()
             } else {
@@ -1528,15 +1543,24 @@ pub fn quota_ui_smoke(directory: &str) {
         badge: Some("pro".into()),
         rows: vec![
             PanelRow {
+                opacity: 1.0,
                 label: limit_label(Some(&soon), "Limite 5 heures"),
                 remaining: Some(12),
                 value: "12 %".into(),
                 reset: reset_phrase(&soon, true).unwrap(),
             },
             PanelRow {
+                opacity: 1.0,
                 label: limit_label(Some(&week), "Limite hebdomadaire"),
                 remaining: Some(86),
                 value: "86 %".into(),
+                reset: reset_phrase(&week, false).unwrap(),
+            },
+            PanelRow {
+                opacity: 0.8,
+                label: format!("{} Fable", limit_label(Some(&week), "Limite hebdomadaire")),
+                remaining: Some(63),
+                value: "63 %".into(),
                 reset: reset_phrase(&week, false).unwrap(),
             },
         ],
@@ -1974,7 +1998,7 @@ pub fn run() {
             claude::start_watcher(app.handle().clone());
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("error while building tauri application")
         .run(|app, event| {
             // Closing the Settings/updater window must not quit the menu-bar app.
@@ -2107,6 +2131,9 @@ mod tests {
         assert_eq!(panel.rows.len(), 3);
         assert!(!panel.rows[0].label.contains("Fable"));
         assert!(!panel.rows[1].label.contains("Fable"));
+        assert_eq!(panel.rows[0].opacity, 1.0);
+        assert_eq!(panel.rows[1].opacity, 1.0);
+        assert_eq!(panel.rows[2].opacity, 0.8);
         assert!(panel.rows[2].label.starts_with("Limite sur "));
         assert!(panel.rows[2].label.ends_with(" Fable"));
         // A countdown is not a new 30h quota window: duration remains weekly.
