@@ -1,6 +1,6 @@
 [package]
 name = "chatgpt-quota-monitor"
-version = "3.0.3"
+version = "3.0.4"
 description = "Desktop tray app for Codex usage quotas on macOS, Windows and Linux"
 authors = ["Mathias Bunnens"]
 edition = "2021"
