@@ -23,9 +23,9 @@
   &__quota-heading small { font-size: 11px; font-weight: 400; letter-spacing: 0; color: var(--desktop-muted); }
   &__quota > p { margin: 12px 0 0; color: var(--desktop-muted); font-size: 11px; line-height: 1.5; }
   &__progress { height: 7px; margin-top: 14px; background: var(--desktop-border); border-radius: 8px; overflow: hidden; }
-  &__progress span { display: block; height: 100%; border-radius: inherit; background: #30a46c; transition: width 250ms ease; }
-  &__progress--warning span { background: #d68b12; }
-  &__progress--low span { background: #e5484d; }
+  &__progress span { display: block; height: 100%; border-radius: inherit; background: var(--quota-fill, #30a46c); transition: width 250ms ease; }
+  &__progress--warning { --quota-fill: #d68b12; }
+  &__progress--low { --quota-fill: #e5484d; }
   &__footer { color: var(--desktop-muted); font-size: 11px; }
   &__footer button { color: var(--desktop-accent); }
 }
@@ -75,6 +75,8 @@
 .provider-row + .provider-row { margin-top: 14px; }
 .provider-row__missing { font-size: 13px !important; font-weight: 500; color: var(--desktop-muted); letter-spacing: 0 !important; }
 .provider-row__reset { margin: 8px 0 0; color: var(--desktop-muted); font-size: 11px; line-height: 1.5; }
-/* Model-scoped rows (Fable): teal fill while healthy (warning/low keep their state colours) and a matching dot. */
-.provider-row--model .dashboard__progress--healthy span { background: var(--model-accent); }
-.provider-row__model-dot { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--model-accent); vertical-align: 1px; }
+/* The model name and fill share one state colour, without dimming or a dot. */
+.provider-row--model.provider-row--healthy { --quota-fill: var(--model-accent); }
+.provider-row--warning { --quota-fill: #d68b12; }
+.provider-row--low { --quota-fill: #e5484d; }
+.provider-row__model-label { font-size: 11px; font-weight: 400; color: var(--quota-fill); }

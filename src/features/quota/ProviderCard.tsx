@@ -19,21 +19,23 @@ function level(remaining: number) {
   return remaining <= 20 ? "low" : remaining <= 40 ? "warning" : "healthy";
 }
 
-/** Model-specific rows (Fable) keep full opacity; a model tint and dot set them apart. */
+/** Model-specific rows keep full opacity; only the model name gets a smaller, bar-coloured label. */
 function rowClass(row: QuotaRow) {
   return "provider-row" + (row.modelLabel ? " provider-row--model" : "");
 }
 
 function Row({ row, showReset = true }: { row: QuotaRow; showReset?: boolean }) {
   const known = row.remaining !== null;
-  return <div className={rowClass(row)}>
+  const state = known ? level(row.remaining as number) : "low";
+  const modelSuffix = row.modelLabel && row.label.endsWith(" " + row.modelLabel) ? row.modelLabel : null;
+  return <div className={rowClass(row) + " provider-row--" + state}>
     <div className="dashboard__quota-heading">
-      <span>{row.modelLabel && <i className="provider-row__model-dot" aria-hidden="true" />}{row.label}</span>
+      <span>{modelSuffix ? <>{row.label.slice(0, -modelSuffix.length)}<span className="provider-row__model-label">{modelSuffix}</span></> : row.label}</span>
       {known
         ? <strong>{row.exhausted ? "Épuisé" : <>{row.remaining} % <small>restants</small></>}</strong>
         : <strong className="provider-row__missing">{row.missing}</strong>}
     </div>
-    <div className={"dashboard__progress dashboard__progress--" + (known ? level(row.remaining as number) : "low")}
+    <div className={"dashboard__progress dashboard__progress--" + state}
       role="progressbar" aria-label={row.label} aria-valuemin={0} aria-valuemax={100}
       aria-valuenow={known ? (row.remaining as number) : undefined}
       aria-valuetext={known ? undefined : row.missing}>

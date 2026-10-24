@@ -703,7 +703,7 @@ enum Tone {
 #[cfg(target_os = "macos")]
 #[derive(Clone, Debug, PartialEq)]
 struct PanelRow {
-    /// Model-scoped row (Fable): teal fill while healthy and a leading dot, full opacity.
+    /// Model-scoped row (Fable): smaller model name matching the fill, full opacity.
     model: bool,
     label: String,
     remaining: Option<u32>,
@@ -995,6 +995,34 @@ fn panel_label(
 }
 
 #[cfg(target_os = "macos")]
+fn style_model_label(label: &NSTextField, row: &PanelRow) {
+    use objc2::AnyThread;
+    use objc2_app_kit::{NSFontAttributeName, NSForegroundColorAttributeName};
+    use objc2_foundation::{NSDictionary, NSMutableAttributedString, NSRange};
+
+    let Some(prefix) = row.label.strip_suffix(" Fable") else {
+        return;
+    };
+    let font = NSFont::systemFontOfSize(10.5);
+    // Use the exact fill function, including its continuous warning transitions.
+    let color = quota_color(row.remaining.unwrap_or(0), true);
+    let keys = unsafe { [NSFontAttributeName, NSForegroundColorAttributeName] };
+    let values: [&AnyObject; 2] = [&font, &color];
+    let attributes = NSDictionary::from_slices(&keys, &values);
+    let text = NSMutableAttributedString::initWithAttributedString(
+        NSMutableAttributedString::alloc(),
+        &label.attributedStringValue(),
+    );
+    unsafe {
+        text.addAttributes_range(
+            &attributes,
+            NSRange::new(prefix.encode_utf16().count() + 1, "Fable".len()),
+        );
+    }
+    label.setAttributedStringValue(&text);
+}
+
+#[cfg(target_os = "macos")]
 fn rounded_box(mtm: MainThreadMarker, color: &NSColor, radius: f64) -> Retained<NSBox> {
     let shape = NSBox::initWithFrame(mtm.alloc(), frame(0.0, 0.0, 1.0, 1.0));
     shape.setBoxType(NSBoxType::Custom);
@@ -1120,13 +1148,9 @@ fn make_panel_view(
                 &NSColor::labelColor(),
             );
             if row.model {
-                // Same 6 pt teal dot as the React card, label nudged right of it.
-                let dot = rounded_box(mtm, &NSColor::systemTealColor(), 3.0);
-                place(&dot, 22.0, row_top + 8.0, 6.0, 6.0);
-                place(&label, 32.0, row_top + 3.0, 168.0, 16.0);
-            } else {
-                place(&label, 20.0, row_top + 3.0, 180.0, 16.0);
+                style_model_label(&label, row);
             }
+            place(&label, 20.0, row_top + 3.0, 180.0, 16.0);
             let value_color = if low {
                 NSColor::systemRedColor()
             } else {

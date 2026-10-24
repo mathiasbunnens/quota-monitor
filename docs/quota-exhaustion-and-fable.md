@@ -63,10 +63,10 @@ crossing on reactivation. The first valid enabled sample establishes a silent
 baseline; subsequent real below-100 → 100 transitions notify normally. Existing
 ledger entries without the new muted flag remain readable.
 
-The Fable row is fully opaque (no dimming); it is set apart in React and in the
-native macOS panel by a small teal dot before its label and a teal bar fill while
-healthy (system teal, light/dark variants) — warning and low states keep the
-regular orange/red so alert colours are never altered. The Settings switch keeps
+The Fable row is fully opaque (no dimming or dot); only the word Fable is smaller
+(React 11px, native 10.5pt) and uses the exact same dynamic colour as its bar,
+including warning/low states and light/dark variants. The healthy fill remains
+teal; other quotas and alert colours are unchanged. The Settings switch keeps
 its accessible label without a help sentence. The native countdown label now
 retains that word instead of dropping it
 when a reset date is available. Its countdown (potentially 5h or 30h remaining)

@@ -68,7 +68,7 @@ const moduleSource = compiled.replaceAll('"react/jsx-runtime"', JSON.stringify(i
   .replaceAll('"react"', JSON.stringify(import.meta.resolve("react")));
 const { default: ProviderCard } = await import("data:text/javascript;base64," + Buffer.from(moduleSource).toString("base64"));
 
-test("Fable row is fully opaque and marked by a model class and a decorative dot only", () => {
+test("Fable alone is smaller and bar-coloured, without a dot or dimming", () => {
   const input = snapshot([metric("claude:five_hour", 20), metric("claude:weekly_fable", 50)]);
   const render = (enabled, compact = false, data = input) => renderToStaticMarkup(createElement(ProviderCard, {
     name: "Claude", rows: claudeRows(data, enabled), compact,
@@ -77,26 +77,39 @@ test("Fable row is fully opaque and marked by a model class and a decorative dot
   assert.doesNotMatch(html, /opacity/);
   const rows = html.split('<div class="provider-row').slice(1);
   assert.equal(rows.length, 2);
-  assert.match(rows[0], /^"><div class="dashboard__quota-heading"><span>Limite 5 heures<\/span>/);
+  assert.match(rows[0], /^ provider-row--healthy"><div class="dashboard__quota-heading"><span>Limite 5 heures<\/span>/);
   assert.doesNotMatch(rows[0], /model/);
-  assert.match(rows[1], /^ provider-row--model"><div class="dashboard__quota-heading"><span><i class="provider-row__model-dot" aria-hidden="true"><\/i>Limite hebdomadaire Fable<\/span><strong>/);
+  assert.match(rows[1], /^ provider-row--model provider-row--healthy"><div class="dashboard__quota-heading"><span>Limite hebdomadaire <span class="provider-row__model-label">Fable<\/span><\/span><strong>/);
   // Accessible name and state classes are unchanged: the tint only overrides the healthy fill in CSS.
   assert.match(rows[1], /class="dashboard__progress dashboard__progress--healthy" role="progressbar" aria-label="Limite hebdomadaire Fable"/);
   assert.match(rows[1], /provider-row__reset/);
-  assert.equal((html.match(/provider-row__model-dot/g) || []).length, 1);
+  assert.equal((html.match(/provider-row__model-label/g) || []).length, 1);
+  assert.doesNotMatch(html, /model-dot|<i|•/);
   const low = render(true, false, snapshot([metric("claude:weekly_fable", 90)]));
   assert.match(low, /provider-row--model.*dashboard__progress--low/);
   assert.doesNotMatch(render(false), /Fable|model/);
   assert.doesNotMatch(render(true, true), /Fable|model/); // Secondary rows remain in details.
   const fableOnly = render(true, true, snapshot([metric("claude:weekly_fable", 30)]));
-  assert.match(fableOnly, /<div class="provider-row provider-row--model">/);
+  assert.match(fableOnly, /<div class="provider-row provider-row--model provider-row--healthy">/);
+  for (const [used, state] of [[0, "healthy"], [70, "warning"], [90, "low"], [100, "low"], [null, "low"]]) {
+    const output = render(true, false, snapshot([metric("claude:weekly_fable", used)]));
+    assert.match(output, new RegExp(`provider-row--model provider-row--${state}`));
+    assert.match(output, new RegExp(`dashboard__progress--${state}`));
+    assert.match(output, /<span class="provider-row__model-label">Fable<\/span>/);
+  }
   assert.doesNotMatch(html, /30h/);
 });
 
-test("model tint overrides only the healthy fill and has light and dark values", () => {
+test("model label and bar share the state token in both themes", () => {
   const css = fs.readFileSync(new URL("../src/pages/Dashboard/dashboard.scss", import.meta.url), "utf8");
-  assert.match(css, /\.provider-row--model \.dashboard__progress--healthy span \{ background: var\(--model-accent\); \}/);
-  assert.doesNotMatch(css, /provider-row--model \.dashboard__progress--(warning|low)/);
+  assert.match(css, /\.provider-row--model\.provider-row--healthy \{ --quota-fill: var\(--model-accent\); \}/);
+  assert.match(css, /background: var\(--quota-fill, #30a46c\)/);
+  assert.match(css, /\.provider-row__model-label \{ font-size: 11px; font-weight: 400; color: var\(--quota-fill\); \}/);
+  for (const [state, colour] of [["warning", "#d68b12"], ["low", "#e5484d"]]) {
+    assert.ok(css.includes(`.provider-row--${state} { --quota-fill: ${colour}; }`));
+    assert.ok(css.includes(`&__progress--${state} { --quota-fill: ${colour}; }`));
+  }
+  assert.doesNotMatch(css, /model-dot/);
   assert.equal((css.match(/--model-accent: #[0-9a-f]{6};/g) || []).length, 2);
   assert.doesNotMatch(css, /provider-row[^{]*\{[^}]*opacity/);
 });
