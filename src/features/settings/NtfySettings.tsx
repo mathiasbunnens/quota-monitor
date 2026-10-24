@@ -15,7 +15,7 @@ export default function NtfySettings({ config, onSave }: {
     try {
       if (test) {
         await invoke("test_ntfy", { config: draft });
-        setMessage("Notification test acceptée par le serveur. Vérifiez votre téléphone.");
+        setMessage("Test accepté par le serveur. Vérifiez votre téléphone.");
       } else if (await onSave(draft)) {
         setMessage("Réglages enregistrés.");
       }
@@ -23,16 +23,15 @@ export default function NtfySettings({ config, onSave }: {
     finally { setBusy(false); }
   };
   return <section className="prefs-group" aria-labelledby="ntfy-heading">
-    <h2 id="ntfy-heading">Notifications téléphone · ntfy</h2>
-    <p>Alerte uniquement au passage d’une limite Codex ou Claude à 100 % réellement consommé (0 % restant).
-      Une limite déjà épuisée à sa première observation ne déclenche pas d’alerte.</p>
+    <h2 id="ntfy-heading">Alertes téléphone · ntfy</h2>
+    <p>Codex et Claude : alerte à 0 % restant. L’application doit rester ouverte et connectée.</p>
     <fieldset disabled={busy} className="ntfy-fields">
       <label><input type="checkbox" checked={draft.enabled}
-        onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} /> Activer les alertes automatiques</label>
-      <label>URL du serveur ntfy<input type="url" value={draft.serverUrl} autoComplete="off" spellCheck={false}
+        onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} /> Alertes automatiques</label>
+      <label>Serveur ntfy<input type="url" value={draft.serverUrl} autoComplete="off" spellCheck={false}
         onChange={(e) => setDraft({ ...draft, serverUrl: e.target.value })} /></label>
       <label>Topic<input type="text" value={draft.topic} autoComplete="off" spellCheck={false}
-        placeholder="Un nom long, aléatoire et imprévisible" maxLength={128}
+        aria-describedby="ntfy-privacy" placeholder="Nom long et imprévisible" maxLength={128}
         onChange={(e) => setDraft({ ...draft, topic: e.target.value })} /></label>
       <div className="prefs-actions">
         <button type="button" className="primary" onClick={() => void act(false)}>Enregistrer</button>
@@ -42,13 +41,16 @@ export default function NtfySettings({ config, onSave }: {
       </div>
     </fieldset>
     {message && <p className={failed ? "prefs-alert" : "prefs-state"} role={failed ? "alert" : "status"}>{message}</p>}
-    <p>Installez ntfy sur votre téléphone puis abonnez-vous au même topic sur le même serveur.
-      Autorisez les notifications dans l’application et les réglages du téléphone.</p>
-    <p>Sans authentification, le topic est public : toute personne qui connaît son nom peut lire ou publier.
-      Choisissez un nom imprévisible et ne le partagez pas. HTTPS est recommandé ; aucune authentification n’est envoyée.</p>
-    <p className="prefs-footnote">Le test utilise les champs ci-dessus sans les enregistrer, même si les alertes sont désactivées.
-      L’application doit rester ouverte et connectée. Aucun rappel tant que la limite reste épuisée, même après redémarrage.
-      Les limites atteintes au même rafraîchissement sont regroupées. Réarmement après réinitialisation ou retour réel sous 100 % ;
-      en cas d’erreur réseau, pas de nouvel essai automatique avant réarmement.</p>
+    <p id="ntfy-privacy" className="prefs-footnote">Topic public : son nom permet de lire et publier. Gardez-le secret ; préférez HTTPS.</p>
+    <details className="prefs-disclosure">
+      <summary>Configurer ntfy et comprendre les alertes</summary>
+      <p>Sur le téléphone, installez ntfy, abonnez-vous à ce serveur et ce topic, puis autorisez les notifications
+        dans ntfy et les réglages du téléphone. Aucune authentification n’est envoyée.</p>
+      <p>Le test utilise les champs sans les enregistrer, même si les alertes sont désactivées.</p>
+      <p>Une limite déjà épuisée à la première lecture ne déclenche pas d’alerte. Aucun rappel tant qu’elle reste
+        épuisée, même après redémarrage. Les limites atteintes ensemble sont regroupées.</p>
+      <p>Nouvelle alerte après réinitialisation ou retour sous 100 % consommé. Après une erreur réseau,
+        aucun nouvel essai automatique avant ce réarmement.</p>
+    </details>
   </section>;
 }

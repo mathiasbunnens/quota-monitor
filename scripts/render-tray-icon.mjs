@@ -2,7 +2,9 @@ import { deflateSync } from "node:zlib";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const size = 44;
+// 18pt at 2x, matching mascot_image() in lib.rs. The app/Dock PNG is
+// deliberately separate: this is an optical, transparent template glyph.
+const size = 36;
 const samplesPerAxis = 4;
 
 function circle(x, y, centerX, centerY, radius) {
@@ -15,16 +17,23 @@ function roundedRect(x, y, left, top, width, height, radius) {
   return (x - nearestX) ** 2 + (y - nearestY) ** 2 <= radius ** 2;
 }
 
-function ellipse(x, y, centerX, centerY, radiusX, radiusY) {
-  return ((x - centerX) / radiusX) ** 2 + ((y - centerY) / radiusY) ** 2 <= 1;
-}
-
 function mascotContains(x, y) {
-  const antenna = circle(x, y, 22, 4, 3) || roundedRect(x, y, 20.5, 6, 3, 7, 1.5);
-  const eyes = ellipse(x, y, 17, 23, 2.4, 3.4) || ellipse(x, y, 27, 23, 2.4, 3.4);
-  const head = roundedRect(x, y, 6, 11, 32, 23, 10) && !eyes;
-  const body = roundedRect(x, y, 10, 29, 24, 13, 6) || (x >= 10 && x <= 34 && y >= 29 && y <= 35);
-  return antenna || head || body;
+  // Reconstructed from assets/app-icon.png, not the retired two-eyed robot.
+  // Work in a 44-unit space so the SVG and sampled bitmap share geometry.
+  const antenna = circle(x, y, 22, 4, 2.5) || roundedRect(x, y, 21, 5, 2, 9, 1);
+  const dome = circle(x, y, 22, 23, 12) && y <= 23;
+  const body = roundedRect(x, y, 10, 21, 24, 18, 1.5);
+  const feet = roundedRect(x, y, 13, 36, 7, 6, 1.5) || roundedRect(x, y, 24, 36, 7, 6, 1.5);
+  const eye = circle(x, y, 22, 23, 7.5);
+  const radius = Math.hypot(x - 22, y - 23);
+  const angle = (Math.atan2(x - 22, 23 - y) + 2 * Math.PI) % (2 * Math.PI);
+  const gauge = (radius >= 3.6 && radius <= 6 && angle <= 4.4)
+    || circle(x, y, 22, 18.2, 1.2)
+    || circle(x, y, 22 + 4.8 * Math.sin(4.4), 23 - 4.8 * Math.cos(4.4), 1.2);
+  const pupil = circle(x, y, 22, 23, 1.6);
+  const mouth = roundedRect(x, y, 16, 33, 12, 1.5, 0.75)
+    || roundedRect(x, y, 17.5, 36, 9, 1.5, 0.75);
+  return antenna || ((dome || body || feet) && !mouth && (!eye || gauge || pupil));
 }
 
 const pixels = Buffer.alloc(size * size * 4);
@@ -33,8 +42,8 @@ for (let pixelY = 0; pixelY < size; pixelY += 1) {
     let coveredSamples = 0;
     for (let sampleY = 0; sampleY < samplesPerAxis; sampleY += 1) {
       for (let sampleX = 0; sampleX < samplesPerAxis; sampleX += 1) {
-        const x = pixelX + (sampleX + 0.5) / samplesPerAxis;
-        const y = pixelY + (sampleY + 0.5) / samplesPerAxis;
+        const x = (pixelX + (sampleX + 0.5) / samplesPerAxis) * 44 / size;
+        const y = (pixelY + (sampleY + 0.5) / samplesPerAxis) * 44 / size;
         if (mascotContains(x, y)) coveredSamples += 1;
       }
     }

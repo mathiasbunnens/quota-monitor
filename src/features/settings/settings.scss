@@ -99,6 +99,15 @@ html:has(.prefs), html:has(.prefs) body { background: var(--desktop-bg); }
 }
 .prefs .codex-connection { margin-top: 10px; padding-top: 10px; font-size: 12px; h2 { font-size: 12px; margin: 0; } }
 
+.prefs #panel-notifications { overflow-wrap: anywhere; }
+@media (max-width: 440px) {
+  .prefs-toolbar {
+    gap: 2px; padding-inline: 6px;
+    button[role="tab"] { min-width: 0; flex: 1; padding-inline: 3px; font-size: 10px; }
+  }
+  .prefs-body { padding-inline: 12px; }
+}
+
 // Reset credits lives in its own group: drop the dashboard card chrome.
 .prefs .reset-credits {
   margin: 0; padding: 0; border: 0; background: none; box-shadow: none;

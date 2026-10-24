@@ -1,13 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44" role="img" aria-label="Mascotte Quota Monitor">
-  <defs>
-    <mask id="face-cutouts">
-      <rect width="44" height="44" fill="white"/>
-      <ellipse cx="17" cy="23" rx="2.4" ry="3.4" fill="black"/>
-      <ellipse cx="27" cy="23" rx="2.4" ry="3.4" fill="black"/>
-    </mask>
-  </defs>
-  <circle cx="22" cy="4" r="3" fill="black"/>
-  <rect x="20.5" y="6" width="3" height="7" rx="1.5" fill="black"/>
-  <rect x="6" y="11" width="32" height="23" rx="10" fill="black" mask="url(#face-cutouts)"/>
-  <path d="M10 31h24v5a6 6 0 0 1-6 6H16a6 6 0 0 1-6-6v-5Z" fill="black"/>
+  <!-- Optical monochrome reconstruction of assets/app-icon.png.
+       Geometry also lives in scripts/render-tray-icon.mjs (runtime bitmap). -->
+  <defs><mask id="cutouts">
+    <rect width="44" height="44" fill="white"/>
+    <circle cx="22" cy="23" r="7.5" fill="black"/>
+    <rect x="16" y="33" width="12" height="1.5" rx=".75" fill="black"/>
+    <rect x="17.5" y="36" width="9" height="1.5" rx=".75" fill="black"/>
+  </mask></defs>
+  <g fill="black">
+    <circle cx="22" cy="4" r="2.5"/>
+    <rect x="21" y="5" width="2" height="9" rx="1"/>
+    <g mask="url(#cutouts)">
+      <path d="M10 23a12 12 0 0 1 24 0Z"/>
+      <rect x="10" y="21" width="24" height="18" rx="1.5"/>
+      <rect x="13" y="36" width="7" height="6" rx="1.5"/>
+      <rect x="24" y="36" width="7" height="6" rx="1.5"/>
+    </g>
+    <path d="M22 18.2a4.8 4.8 0 1 1-4.568 6.275" fill="none" stroke="black" stroke-width="2.4" stroke-linecap="round"/>
+    <circle cx="22" cy="23" r="1.6"/>
+  </g>
 </svg>

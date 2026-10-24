@@ -1,0 +1,55 @@
+// Run by importing this module in settings.html; all IPC is fixture-only.
+export async function checkNotifications() {
+  const f = window.settingsFixture;
+  const wait = () => new Promise(resolve => setTimeout(resolve, 120));
+  const assert = (ok, message) => { if (!ok) throw new Error(message); };
+  const tab = document.getElementById('tab-notifications');
+  tab.click(); await wait();
+  const panel = document.getElementById('panel-notifications');
+  const button = text => [...panel.querySelectorAll('button')].find(b => b.textContent.includes(text));
+  const topic = panel.querySelector('input[type=text]');
+  const server = panel.querySelector('input[type=url]');
+  const enabled = panel.querySelector('input[type=checkbox]');
+  const set = async (input, value) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true })); await wait();
+  };
+  const details = panel.querySelector('details');
+  assert(!details.open, 'Help should start closed');
+  assert(button('Envoyer un test').disabled, 'Empty topic must disable test');
+  for (const input of [topic, server, enabled]) assert(input.labels.length, 'Input needs a label');
+  assert(topic.getAttribute('aria-describedby') === 'ntfy-privacy', 'Topic privacy must be associated');
+  assert(panel.innerText.includes('0 % restant'), 'Exhaustion threshold missing');
+  assert(panel.innerText.includes('Topic public'), 'Security warning hidden');
+  await set(topic, 'offline-draft');
+  await set(server, 'https://fixture.invalid');
+  assert(!enabled.checked, 'Default alert state changed');
+  f.delay(350);
+  button('Envoyer un test').click(); await wait();
+  assert(panel.querySelector('fieldset').disabled, 'Busy requests must disable controls');
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert(panel.querySelector('[role=status]').textContent.includes('accepté'), 'Test acknowledgement missing');
+  assert(!f.calls.some(c => c.command === 'set_preferences'), 'Test must not save the draft');
+  const test = f.calls.findLast(c => c.command === 'test_ntfy');
+  assert(test.args.config.topic === 'offline-draft' && !test.args.config.enabled, 'Test must use disabled unsaved draft');
+  await new Promise(resolve => setTimeout(resolve, 2100));
+  assert(topic.value === 'offline-draft', 'Polling overwrote unsaved draft');
+  f.delay(0); f.fail('test_ntfy'); button('Envoyer un test').click(); await wait();
+  assert(panel.querySelector('[role=alert]')?.textContent.includes('request failed'), 'Test errors must remain visible');
+  f.fail('set_preferences'); button('Enregistrer').click(); await wait();
+  assert(document.querySelector('[role=alert]')?.textContent.includes('request failed'), 'Save errors must remain visible');
+  assert(f.preferences().ntfy.topic === '', 'Failed save mutated preferences');
+  f.fail(null); enabled.click(); await wait(); button('Enregistrer').click(); await wait();
+  assert(f.preferences().ntfy.enabled && f.preferences().ntfy.topic === 'offline-draft', 'Save lost fields');
+  assert(f.preferences().indicator === 'both' && !f.preferences().codexEnabled, 'Save changed other preferences');
+  assert(panel.querySelector('[role=status]').textContent.includes('enregistrés'), 'Save status missing');
+  details.querySelector('summary').click(); await wait();
+  assert(details.open && panel.innerText.includes('réglages du téléphone'), 'Permission/setup help unavailable');
+  assert(panel.innerText.includes('aucun nouvel essai automatique'), 'Retry behavior help missing');
+  const heightWithHelp = document.querySelector('main').getBoundingClientRect().height;
+  details.querySelector('summary').click(); await wait();
+  assert(document.querySelector('main').getBoundingClientRect().height < heightWithHelp, 'Disclosure does not shrink layout');
+  assert(document.documentElement.scrollWidth <= innerWidth, 'Horizontal overflow');
+  assert(f.calls.some(c => c.command === 'fit_settings_window'), 'No intrinsic sizing request');
+  return { passed: true, commands: f.calls.filter(c => ['test_ntfy', 'set_preferences'].includes(c.command)), viewport: [innerWidth, innerHeight], heightWithHelp };
+}

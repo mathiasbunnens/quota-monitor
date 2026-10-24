@@ -30,3 +30,36 @@ exercised. The harness is outside `src/` and is not a production build entry.
 Dependency-free test runner (uses existing React/TypeScript packages):
 
     node --test scripts/update-popup.test.mjs scripts/app-icon.test.mjs scripts/quota-providers.test.mjs
+
+## Notifications and menu template
+
+Open `http://127.0.0.1:1437/tests/renderer/settings.html`, then run:
+
+    await (await import('./notifications-checks.js')).checkNotifications()
+
+This mounts the real Settings window, including its polling and intrinsic fit
+observer. All IPC is intercepted; the fixture uses `.invalid` endpoints, never
+reads real preferences and never sends notifications. Check at 480px light and
+360px dark, with reduced motion. It exercises disabled/enabled drafts, test vs
+save payloads, in-flight locking, rejected test/save, polling-safe drafts,
+associated labels, visible privacy/threshold information, disclosure and overflow.
+Use Tab/Enter on the help summary and scroll its expanded content in a short
+viewport. `window.settingsFixture.fail('test_ntfy', 'long error…')` can exercise
+long error wrapping; `fail(null)` clears it. Browser fit calls do not resize a
+native window and are not evidence of native WebView sizing.
+
+Run all structural/render tests with `node --test scripts/*.test.mjs`.
+On macOS, an optional isolated native child verifies AppKit template rendering:
+
+    swift tests/native/tray-template.swift src-tauri/icons/mascot-menu.png dist-local/evidence
+
+It creates and removes only its own NSStatusItem, captures light/dark at 1x/2x,
+and does not start Tauri, providers, an updater or the installed application.
+This is an AppKit smoke test, not an installed application acceptance test.
+
+The optical SVG/generator reconstruct the approved single-eye PNG mascot;
+the canonical app artwork and bundle icons must remain untouched. `npm run
+icon:tray` writes the 36px RGBA template used at 18pt by `mascot_image` in
+`src-tauri/src/lib.rs`. Initial, single-provider and stacked-provider macOS
+paths all use it; the stacked image also remains a template. Numeric text,
+status indicators and Windows/Linux numeric tray rendering are unchanged.
