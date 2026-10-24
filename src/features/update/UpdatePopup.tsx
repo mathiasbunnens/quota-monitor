@@ -39,7 +39,10 @@ export default function UpdatePopup() {
         // trigger another resize request. Byte/progress events do not refit.
         if (height === lastHeight) return;
         lastHeight = height;
-        void invoke("fit_update_window", { height }).catch(console.error);
+        void invoke("fit_update_window", {
+          height,
+          viewportHeight: window.innerHeight,
+        }).catch(console.error);
       });
     });
     observer.observe(node);

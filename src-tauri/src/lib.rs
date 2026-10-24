@@ -666,8 +666,16 @@ fn fit_settings_window(window: tauri::WebviewWindow, height: f64) -> Result<(), 
 
 /// Fits intrinsic updater content, bounded by the monitor; overflow scrolls.
 #[tauri::command]
-fn fit_update_window(window: tauri::WebviewWindow, height: f64) -> Result<(), String> {
-    if window.label() != "updater" || !height.is_finite() {
+fn fit_update_window(
+    window: tauri::WebviewWindow,
+    height: f64,
+    viewport_height: f64,
+) -> Result<(), String> {
+    if window.label() != "updater"
+        || !height.is_finite()
+        || !viewport_height.is_finite()
+        || viewport_height <= 0.0
+    {
         return Ok(());
     }
     let scale = window.scale_factor().map_err(|e| e.to_string())?;
@@ -681,7 +689,10 @@ fn fit_update_window(window: tauri::WebviewWindow, height: f64) -> Result<(), St
         .map(|m| m.work_area().size.to_logical::<f64>(scale).height - 40.0)
         .unwrap_or(900.0)
         .max(120.0);
-    let wanted = height.clamp(120.0, max);
+    // On macOS Tauri's reported inner height includes the native titlebar,
+    // while the WebView viewport does not. Preserve that measured inset;
+    // otherwise even short content is clipped below the window's bottom.
+    let wanted = update_window_height(height, viewport_height, inner.height, max);
     if (inner.height - wanted).abs() > 1.0 {
         window
             .set_size(tauri::LogicalSize::new(inner.width, wanted))
@@ -703,6 +714,25 @@ fn fit_update_window(window: tauri::WebviewWindow, height: f64) -> Result<(), St
         }
     }
     Ok(())
+}
+
+fn update_window_height(content: f64, viewport: f64, inner: f64, max: f64) -> f64 {
+    let inset = (inner - viewport).max(0.0);
+    (content + inset).clamp(120.0, max)
+}
+
+#[cfg(test)]
+mod update_window_tests {
+    use super::update_window_height;
+
+    #[test]
+    fn native_titlebar_inset_is_preserved_without_exceeding_the_screen() {
+        assert_eq!(update_window_height(193.0, 161.0, 193.0, 900.0), 225.0);
+        assert_eq!(update_window_height(193.0, 193.0, 225.0, 900.0), 225.0);
+        assert_eq!(update_window_height(193.0, 193.0, 193.0, 900.0), 193.0);
+        assert_eq!(update_window_height(2000.0, 193.0, 225.0, 900.0), 900.0);
+        assert_eq!(update_window_height(80.0, 193.0, 225.0, 900.0), 120.0);
+    }
 }
 
 #[tauri::command]
