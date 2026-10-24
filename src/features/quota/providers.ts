@@ -48,10 +48,19 @@ export function codexRows(snapshots: QuotaSnapshot[]): QuotaRow[] {
 }
 
 export function claudeRows(snapshot: ClaudeSnapshot, fableEnabled = true): QuotaRow[] {
-  return snapshot.metrics.filter((metric) => fableEnabled || metric.id !== "claude:weekly_fable").map((metric) => {
+  const metrics = snapshot.metrics.filter((metric) => fableEnabled || metric.id !== "claude:weekly_fable");
+  const fable = metrics.find((metric) => metric.id === "claude:weekly_fable");
+  // Compare raw values and a known reset, never rounded percentages or absent data.
+  const duplicate = fable?.availability === "available" && fable.usedPercent !== null && fable.resetAt !== null
+    && metrics.some((metric) => metric.id === "claude:seven_day" && metric.availability === "available"
+      && metric.usedPercent === fable.usedPercent && metric.resetAt === fable.resetAt
+      && metric.periodDurationSeconds === fable.periodDurationSeconds);
+  const displayed = duplicate ? metrics.flatMap((metric) => metric.id === "claude:seven_day" ? [fable!]
+    : metric.id === "claude:weekly_fable" ? [] : [metric]) : metrics;
+  return displayed.map((metric) => {
     const available = metric.availability === "available" && metric.usedPercent !== null;
     return {
-      id: metric.id, label: metric.label,
+      id: metric.id, label: metric.id === "claude:weekly_fable" ? "Limite Fable" : metric.label,
       ...(metric.id === "claude:weekly_fable" ? { modelLabel: "Fable" } : {}),
       remaining: available ? Math.round(Math.max(0, Math.min(100, 100 - (metric.usedPercent as number)))) : null,
       exhausted: available && metric.exhausted,

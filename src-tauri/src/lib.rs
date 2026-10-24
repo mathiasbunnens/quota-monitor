@@ -843,8 +843,7 @@ fn codex_panel(
 
 #[cfg(target_os = "macos")]
 fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
-    let rows: Vec<PanelRow> = snapshot
-        .metrics
+    let rows: Vec<PanelRow> = claude::display_metrics(&snapshot.metrics)
         .iter()
         .map(|m| {
             let remaining = m
@@ -858,11 +857,8 @@ fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
             };
             PanelRow {
                 model: m.id == "claude:weekly_fable",
-                label: if m.id == "claude:weekly_fable" && remaining.is_some() {
-                    format!(
-                        "{} Fable",
-                        limit_label(m.reset_at.as_deref(), "Limite hebdomadaire")
-                    )
+                label: if m.id == "claude:weekly_fable" {
+                    "Limite Fable".into()
                 } else if remaining.is_some() {
                     limit_label(m.reset_at.as_deref(), m.label)
                 } else {
@@ -1571,34 +1567,17 @@ pub fn quota_ui_smoke(directory: &str) {
         ));
         println!("NATIVE_STATUS_PASS {mode}: {}x{}", size.width, size.height);
     }
-    let claude = PanelProvider {
-        name: "Claude",
-        badge: Some("pro".into()),
-        rows: vec![
-            PanelRow {
-                model: false,
-                label: limit_label(Some(&soon), "Limite 5 heures"),
-                remaining: Some(12),
-                value: "12 %".into(),
-                reset: reset_phrase(&soon, true).unwrap(),
-            },
-            PanelRow {
-                model: false,
-                label: limit_label(Some(&week), "Limite hebdomadaire"),
-                remaining: Some(86),
-                value: "86 %".into(),
-                reset: reset_phrase(&week, false).unwrap(),
-            },
-            PanelRow {
-                model: true,
-                label: format!("{} Fable", limit_label(Some(&week), "Limite hebdomadaire")),
-                remaining: Some(63),
-                value: "63 %".into(),
-                reset: reset_phrase(&week, false).unwrap(),
-            },
-        ],
-        note: None,
-    };
+    // Exercise the production projection, including the duplicate weekly window.
+    let claude = claude_panel(&claude::usage_snapshot(
+        &serde_json::json!({"subscription_type":"pro", "rate_limits":{
+            "five_hour":{"utilization":88,"resets_at":soon},
+            "seven_day":{"utilization":37,"resets_at":week},
+            "model_scoped":[{"display_name":"Fable","utilization":37,"resets_at":week}]
+        }}),
+        Local::now().timestamp(),
+    ));
+    assert_eq!(claude.rows.len(), 2);
+    assert_eq!(claude.rows[1].label, "Limite Fable");
     let scenarios: Vec<(&str, Vec<PanelProvider>)> = vec![
         (
             "two-providers",
@@ -2149,7 +2128,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn native_fable_label_keeps_model_on_countdowns_and_unknown_resets() {
+    fn native_fable_label_is_exact_with_known_and_unknown_resets() {
         let now = Local::now().timestamp();
         let reset = (Local::now() + chrono::Duration::hours(30)).to_rfc3339();
         let snap = claude::usage_snapshot(
@@ -2167,8 +2146,7 @@ mod tests {
         assert!(!panel.rows[0].model);
         assert!(!panel.rows[1].model);
         assert!(panel.rows[2].model);
-        assert!(panel.rows[2].label.starts_with("Limite sur "));
-        assert!(panel.rows[2].label.ends_with(" Fable"));
+        assert_eq!(panel.rows[2].label, "Limite Fable");
         // A countdown is not a new 30h quota window: duration remains weekly.
         assert_eq!(snap.metrics[2].period_duration_seconds, 604800);
         let unknown = claude::usage_snapshot(
@@ -2177,10 +2155,15 @@ mod tests {
             }}),
             now,
         );
-        assert_eq!(
-            claude_panel(&unknown).rows[2].label,
-            "Limite hebdomadaire Fable"
-        );
+        assert_eq!(claude_panel(&unknown).rows[2].label, "Limite Fable");
+        let mut duplicate = snap.clone();
+        duplicate.metrics[1].used_percent = duplicate.metrics[2].used_percent;
+        let merged = claude_panel(&duplicate);
+        assert_eq!(merged.rows.len(), 2);
+        assert_eq!(merged.rows[1].label, "Limite Fable");
+        assert_eq!(merged.rows[1].value, "70 %");
+        assert!(merged.rows[1].model);
+        assert!(merged.rows[1].reset.contains("Réinitialisation"));
     }
 
     #[cfg(target_os = "macos")]

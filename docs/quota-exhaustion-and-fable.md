@@ -67,12 +67,20 @@ The Fable row is fully opaque (no dimming or dot); only the word Fable is smalle
 (React 11px, native 10.5pt) and uses the exact same dynamic colour as its bar,
 including warning/low states and light/dark variants. The healthy fill remains
 teal; other quotas and alert colours are unchanged. The Settings switch keeps
-its accessible label without a help sentence. The native countdown label now
-retains that word instead of dropping it
-when a reset date is available. Its countdown (potentially 5h or 30h remaining)
-is distinct from the bucket's weekly duration. The distributed schema documented
-above and the fixtures supply no separate 5h/30h Fable buckets: none are invented,
-and existing general Claude 5h/weekly quotas are not relabelled as Fable.
+its accessible label without a help sentence.
+The display name is exactly **Limite Fable**, even when a reset is known; the real
+reset remains on the reset line. A matching general weekly row (`claude:seven_day`)
+is replaced in place by the explicit model-scoped Fable row, removing the extra
+Fable display. Matching requires available, equal raw utilization, equal duration
+and the same known reset; rounding is never used. This is a presentation-only
+coalescing rule for the duplicate reported by the user, not a claim that all weekly
+buckets are Fable. Distinct values/resets, unknown resets and unavailable data keep
+the general row separately. Missing Fable never relabels a general quota.
+
+The raw provider snapshot and notification keys/labels are unchanged, so renaming
+or coalescing cannot rearm or replay notifications. Disabling Fable hides only its
+row and restores the general weekly row; the persisted mute behavior is unchanged.
+No separate 5h/30h Fable buckets or reset durations are invented.
 
 Clarification before any further relabelling: **30h = durée souhaitée ou autre
 libellé ?** The request's token `30h` is intentionally not replaced with `7j`.

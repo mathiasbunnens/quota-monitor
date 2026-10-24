@@ -455,7 +455,48 @@ fn filter_fable(mut snap: ClaudeSnapshot, enabled: bool) -> ClaudeSnapshot {
     if !enabled {
         snap.metrics.retain(|m| m.id != "claude:weekly_fable");
     }
+    snap.metrics = display_metrics(&snap.metrics);
     snap
+}
+
+/// Presentation only: never change raw observations or notification identities.
+/// Equal rounded percentages alone are not evidence of a duplicate window.
+pub(crate) fn display_metrics(metrics: &[Metric]) -> Vec<Metric> {
+    let duplicate = metrics
+        .iter()
+        .find(|m| m.id == "claude:weekly_fable")
+        .filter(|f| {
+            f.availability == "available" && f.used_percent.is_some() && f.reset_at.is_some()
+        })
+        .is_some_and(|f| {
+            metrics.iter().any(|w| {
+                w.id == "claude:seven_day"
+                    && w.availability == "available"
+                    && w.used_percent == f.used_percent
+                    && w.reset_at == f.reset_at
+                    && w.period_duration_seconds == f.period_duration_seconds
+            })
+        });
+    let mut rows = Vec::new();
+    for m in metrics {
+        if duplicate && m.id == "claude:seven_day" {
+            rows.push(
+                metrics
+                    .iter()
+                    .find(|m| m.id == "claude:weekly_fable")
+                    .unwrap()
+                    .clone(),
+            );
+        } else if !(duplicate && m.id == "claude:weekly_fable") {
+            rows.push(m.clone());
+        }
+    }
+    for m in &mut rows {
+        if m.id == "claude:weekly_fable" {
+            m.label = "Limite Fable";
+        }
+    }
+    rows
 }
 
 pub(crate) fn raw_snapshot(app: &tauri::AppHandle) -> ClaudeSnapshot {
@@ -663,6 +704,46 @@ mod tests {
             five_hour: w(five),
             seven_day: w(seven),
         })
+    }
+
+    #[test]
+    fn fable_display_merges_only_matching_known_weekly_windows() {
+        let reset = iso(NOW + 3600).unwrap();
+        let raw = usage_snapshot(
+            &json!({"rate_limits": {
+                "five_hour":{"utilization":10},
+                "seven_day":{"utilization":37.5,"resets_at":reset},
+                "model_scoped":[{"display_name":"Fable","utilization":37.5,"resets_at":reset}]
+            }}),
+            NOW,
+        );
+        let shown = filter_fable(raw.clone(), true);
+        assert_eq!(shown.metrics.len(), 2);
+        assert_eq!(shown.metrics[1].id, "claude:weekly_fable");
+        assert_eq!(shown.metrics[1].label, "Limite Fable");
+        assert_eq!(shown.metrics[1].used_percent, Some(37.5));
+        assert_eq!(raw.metrics.len(), 3);
+        assert_eq!(raw.metrics[1].id, "claude:seven_day");
+        let hidden = filter_fable(raw.clone(), false);
+        assert_eq!(hidden.metrics.len(), 2);
+        assert_eq!(hidden.metrics[1].id, "claude:seven_day");
+        for kind in 0..6 {
+            let mut changed = raw.clone();
+            let f = &mut changed.metrics[2];
+            match kind {
+                0 => f.used_percent = Some(37.6),
+                1 => f.reset_at = iso(NOW + 7200),
+                2 => f.reset_at = None,
+                3 => f.used_percent = None,
+                4 => f.availability = "unavailable",
+                _ => f.period_duration_seconds = FIVE_HOUR_SECS,
+            }
+            assert_eq!(filter_fable(changed, true).metrics.len(), 3);
+        }
+        let mut unknown = raw;
+        unknown.metrics[1].reset_at = None;
+        unknown.metrics[2].reset_at = None;
+        assert_eq!(filter_fable(unknown, true).metrics.len(), 3);
     }
 
     #[test]

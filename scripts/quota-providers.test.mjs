@@ -10,7 +10,7 @@ import { claudeRows, formatResetDate } from "../src/features/quota/providers.ts"
 const metric = (id, usedPercent, resetAt = null) => ({
   id, label: id === "claude:weekly_fable" ? "Limite hebdomadaire Fable" : "Limite 5 heures",
   usedPercent, resetAt, availability: "available",
-  periodDurationSeconds: id === "claude:weekly_fable" ? 604800 : 18000,
+  periodDurationSeconds: id === "claude:five_hour" ? 18000 : 604800,
   exhausted: usedPercent >= 100,
 });
 const snapshot = (metrics) => ({ metrics });
@@ -23,10 +23,33 @@ test("optional Fable uses normal remaining-percentage and reset rendering", () =
   assert.equal(rows.length, 2);
   assert.equal(rows[0].remaining, 77);
   assert.deepEqual(rows[1], {
-    id: "claude:weekly_fable", label: "Limite hebdomadaire Fable", modelLabel: "Fable",
+    id: "claude:weekly_fable", label: "Limite Fable", modelLabel: "Fable",
     remaining: 63, exhausted: false, missing: "Non communiquée",
     resetText: formatResetDate(reset),
   });
+});
+
+test("matching weekly and explicit Fable merge only in presentation, with Fable as source", () => {
+  const reset = "2026-10-30T14:00:00Z";
+  const general = metric("claude:seven_day", 37.5, reset);
+  const fable = metric("claude:weekly_fable", 37.5, reset);
+  const input = snapshot([metric("claude:five_hour", 10), general, fable]);
+  const before = structuredClone(input);
+  const rows = claudeRows(input);
+  assert.deepEqual(rows.map((row) => row.id), ["claude:five_hour", "claude:weekly_fable"]);
+  assert.equal(rows[1].label, "Limite Fable");
+  assert.equal(rows[1].remaining, 63);
+  assert.deepEqual(input, before);
+  assert.deepEqual(claudeRows(input, false).map((row) => row.id), ["claude:five_hour", "claude:seven_day"]);
+  assert.equal(claudeRows(snapshot([general]))[0].modelLabel, undefined);
+  for (const changed of [
+    { usedPercent: 37.6 }, { resetAt: "2026-10-30T15:00:00Z" },
+    { resetAt: null }, { usedPercent: null }, { availability: "unavailable" },
+    { periodDurationSeconds: 18000 },
+  ]) {
+    assert.equal(claudeRows(snapshot([general, { ...fable, ...changed }])).length, 2);
+  }
+  assert.equal(claudeRows(snapshot([{ ...general, resetAt: null }, { ...fable, resetAt: null }])).length, 2);
 });
 
 test("old snapshots do not fabricate Fable; expired windows remain unavailable", () => {
@@ -74,14 +97,21 @@ test("Fable alone is smaller and bar-coloured, without a dot or dimming", () => 
     name: "Claude", rows: claudeRows(data, enabled), compact,
   }));
   const html = render(true);
+  const reset = "2026-10-30T14:00:00Z";
+  const merged = render(true, false, snapshot([
+    metric("claude:five_hour", 20), metric("claude:seven_day", 50, reset),
+    metric("claude:weekly_fable", 50, reset),
+  ]));
+  assert.equal((merged.match(/role="progressbar"/g) || []).length, 2);
+  assert.equal((merged.match(/aria-label="Limite Fable"/g) || []).length, 1);
   assert.doesNotMatch(html, /opacity/);
   const rows = html.split('<div class="provider-row').slice(1);
   assert.equal(rows.length, 2);
   assert.match(rows[0], /^ provider-row--healthy"><div class="dashboard__quota-heading"><span>Limite 5 heures<\/span>/);
   assert.doesNotMatch(rows[0], /model/);
-  assert.match(rows[1], /^ provider-row--model provider-row--healthy"><div class="dashboard__quota-heading"><span>Limite hebdomadaire <span class="provider-row__model-label">Fable<\/span><\/span><strong>/);
+  assert.match(rows[1], /^ provider-row--model provider-row--healthy"><div class="dashboard__quota-heading"><span>Limite <span class="provider-row__model-label">Fable<\/span><\/span><strong>/);
   // Accessible name and state classes are unchanged: the tint only overrides the healthy fill in CSS.
-  assert.match(rows[1], /class="dashboard__progress dashboard__progress--healthy" role="progressbar" aria-label="Limite hebdomadaire Fable"/);
+  assert.match(rows[1], /class="dashboard__progress dashboard__progress--healthy" role="progressbar" aria-label="Limite Fable"/);
   assert.match(rows[1], /provider-row__reset/);
   assert.equal((html.match(/provider-row__model-label/g) || []).length, 1);
   assert.doesNotMatch(html, /model-dot|<i|•/);
