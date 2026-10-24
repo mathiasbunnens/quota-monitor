@@ -15,6 +15,8 @@ pub struct Prefs {
     pub fable_enabled: bool,
     /// Menu-bar indicator: "codex", "claude" or "both".
     pub indicator: String,
+    /// "menubar" (default) or "app" (standalone Dock application, macOS only).
+    pub display_mode: String,
     pub ntfy: crate::ntfy::Config,
 }
 
@@ -25,6 +27,7 @@ impl Default for Prefs {
             claude_enabled: false,
             fable_enabled: true,
             indicator: "codex".into(),
+            display_mode: crate::display_mode::MENUBAR.into(),
             ntfy: crate::ntfy::Config::default(),
         }
     }
@@ -51,6 +54,12 @@ pub fn parse(bytes: &[u8]) -> Prefs {
     serde_json::from_slice::<Prefs>(bytes)
         .ok()
         .filter(Prefs::valid)
+        .map(|mut prefs| {
+            // Unknown/absent mode (older file) keeps the menu-bar behaviour
+            // without discarding the rest of the preferences.
+            prefs.display_mode = crate::display_mode::normalize(&prefs.display_mode).into();
+            prefs
+        })
         .unwrap_or_default()
 }
 
@@ -74,7 +83,12 @@ pub fn get_preferences(app: tauri::AppHandle) -> Prefs {
 }
 
 #[tauri::command]
-pub fn set_preferences(app: tauri::AppHandle, prefs: Prefs) -> Result<Prefs, String> {
+pub fn set_preferences(app: tauri::AppHandle, mut prefs: Prefs) -> Result<Prefs, String> {
+    prefs.display_mode = if crate::display_mode::SUPPORTED {
+        crate::display_mode::normalize(&prefs.display_mode).into()
+    } else {
+        crate::display_mode::MENUBAR.into()
+    };
     if !prefs.valid() {
         return Err("Indicateur de barre des menus non pris en charge.".into());
     }
@@ -104,6 +118,9 @@ pub fn set_preferences(app: tauri::AppHandle, prefs: Prefs) -> Result<Prefs, Str
     if previous.claude_enabled != prefs.claude_enabled {
         claude::on_enabled_changed();
     }
+    if previous.display_mode != prefs.display_mode {
+        crate::apply_display_mode(&app);
+    }
     crate::publish_quotas(&app);
     Ok(prefs)
 }
@@ -118,6 +135,20 @@ mod tests {
         assert!(p.codex_enabled && !p.claude_enabled);
         assert!(p.fable_enabled);
         assert_eq!(p.indicator, "codex");
+        assert_eq!(p.display_mode, "menubar");
+    }
+
+    #[test]
+    fn display_mode_migrates_and_persists() {
+        // Older file without the key: menu bar, other prefs kept.
+        let old = parse(br#"{"claudeEnabled":true,"indicator":"both"}"#);
+        assert_eq!(old.display_mode, "menubar");
+        assert!(old.claude_enabled && old.indicator == "both");
+        // Unknown value is normalised, not a reset of everything else.
+        let odd = parse(br#"{"displayMode":"dock","claudeEnabled":true}"#);
+        assert_eq!(odd.display_mode, "menubar");
+        assert!(odd.claude_enabled);
+        assert_eq!(parse(br#"{"displayMode":"app"}"#).display_mode, "app");
     }
 
     #[test]
@@ -137,6 +168,7 @@ mod tests {
             claude_enabled: true,
             fable_enabled: false,
             indicator: "both".into(),
+            display_mode: "app".into(),
             ntfy: crate::ntfy::Config::default(),
         };
         let bytes = serde_json::to_vec(&saved).unwrap();

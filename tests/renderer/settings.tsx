@@ -7,7 +7,7 @@ import "../../src/styles/app.scss";
 
 let prefs: Preferences = {
   codexEnabled: false, claudeEnabled: false, fableEnabled: true,
-  indicator: "both", ntfy: { enabled: false, serverUrl: "https://ntfy.invalid", topic: "" },
+  indicator: "both", displayMode: "menubar", ntfy: { enabled: false, serverUrl: "https://ntfy.invalid", topic: "" },
 };
 const calls: { command: string; args: unknown }[] = [];
 let failure: string | null = null;
@@ -19,6 +19,7 @@ mockIPC(async (command, args) => {
     await new Promise((resolve) => setTimeout(resolve, delay));
     if (failure === command) throw new Error(failureMessage);
   }
+  if (command === "get_platform") return "macos";
   if (command === "get_preferences") return prefs;
   if (command === "get_codex_status") return { phase: "disabled", message: "Fixture", refreshSettings: { customSeconds: null } };
   if (command === "get_claude_snapshot") return { state: "disabled", metrics: [] };

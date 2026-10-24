@@ -2,6 +2,7 @@ mod activity;
 mod claude;
 mod claude_cli;
 mod codex;
+mod display_mode;
 mod indicator;
 mod ntfy;
 mod prefs;
@@ -1936,24 +1937,123 @@ fn make_version_item(mtm: MainThreadMarker, version: &str) -> Retained<NSMenuIte
 }
 
 #[cfg(target_os = "macos")]
-fn build_native_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+fn install_status_item(app: &tauri::AppHandle) {
+    let state = app.state::<NativeMenuState>();
+    if state.0.lock().unwrap().is_some() {
+        return;
+    }
     let mtm = MainThreadMarker::new().expect("menu setup on main thread");
     let target = QuotaMenuTarget::new(mtm);
     let status_item =
         NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
     let button = status_item.button(mtm).expect("status item button");
     button.setImage(mascot_image(mtm).as_deref());
-    *app.state::<NativeMenuState>().0.lock().unwrap() = Some(NativeQuotaMenu {
+    *state.0.lock().unwrap() = Some(NativeQuotaMenu {
         status_item: Retained::as_ptr(&status_item) as usize,
         status_button: Retained::as_ptr(&button) as usize,
         target: Retained::as_ptr(&target) as usize,
     });
-    // The status item and its target live for the lifetime of this menu-bar app.
+    // Owned by the state until `remove_status_item` reclaims them.
     std::mem::forget(status_item);
     std::mem::forget(target);
-    render_native_menu(app.handle());
+    render_native_menu(app);
+}
+
+/// Removes the menu-bar item (standalone mode) and releases what
+/// `install_status_item` leaked. Main thread only.
+#[cfg(target_os = "macos")]
+fn remove_status_item(app: &tauri::AppHandle) {
+    let Some(native) = app.state::<NativeMenuState>().0.lock().unwrap().take() else {
+        return;
+    };
+    MENU_OPEN.store(false, Ordering::Release);
+    PANEL_ITEM.store(0, Ordering::Release);
+    unsafe {
+        let item = Retained::from_raw(native.status_item as *mut objc2_app_kit::NSStatusItem);
+        let target = Retained::from_raw(native.target as *mut QuotaMenuTarget);
+        if let Some(item) = &item {
+            NSStatusBar::systemStatusBar().removeStatusItem(item);
+        }
+        drop(item);
+        drop(target);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn activate_app(app: &tauri::AppHandle) {
+    let _ = app.run_on_main_thread(|| {
+        let mtm = MainThreadMarker::new().expect("activation runs on main thread");
+        NSApplication::sharedApplication(mtm).activate();
+    });
+}
+
+/// Dashboard window of the standalone mode. The red button hides it (macOS
+/// convention); the Dock icon or Cmd+Tab brings it back, Cmd+Q quits.
+#[cfg(target_os = "macos")]
+fn show_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let window = if let Some(window) = app.get_webview_window("main") {
+        window
+    } else {
+        let window = tauri::WebviewWindowBuilder::new(
+            app,
+            "main",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .title("Quota Monitor")
+        .inner_size(500.0, 620.0)
+        .min_inner_size(360.0, 420.0)
+        .center()
+        .build()?;
+        window.on_window_event({
+            let window = window.clone();
+            move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    if window.hide().is_ok() {
+                        api.prevent_close();
+                    }
+                }
+            }
+        });
+        window
+    };
+    window.show()?;
+    window.unminimize()?;
+    window.set_focus()?;
+    activate_app(app);
     Ok(())
 }
+
+/// Applies the saved display mode live (main thread). The way in is always
+/// created before the previous one is removed.
+#[cfg(target_os = "macos")]
+fn apply_display_mode(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let app = handle;
+        let layout =
+            display_mode::layout(&prefs::current(&app).display_mode, display_mode::SUPPORTED);
+        if layout.window {
+            if let Err(error) = show_main_window(&app) {
+                // Keep the menu-bar item rather than leave no entry point.
+                eprintln!("Quota Monitor window unavailable: {error}");
+                return;
+            }
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+            remove_status_item(&app);
+            activate_app(&app);
+        } else {
+            install_status_item(&app);
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.hide();
+            }
+            render_native_menu(&app);
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_display_mode(_app: &tauri::AppHandle) {}
 
 #[cfg(not(target_os = "macos"))]
 fn show_dashboard(app: &tauri::AppHandle) {
@@ -2178,13 +2278,24 @@ pub fn run() {
             )
             .build()?;
             #[cfg(target_os = "macos")]
-            app.handle()
-                .set_activation_policy(tauri::ActivationPolicy::Accessory)?;
-
-            #[cfg(target_os = "macos")]
             {
                 app.manage(NativeMenuState::default());
-                build_native_menu(app)?;
+                let layout = display_mode::layout(
+                    &prefs::current(app.handle()).display_mode,
+                    display_mode::SUPPORTED,
+                );
+                let mut standalone = false;
+                if layout.window {
+                    app.handle()
+                        .set_activation_policy(tauri::ActivationPolicy::Regular)?;
+                    standalone = show_main_window(app.handle()).is_ok();
+                }
+                if !standalone {
+                    // Menu-bar mode, or fallback so the app is never unreachable.
+                    app.handle()
+                        .set_activation_policy(tauri::ActivationPolicy::Accessory)?;
+                    install_status_item(app.handle());
+                }
             }
 
             #[cfg(not(target_os = "macos"))]
@@ -2198,10 +2309,25 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             // Closing the Settings/updater window must not quit the menu-bar app.
+            // Standalone mode honours Cmd+Q / Dock "Quit".
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
-                if code.is_none() {
+                if code.is_none()
+                    && !display_mode::allow_system_exit(
+                        &prefs::current(app).display_mode,
+                        display_mode::SUPPORTED,
+                    )
+                {
                     api.prevent_exit();
+                }
+            }
+            // Dock icon click in standalone mode reopens the hidden dashboard.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = &event {
+                if display_mode::layout(&prefs::current(app).display_mode, display_mode::SUPPORTED)
+                    .window
+                {
+                    let _ = show_main_window(app);
                 }
             }
             if let tauri::RunEvent::Exit = event {
