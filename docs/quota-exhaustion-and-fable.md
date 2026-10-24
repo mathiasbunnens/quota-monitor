@@ -63,8 +63,8 @@ crossing on reactivation. The first valid enabled sample establishes a silent
 baseline; subsequent real below-100 → 100 transitions notify normally. Existing
 ledger entries without the new muted flag remain readable.
 
-The Fable row is fully opaque (no dimming or dot); only the word Fable is smaller
-(React 11px, native 10.5pt) and uses the exact same dynamic colour as its bar,
+The Fable row is fully opaque (no dimming or dot); the word Fable keeps the normal
+quota label typography (React 13px, native 12pt) and uses the exact same dynamic colour as its bar,
 including warning/low states and light/dark variants. The healthy fill remains
 teal; other quotas and alert colours are unchanged. The Settings switch keeps
 its accessible label without a help sentence.

@@ -703,7 +703,7 @@ enum Tone {
 #[cfg(target_os = "macos")]
 #[derive(Clone, Debug, PartialEq)]
 struct PanelRow {
-    /// Model-scoped row (Fable): smaller model name matching the fill, full opacity.
+    /// Model-scoped row (Fable): normal-size model name matching the fill, full opacity.
     model: bool,
     label: String,
     remaining: Option<u32>,
@@ -993,17 +993,16 @@ fn panel_label(
 #[cfg(target_os = "macos")]
 fn style_model_label(label: &NSTextField, row: &PanelRow) {
     use objc2::AnyThread;
-    use objc2_app_kit::{NSFontAttributeName, NSForegroundColorAttributeName};
+    use objc2_app_kit::NSForegroundColorAttributeName;
     use objc2_foundation::{NSDictionary, NSMutableAttributedString, NSRange};
 
     let Some(prefix) = row.label.strip_suffix(" Fable") else {
         return;
     };
-    let font = NSFont::systemFontOfSize(10.5);
     // Use the exact fill function, including its continuous warning transitions.
     let color = quota_color(row.remaining.unwrap_or(0), true);
-    let keys = unsafe { [NSFontAttributeName, NSForegroundColorAttributeName] };
-    let values: [&AnyObject; 2] = [&font, &color];
+    let keys = unsafe { [NSForegroundColorAttributeName] };
+    let values: [&AnyObject; 1] = [&color];
     let attributes = NSDictionary::from_slices(&keys, &values);
     let text = NSMutableAttributedString::initWithAttributedString(
         NSMutableAttributedString::alloc(),

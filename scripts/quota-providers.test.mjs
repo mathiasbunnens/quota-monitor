@@ -91,7 +91,7 @@ const moduleSource = compiled.replaceAll('"react/jsx-runtime"', JSON.stringify(i
   .replaceAll('"react"', JSON.stringify(import.meta.resolve("react")));
 const { default: ProviderCard } = await import("data:text/javascript;base64," + Buffer.from(moduleSource).toString("base64"));
 
-test("Fable alone is smaller and bar-coloured, without a dot or dimming", () => {
+test("Fable alone is bar-coloured, without a dot or dimming", () => {
   const input = snapshot([metric("claude:five_hour", 20), metric("claude:weekly_fable", 50)]);
   const render = (enabled, compact = false, data = input) => renderToStaticMarkup(createElement(ProviderCard, {
     name: "Claude", rows: claudeRows(data, enabled), compact,
@@ -134,7 +134,7 @@ test("model label and bar share the state token in both themes", () => {
   const css = fs.readFileSync(new URL("../src/pages/Dashboard/dashboard.scss", import.meta.url), "utf8");
   assert.match(css, /\.provider-row--model\.provider-row--healthy \{ --quota-fill: var\(--model-accent\); \}/);
   assert.match(css, /background: var\(--quota-fill, #30a46c\)/);
-  assert.match(css, /\.provider-row__model-label \{ font-size: 11px; font-weight: 400; color: var\(--quota-fill\); \}/);
+  assert.match(css, /\.provider-row__model-label \{ color: var\(--quota-fill\); \}/);
   for (const [state, colour] of [["warning", "#d68b12"], ["low", "#e5484d"]]) {
     assert.ok(css.includes(`.provider-row--${state} { --quota-fill: ${colour}; }`));
     assert.ok(css.includes(`&__progress--${state} { --quota-fill: ${colour}; }`));
@@ -142,6 +142,14 @@ test("model label and bar share the state token in both themes", () => {
   assert.doesNotMatch(css, /model-dot/);
   assert.equal((css.match(/--model-accent: #[0-9a-f]{6};/g) || []).length, 2);
   assert.doesNotMatch(css, /provider-row[^{]*\{[^}]*opacity/);
+});
+
+test("native Fable styling preserves the normal quota label font", () => {
+  const native = fs.readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  const style = native.slice(native.indexOf("fn style_model_label("), native.indexOf("fn rounded_box("));
+  assert.match(style, /quota_color\(row.remaining.unwrap_or\(0\), true\)/);
+  assert.match(style, /let keys = unsafe \{ \[NSForegroundColorAttributeName\] \}/);
+  assert.doesNotMatch(style, /NSFont|setFont|setAlphaValue/);
 });
 
 test("Settings keeps the Fable switch label but no help text", () => {

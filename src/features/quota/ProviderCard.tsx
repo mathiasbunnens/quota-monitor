@@ -19,7 +19,7 @@ function level(remaining: number) {
   return remaining <= 20 ? "low" : remaining <= 40 ? "warning" : "healthy";
 }
 
-/** Model-specific rows keep full opacity; only the model name gets a smaller, bar-coloured label. */
+/** Model-specific rows keep normal typography; only the model name gets the bar colour. */
 function rowClass(row: QuotaRow) {
   return "provider-row" + (row.modelLabel ? " provider-row--model" : "");
 }
