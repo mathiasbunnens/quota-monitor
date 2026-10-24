@@ -73,7 +73,8 @@ test("compact notifications preserve labelled controls, visible safety and disco
   const html = renderToStaticMarkup(createElement(NtfySettings, {
     config: { enabled: false, serverUrl: "https://fixture.invalid", topic: "" }, onSave: async () => true,
   }));
-  assert.match(html, /0 % restant/);
+  assert.match(html, /retour à 100 % restant/);
+  assert.doesNotMatch(html, /alerte à 0 % restant|déjà épuisée|retour sous 100 % consommé/);
   assert.match(html, /doit rester ouverte et connectée/);
   assert.match(html, /aria-describedby="ntfy-privacy"/);
   assert.match(html, /Topic public/);

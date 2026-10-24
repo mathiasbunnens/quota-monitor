@@ -24,7 +24,7 @@ export default function NtfySettings({ config, onSave }: {
   };
   return <section className="prefs-group" aria-labelledby="ntfy-heading">
     <h2 id="ntfy-heading">Alertes téléphone · ntfy</h2>
-    <p>Codex et Claude : alerte à 0 % restant. L’application doit rester ouverte et connectée.</p>
+    <p>Codex et Claude : alerte au retour à 100 % restant. L’application doit rester ouverte et connectée.</p>
     <fieldset disabled={busy} className="ntfy-fields">
       <label><input type="checkbox" checked={draft.enabled}
         onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} /> Alertes automatiques</label>
@@ -47,9 +47,10 @@ export default function NtfySettings({ config, onSave }: {
       <p>Sur le téléphone, installez ntfy, abonnez-vous à ce serveur et ce topic, puis autorisez les notifications
         dans ntfy et les réglages du téléphone. Aucune authentification n’est envoyée.</p>
       <p>Le test utilise les champs sans les enregistrer, même si les alertes sont désactivées.</p>
-      <p>Une limite déjà épuisée à la première lecture ne déclenche pas d’alerte. Aucun rappel tant qu’elle reste
-        épuisée, même après redémarrage. Les limites atteintes ensemble sont regroupées.</p>
-      <p>Nouvelle alerte après réinitialisation ou retour sous 100 % consommé. Après une erreur réseau,
+      <p>Une limite déjà pleine à la première lecture reste silencieuse. L’alerte suit un passage observé
+        de quota entamé à quota plein, sans arrondi ni alerte à épuisement. Les retours simultanés sont regroupés.</p>
+      <p>Aucun rappel à quota plein, même après redémarrage. Une seule tentative par cycle connu ; sans date
+        de réinitialisation, un nouveau passage entamé → plein réarme l’alerte. Après une erreur réseau,
         aucun nouvel essai automatique avant ce réarmement.</p>
     </details>
   </section>;
