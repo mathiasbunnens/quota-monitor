@@ -1302,8 +1302,7 @@ fn connect_codex_account(app: tauri::AppHandle) -> Result<(), String> {
     if provider.status().phase == "missing" {
         codex::open_codex_install(app.clone())
     } else {
-        provider.login(false);
-        Ok(())
+        codex::start_codex_login(provider, false)
     }
 }
 
