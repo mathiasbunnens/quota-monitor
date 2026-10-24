@@ -170,8 +170,8 @@ fn show_update_window(app: &tauri::AppHandle) -> tauri::Result<()> {
             tauri::WebviewUrl::App("index.html".into()),
         )
         .title("Mise à jour de Quota Monitor")
-        .inner_size(420.0, 260.0)
-        .min_inner_size(360.0, 240.0)
+        .inner_size(420.0, 180.0)
+        .min_inner_size(360.0, 120.0)
         .resizable(false)
         .center()
         .build()?
@@ -264,7 +264,15 @@ async fn download_and_install_update(app: tauri::AppHandle) {
         return;
     }
     let _guard = UpdateCheckGuard;
+    update_status(
+        &app,
+        "checking",
+        "Préparation du téléchargement…",
+        None,
+        None,
+    );
     let update = match app.updater() {
+        // Refresh the release metadata using the existing signed updater.
         Ok(updater) => updater.check().await,
         Err(error) => {
             show_update_error(&app, UpdateCheckMode::Interactive, error);
@@ -293,33 +301,40 @@ async fn download_and_install_update(app: tauri::AppHandle) {
         &app,
         "downloading",
         format!("Téléchargement de Quota Monitor v{next_version}…"),
-        Some(0),
+        None,
         Some(next_version.clone()),
     );
     let progress_app = app.clone();
     let progress_version = next_version.clone();
     let mut downloaded = 0_u64;
-    let mut last_progress = 0_u8;
+    let mut last_progress = None;
+    let install_app = app.clone();
+    let install_version = next_version.clone();
     let result = update
         .download_and_install(
             move |chunk_length, content_length| {
                 downloaded = downloaded.saturating_add(chunk_length as u64);
-                let progress = content_length
-                    .filter(|total| *total > 0)
-                    .map(|total| ((downloaded.saturating_mul(100) / total).min(100)) as u8)
-                    .unwrap_or(last_progress);
+                let progress = download_progress(downloaded, content_length);
                 if progress != last_progress {
                     last_progress = progress;
                     update_status(
                         &progress_app,
                         "downloading",
                         format!("Téléchargement de Quota Monitor v{progress_version}…"),
-                        Some(progress),
+                        progress,
                         Some(progress_version.clone()),
                     );
                 }
             },
-            || {},
+            move || {
+                update_status(
+                    &install_app,
+                    "installing",
+                    "Téléchargement reçu. Vérification et installation…",
+                    None,
+                    Some(install_version.clone()),
+                )
+            },
         )
         .await;
     match result {
@@ -331,6 +346,29 @@ async fn download_and_install_update(app: tauri::AppHandle) {
             Some(next_version),
         ),
         Err(error) => show_update_error(&app, UpdateCheckMode::Interactive, error),
+    }
+}
+
+// Reserve 100% for the successful download/verification/installation result.
+fn download_progress(downloaded: u64, total: Option<u64>) -> Option<u8> {
+    total
+        .filter(|total| *total > 0)
+        .map(|total| ((u128::from(downloaded) * 100 / u128::from(total)).min(99)) as u8)
+}
+
+#[cfg(test)]
+mod update_progress_tests {
+    use super::download_progress;
+
+    #[test]
+    fn byte_progress_is_bounded_and_unknown_totals_stay_indeterminate() {
+        assert_eq!(download_progress(0, None), None);
+        assert_eq!(download_progress(1024, Some(0)), None);
+        assert_eq!(download_progress(0, Some(100)), Some(0));
+        assert_eq!(download_progress(42, Some(100)), Some(42));
+        assert_eq!(download_progress(100, Some(100)), Some(99));
+        assert_eq!(download_progress(u64::MAX, Some(1)), Some(99));
+        assert_eq!(download_progress(u64::MAX / 2, Some(u64::MAX)), Some(49));
     }
 }
 
@@ -624,6 +662,77 @@ fn fit_settings_window(window: tauri::WebviewWindow, height: f64) -> Result<(), 
             height.clamp(240.0, max.max(240.0)),
         ))
         .map_err(|e| e.to_string())
+}
+
+/// Fits intrinsic updater content, bounded by the monitor; overflow scrolls.
+#[tauri::command]
+fn fit_update_window(
+    window: tauri::WebviewWindow,
+    height: f64,
+    viewport_height: f64,
+) -> Result<(), String> {
+    if window.label() != "updater"
+        || !height.is_finite()
+        || !viewport_height.is_finite()
+        || viewport_height <= 0.0
+    {
+        return Ok(());
+    }
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let inner = window
+        .inner_size()
+        .map_err(|e| e.to_string())?
+        .to_logical::<f64>(scale);
+    let monitor = window.current_monitor().map_err(|e| e.to_string())?;
+    let max = monitor
+        .as_ref()
+        .map(|m| m.work_area().size.to_logical::<f64>(scale).height - 40.0)
+        .unwrap_or(900.0)
+        .max(120.0);
+    // On macOS Tauri's reported inner height includes the native titlebar,
+    // while the WebView viewport does not. Preserve that measured inset;
+    // otherwise even short content is clipped below the window's bottom.
+    let wanted = update_window_height(height, viewport_height, inner.height, max);
+    if (inner.height - wanted).abs() > 1.0 {
+        window
+            .set_size(tauri::LogicalSize::new(inner.width, wanted))
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(monitor) = monitor {
+        let area = monitor.work_area();
+        let position = window.outer_position().map_err(|e| e.to_string())?;
+        let size = window.outer_size().map_err(|e| e.to_string())?;
+        let bottom = area.position.y + area.size.height as i32;
+        let y = position
+            .y
+            .min(bottom - size.height as i32)
+            .max(area.position.y);
+        if y != position.y {
+            window
+                .set_position(tauri::PhysicalPosition::new(position.x, y))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn update_window_height(content: f64, viewport: f64, inner: f64, max: f64) -> f64 {
+    let inset = (inner - viewport).max(0.0);
+    (content + inset).clamp(120.0, max)
+}
+
+#[cfg(test)]
+mod update_window_tests {
+    use super::update_window_height;
+
+    #[test]
+    fn native_titlebar_inset_is_preserved_without_exceeding_the_screen() {
+        assert_eq!(update_window_height(193.0, 161.0, 193.0, 900.0), 225.0);
+        assert_eq!(update_window_height(193.0, 193.0, 225.0, 900.0), 225.0);
+        assert_eq!(update_window_height(193.0, 193.0, 193.0, 900.0), 193.0);
+        assert_eq!(update_window_height(2000.0, 193.0, 225.0, 900.0), 900.0);
+        assert_eq!(update_window_height(80.0, 193.0, 225.0, 900.0), 120.0);
+    }
 }
 
 #[tauri::command]
@@ -1952,6 +2061,7 @@ pub fn run() {
             open_usage_details,
             open_claude_usage,
             fit_settings_window,
+            fit_update_window,
             get_update_status,
             start_update_check,
             start_update_install,
