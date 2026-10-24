@@ -16,7 +16,7 @@ test("tray generator is deterministic and does not touch the app artwork", () =>
   assert.deepEqual(readFileSync(new URL("../assets/app-icon.png", import.meta.url)), app);
 });
 
-test("runtime template has transparent corners, antenna, gauge eye and separated feet", () => {
+test("runtime template has transparent corners, antenna, simple eye and separated feet", () => {
   const png = readFileSync(asset);
   assert.equal(png.readUInt32BE(16), 36);
   assert.equal(png.readUInt32BE(20), 36);
@@ -40,8 +40,14 @@ test("runtime template has transparent corners, antenna, gauge eye and separated
   assert(alpha(22, 4) > 240, "antenna");
   assert(alpha(12, 30) > 240, "body");
   assert(alpha(22, 23) > 240, "single pupil");
-  assert.equal(alpha(17.7, 19.8), 0, "eye cutout in the gauge opening");
-  assert(alpha(22, 18.2) > 240, "gauge arc");
+  assert.equal(alpha(17.7, 19.8), 0, "eye counterform");
+  assert(alpha(24, 23) > 240, "broad solid pupil");
+  for (const [x, y] of [[22, 17.5], [27.5, 23], [22, 28.5], [16.5, 23]]) {
+    assert.equal(alpha(x, y), 0, "uninterrupted counterform, no gauge arc");
+  }
+  const svg = readFileSync(new URL("../src-tauri/icons/mascot-menu.svg", import.meta.url), "utf8");
+  assert.match(svg, /<circle cx="22" cy="23" r="3.5"\/>/);
+  assert.doesNotMatch(svg, /stroke-width|stroke-linecap/);
   assert.equal(alpha(22, 33.7), 0, "mouth");
   assert.equal(alpha(22, 41), 0, "foot gap");
   assert(alpha(16, 41) > 240, "left foot");

@@ -25,15 +25,12 @@ function mascotContains(x, y) {
   const body = roundedRect(x, y, 10, 21, 24, 18, 1.5);
   const feet = roundedRect(x, y, 13, 36, 7, 6, 1.5) || roundedRect(x, y, 24, 36, 7, 6, 1.5);
   const eye = circle(x, y, 22, 23, 7.5);
-  const radius = Math.hypot(x - 22, y - 23);
-  const angle = (Math.atan2(x - 22, 23 - y) + 2 * Math.PI) % (2 * Math.PI);
-  const gauge = (radius >= 3.6 && radius <= 6 && angle <= 4.4)
-    || circle(x, y, 22, 18.2, 1.2)
-    || circle(x, y, 22 + 4.8 * Math.sin(4.4), 23 - 4.8 * Math.cos(4.4), 1.2);
-  const pupil = circle(x, y, 22, 23, 1.6);
+  // A broad, uninterrupted counterform and one solid pupil survive 16pt.
+  // No gauge arc: its narrow gaps merged into noise at non-Retina sizes.
+  const pupil = circle(x, y, 22, 23, 3.5);
   const mouth = roundedRect(x, y, 16, 33, 12, 1.5, 0.75)
     || roundedRect(x, y, 17.5, 36, 9, 1.5, 0.75);
-  return antenna || ((dome || body || feet) && !mouth && (!eye || gauge || pupil));
+  return antenna || ((dome || body || feet) && !mouth && (!eye || pupil));
 }
 
 const pixels = Buffer.alloc(size * size * 4);
