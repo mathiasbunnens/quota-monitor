@@ -170,11 +170,19 @@ fn claude_observations(snap: &claude::ClaudeSnapshot) -> Vec<Observation> {
         .collect()
 }
 
-// Remember BOTH sides of the threshold: first discovery at 100 is not a crossing.
-// Legacy values represent already reserved attempts and remain exhausted.
+// Raw used == 0 means genuinely full, not a rounded remaining percentage.
+// Old exhaustion-policy entries establish a silent baseline on first fresh data.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 enum Counter {
+    Refill {
+        reset: Option<i64>,
+        full: bool,
+        attempted: bool,
+        checked: i64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        muted: bool,
+    },
     Observed {
         reset: Option<i64>,
         exhausted: bool,
@@ -195,47 +203,54 @@ impl Ledger {
         {
             return None;
         }
-        let used = o.used.filter(|v| v.is_finite() && *v >= 0.0)?;
-        let previous = self.0.get(&o.key).map(|counter| match counter {
-            Counter::Observed {
-                reset, exhausted, ..
-            } => (*reset, *exhausted),
-            Counter::Legacy(reset) => (*reset, true),
-        });
-        let exhausted = used >= 100.0;
-        let new_cycle = previous.is_some_and(|(reset, _)| {
-            reset.is_some_and(|at| o.checked.is_some_and(|checked| checked >= at))
-                || matches!((reset, o.reset), (Some(a), Some(b)) if a != b)
-        });
-        let was_muted = matches!(
-            self.0.get(&o.key),
-            Some(Counter::Observed { muted: true, .. })
-        );
-        let notify = !was_muted && exhausted && previous.is_some_and(|(_, was)| !was || new_cycle);
-        // Missing reset metadata never rearms. Keep a known future reset so it
-        // can still establish a new cycle after a temporary metadata omission.
-        let reset = o
-            .reset
-            .or_else(|| previous.and_then(|(reset, _)| reset.filter(|at| *at > now)));
+        let used = o
+            .used
+            .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))?;
+        let checked = o.checked?;
+        let previous = match self.0.get(&o.key) {
+            Some(Counter::Refill {
+                reset,
+                full,
+                attempted,
+                checked: at,
+                muted,
+            }) => {
+                if checked < *at {
+                    return None;
+                }
+                Some((*reset, *full, *attempted, *muted))
+            }
+            // Do not interpret an old exhaustion flag as a refill observation.
+            _ => None,
+        };
+        let full = used == 0.0;
+        let (prior_reset, was_full, attempted, was_muted) =
+            previous.unwrap_or((None, full, false, false));
+        // A changed future date alone is not proof of a reset. With a known
+        // window, latch the attempt until that window actually elapses. Without
+        // reset metadata the only evidence available is a new nonfull -> full edge.
+        let rearmed = prior_reset.is_some_and(|at| checked >= at)
+            || (prior_reset.is_none() && !full)
+            || was_muted;
+        let attempted = attempted && !rearmed;
+        let notify = previous.is_some() && !was_muted && !was_full && full && !attempted;
+        let reset = o.reset.or_else(|| prior_reset.filter(|at| *at > now));
         self.0.insert(
             o.key.clone(),
-            Counter::Observed {
+            Counter::Refill {
                 reset,
-                exhausted,
+                full,
+                attempted: attempted || notify,
+                checked,
                 muted: false,
             },
         );
         if !notify {
             return None;
         }
-        let reset = o
-            .reset
-            .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
-            .map(|at| format!(" Réinitialisation : {} UTC.", at.format("%d/%m/%Y %H:%M")))
-            .unwrap_or_default();
         Some(format!(
-            "{} · {} : 100 % consommé (0 % restant).{}",
-            o.provider, o.window, reset
+            "{} · {} : quota reconstitué (100 % restant).",
+            o.provider, o.window
         ))
     }
     #[cfg(test)]
@@ -245,11 +260,19 @@ impl Ledger {
     fn mute_fable(&mut self) {
         if let Some(counter) = self.0.get_mut("Claude:claude:weekly_fable") {
             let reset = match counter {
-                Counter::Observed { reset, .. } | Counter::Legacy(reset) => *reset,
+                Counter::Refill { reset, .. }
+                | Counter::Observed { reset, .. }
+                | Counter::Legacy(reset) => *reset,
             };
-            *counter = Counter::Observed {
+            let checked = match counter {
+                Counter::Refill { checked, .. } => *checked,
+                _ => 0,
+            };
+            *counter = Counter::Refill {
                 reset,
-                exhausted: true,
+                full: true,
+                attempted: false,
+                checked,
                 muted: true,
             };
         }
@@ -346,7 +369,7 @@ pub fn start(app: tauri::AppHandle) {
             }
             if let Some(message) = message {
                 // A queued observation may outlive a settings edit. One delivery
-                // per refresh includes all newly exhausted windows/models.
+                // per refresh includes all newly replenished windows/models.
                 if prefs::current(&app) == p {
                     if let Err(error) = send(&p.ntfy, &message) {
                         eprintln!("{error}");
@@ -378,13 +401,13 @@ mod tests {
         ledger
     }
     #[test]
-    fn initial_exhaustion_is_silent_including_polls_restart_and_missing_values() {
+    fn initial_full_is_silent_including_polls_restart_and_missing_values() {
         let mut ledger = Ledger::default();
-        assert!(ledger.observe(true, &sample(100.0), 1000).is_none());
+        assert!(ledger.observe(true, &sample(0.0), 1000).is_none());
         let bytes = serde_json::to_vec(&ledger).unwrap();
         let mut ledger: Ledger = serde_json::from_slice(&bytes).unwrap();
         for _ in 0..20 {
-            assert!(ledger.observe(true, &sample(100.0), 1000).is_none());
+            assert!(ledger.observe(true, &sample(0.0), 1000).is_none());
         }
         let mut missing = sample(0.0);
         missing.used = None;
@@ -392,31 +415,31 @@ mod tests {
         missing.used = Some(0.0);
         missing.valid = false;
         assert!(ledger.observe(true, &missing, 1000).is_none());
-        assert!(ledger.observe(true, &sample(100.0), 1000).is_none());
+        assert!(ledger.observe(true, &sample(0.0), 1000).is_none());
         assert!(ledger.observe(true, &sample(99.0), 1000).is_none());
-        assert!(ledger.observe(true, &sample(100.0), 1000).is_some());
+        assert!(ledger.observe(true, &sample(0.0), 1000).is_some());
     }
     #[test]
     fn exact_threshold_direction_duplicates_restart_and_rearm() {
         let mut l = Ledger::default();
-        for used in [0.0, 50.0, 99.6, 99.99] {
+        for used in [50.0, 80.0, 90.0, 99.6, 99.99, 100.0, 0.4, 0.00001] {
             assert!(l.observe(true, &sample(used), 1000).is_none());
         }
-        assert!(l.observe(true, &sample(100.0), 1000).is_some());
+        assert!(l.observe(true, &sample(0.0), 1000).is_some());
         let bytes = serde_json::to_vec(&l).unwrap();
         let mut l: Ledger = serde_json::from_slice(&bytes).unwrap();
-        assert!(l.observe(true, &sample(100.0), 1000).is_none());
-        assert!(l.observe(true, &sample(99.9), 1000).is_none());
-        assert!(l.observe(true, &sample(100.0), 1000).is_some());
-        let mut next = sample(100.0);
+        assert!(l.observe(true, &sample(0.0), 1000).is_none());
+        assert!(l.observe(true, &sample(0.1), 1000).is_none());
+        assert!(l.observe(true, &sample(0.0), 1000).is_none());
+        let mut next = sample(0.0);
         next.reset = Some(3000);
-        assert!(l.observe(true, &next, 1000).is_some());
+        assert!(l.observe(true, &next, 1000).is_none());
         next.key = "Claude:five_hour".into();
         next.provider = "Claude";
         assert!(l.observe(true, &next, 1000).is_none());
         next.used = Some(99.0);
         assert!(l.observe(true, &next, 1000).is_none());
-        next.used = Some(100.0);
+        next.used = Some(0.0);
         assert!(l.observe(true, &next, 1000).unwrap().contains("Claude"));
         next.reset = None;
         assert!(l.observe(true, &next, 1000).is_none());
@@ -424,7 +447,7 @@ mod tests {
         assert!(l.observe(true, &next, 1000).is_none());
         next.used = Some(99.0);
         assert!(l.observe(true, &next, 1000).is_none());
-        next.used = Some(100.0);
+        next.used = Some(0.0);
         assert!(l.observe(true, &next, 1000).is_some());
         next.reset = Some(3000);
         assert!(l.observe(true, &next, 1000).is_none());
@@ -433,7 +456,7 @@ mod tests {
     fn invalid_disabled_stale_and_errors_never_send_or_rearm() {
         let mut l = Ledger::default();
         assert!(l.observe(false, &sample(100.0), 1000).is_none());
-        for used in [f64::NAN, f64::INFINITY, -1.0] {
+        for used in [f64::NAN, f64::INFINITY, -1.0, 100.1] {
             assert!(l.observe(true, &sample(used), 1000).is_none());
         }
         let mut invalid = sample(100.0);
@@ -452,14 +475,20 @@ mod tests {
         assert!(l.observe(true, &o, 1000).is_none());
         assert!(l.0.is_empty());
         assert!(l.observe(true, &sample(99.0), 1000).is_none());
-        assert!(l.observe(true, &sample(100.0), 1000).is_some());
+        assert!(l.observe(true, &sample(0.0), 1000).is_some());
         invalid.used = Some(0.0);
         assert!(l.observe(true, &invalid, 1000).is_none());
         assert!(l.observe(true, &sample(100.0), 1000).is_none());
     }
     #[test]
     fn codex_raw_percentage_not_rounded_display_drives_threshold() {
-        for (used, expected) in [(0.0, false), (99.6, false), (100.0, true)] {
+        for (used, expected) in [
+            (0.0, true),
+            (0.4, false),
+            (0.00001, false),
+            (99.6, false),
+            (100.0, false),
+        ] {
             let rows = codex::normalize(&serde_json::json!({"rateLimits":{
                 "primary":{"usedPercent":used,"windowDurationMins":300}
             }}))
@@ -476,14 +505,14 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("attempts.json");
         let mut ledger = armed();
-        assert!(ledger.observe(true, &sample(100.0), 1000).is_some());
+        assert!(ledger.observe(true, &sample(0.0), 1000).is_some());
         ledger.save(&path).unwrap();
         let mut restored: Ledger = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(restored.observe(true, &sample(100.0), 1000).is_none());
         assert!(restored.observe(true, &sample(0.0), 1000).is_none());
         restored.save(&path).unwrap();
         let mut restored: Ledger = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert!(restored.observe(true, &sample(100.0), 1000).is_some());
+        assert!(restored.observe(true, &sample(0.0), 1000).is_none());
         assert!(restored.save(&dir.join("missing/attempts.json")).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
@@ -566,7 +595,7 @@ mod tests {
             .unwrap();
             String::from_utf8(request).unwrap()
         });
-        let message = armed().observe(true, &sample(100.0), 1000).unwrap();
+        let message = armed().observe(true, &sample(0.0), 1000).unwrap();
         let result = send(&config, &message);
         (result, server.join().unwrap())
     }
@@ -576,8 +605,8 @@ mod tests {
         result.unwrap();
         assert!(request.starts_with("POST /base/local-test-only HTTP/1.1"));
         assert!(request.contains("Quota Monitor"));
-        assert!(request.contains("Codex · 5 heures : 100 % consommé (0 % restant)."));
-        assert!(request.contains("UTC."));
+        assert!(request.contains("Codex · 5 heures : quota reconstitué (100 % restant)."));
+        assert!(!request.contains("consommé"));
         assert!(!request.contains("usedPercent"));
         assert!(local_post(403).0.unwrap_err().contains("403"));
         assert!(local_post(302).0.is_err());
@@ -593,7 +622,7 @@ mod tests {
             enabled: true,
         };
         let mut l = armed();
-        let message = l.observe(true, &sample(100.0), 1000).unwrap();
+        let message = l.observe(true, &sample(0.0), 1000).unwrap();
         assert!(send(&c, &message).is_err());
         assert!(l.observe(true, &sample(100.0), 1000).is_none());
     }
@@ -604,7 +633,7 @@ mod tests {
             schema_version: 1,
             received_at: 1000,
             five_hour: Some(claude::Window {
-                used_percent: 100.0,
+                used_percent: 0.0,
                 resets_at: Some(2000),
             }),
             seven_day: None,
@@ -631,27 +660,34 @@ mod tests {
     }
 
     #[test]
-    fn elapsed_reset_rearms_even_when_next_reset_is_unknown() {
+    fn elapsed_reset_alone_never_notifies_and_next_full_transition_rearms() {
         let mut l = armed();
-        assert!(l.observe(true, &sample(100.0), 1000).is_some());
+        assert!(l.observe(true, &sample(0.0), 1000).is_some());
         let mut next = sample(100.0);
         next.checked = Some(2100);
         next.reset = None;
+        assert!(l.observe(true, &next, 2100).is_none());
+        next.used = Some(0.0);
         assert!(l.observe(true, &next, 2100).is_some());
         assert!(l.observe(true, &next, 2100).is_none());
     }
 
     #[test]
-    fn legacy_attempts_remain_silent_and_below_threshold_state_survives_restart() {
-        for reset in [serde_json::json!(2000), serde_json::Value::Null] {
+    fn legacy_policy_migrates_silently_and_nonfull_state_survives_restart() {
+        for reset in [
+            serde_json::json!(2000),
+            serde_json::Value::Null,
+            serde_json::json!({"reset":2000,"exhausted":true}),
+            serde_json::json!({"reset":2000,"exhausted":false,"muted":true}),
+        ] {
             let mut ledger: Ledger =
                 serde_json::from_value(serde_json::json!({"Codex:primary":reset})).unwrap();
-            assert!(ledger.observe(true, &sample(100.0), 1000).is_none());
+            assert!(ledger.observe(true, &sample(0.0), 1000).is_none());
             assert!(ledger.observe(true, &sample(99.0), 1000).is_none());
             let mut ledger: Ledger =
                 serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
-            assert!(ledger.observe(true, &sample(100.0), 1000).is_some());
-            assert!(ledger.observe(true, &sample(100.0), 1000).is_none());
+            assert!(ledger.observe(true, &sample(0.0), 1000).is_some());
+            assert!(ledger.observe(true, &sample(0.0), 1000).is_none());
         }
     }
 
@@ -666,7 +702,7 @@ mod tests {
             .observe_all_with_fable(&[fable.clone()], 1000, true)
             .is_none());
         assert!(ledger.observe_all_with_fable(&[], 1000, false).is_none());
-        fable.used = Some(100.0);
+        fable.used = Some(0.0);
         assert!(ledger
             .observe_all_with_fable(&[fable.clone()], 1000, false)
             .is_none());
@@ -689,7 +725,7 @@ mod tests {
         assert!(ledger
             .observe_all_with_fable(&[fable.clone()], 1000, true)
             .is_none());
-        fable.used = Some(100.0);
+        fable.used = Some(0.0);
         assert!(ledger
             .observe_all_with_fable(&[fable.clone()], 1000, true)
             .unwrap()
@@ -697,15 +733,15 @@ mod tests {
         // Other quotas still cross normally while Fable is muted.
         ledger.observe_all_with_fable(&[sample(90.0)], 1000, false);
         let message = ledger
-            .observe_all_with_fable(&[sample(100.0), fable.clone()], 1000, false)
+            .observe_all_with_fable(&[sample(0.0), fable.clone()], 1000, false)
             .unwrap();
         assert!(message.contains("Codex"));
         assert!(!message.contains("Fable"));
         // Hidden drops/reset changes cannot rearm an alert on enable either.
-        fable.used = Some(0.0);
+        fable.used = Some(99.0);
         ledger.observe_all_with_fable(&[fable.clone()], 1000, false);
         fable.reset = Some(4000);
-        fable.used = Some(100.0);
+        fable.used = Some(0.0);
         assert!(ledger
             .observe_all_with_fable(&[fable], 1000, true)
             .is_none());
@@ -727,8 +763,8 @@ mod tests {
         };
         let mut ledger = armed();
         assert!(ledger.observe_all(&claude(99.6), 1000).is_none());
-        let mut rows = claude(100.0);
-        rows.push(sample(100.0));
+        let mut rows = claude(0.0);
+        rows.push(sample(0.0));
         // A repeated row in the same batch must not duplicate a line either.
         rows.push(rows[2].clone());
         let message = ledger.observe_all(&rows, 1000).unwrap();
@@ -755,14 +791,74 @@ mod tests {
     #[test]
     fn missing_reset_does_not_forget_a_known_cycle_or_rearm_on_metadata_enrichment() {
         let mut ledger = Ledger::default();
-        let mut unknown = sample(100.0);
+        let mut unknown = sample(0.0);
         unknown.reset = None;
         assert!(ledger.observe(true, &unknown, 1000).is_none());
-        assert!(ledger.observe(true, &sample(100.0), 1000).is_none());
+        assert!(ledger.observe(true, &sample(0.0), 1000).is_none());
         assert!(ledger.observe(true, &unknown, 1000).is_none());
         unknown.checked = Some(2100);
-        assert!(ledger.observe(true, &unknown, 2100).is_some());
         assert!(ledger.observe(true, &unknown, 2100).is_none());
+        assert!(ledger.observe(true, &unknown, 2100).is_none());
+    }
+
+    #[test]
+    fn multiple_known_cycles_require_nonfull_to_full_not_just_a_reset_date() {
+        let mut ledger = armed();
+        assert!(ledger.observe(true, &sample(0.0), 1000).is_some());
+        // Three subsequent cycles, with persistence between consumption and refill.
+        for now in [2100, 3100, 4100] {
+            let mut row = sample(0.0);
+            row.checked = Some(now);
+            row.reset = Some(now + 900);
+            assert!(ledger.observe(true, &row, now).is_none());
+            row.used = Some(80.0);
+            assert!(ledger.observe(true, &row, now).is_none());
+            ledger = serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+            row.used = Some(0.4); // 99.6% remaining may display 100, but is NOT full.
+            assert!(ledger.observe(true, &row, now).is_none());
+            row.used = Some(0.0);
+            assert!(ledger.observe(true, &row, now).is_some());
+            assert!(ledger.observe(true, &row, now).is_none());
+        }
+    }
+
+    #[test]
+    fn unknown_resets_use_exact_edges_and_old_samples_cannot_rearm() {
+        let mut ledger = Ledger::default();
+        let mut row = sample(50.0);
+        row.reset = None;
+        assert!(ledger.observe(true, &row, 1000).is_none());
+        for now in [1010, 1020, 1030] {
+            row.checked = Some(now);
+            row.used = Some(0.0);
+            assert!(ledger.observe(true, &row, now).is_some());
+            assert!(ledger.observe(true, &row, now).is_none());
+            let mut old = row.clone();
+            old.checked = Some(now - 1);
+            old.used = Some(50.0);
+            assert!(ledger.observe(true, &old, now).is_none());
+            assert!(ledger.observe(true, &row, now).is_none());
+            row.used = Some(50.0);
+            assert!(ledger.observe(true, &row, now).is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_nonfull_or_full_first_sample_never_replays_the_old_policy() {
+        for full in [true, false] {
+            for exhausted in [true, false] {
+                let mut ledger: Ledger = serde_json::from_value(serde_json::json!({
+                    "Codex:primary":{"reset":2000,"exhausted":exhausted}
+                }))
+                .unwrap();
+                let used = if full { 0.0 } else { 50.0 };
+                assert!(ledger.observe(true, &sample(used), 1000).is_none());
+                if full {
+                    assert!(ledger.observe(true, &sample(50.0), 1000).is_none());
+                }
+                assert!(ledger.observe(true, &sample(0.0), 1000).is_some());
+            }
+        }
     }
 
     #[test]

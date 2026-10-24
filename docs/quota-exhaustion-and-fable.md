@@ -1,19 +1,28 @@
-# Exhaustion alerts and optional Claude Fable quota
+# Quota refill alerts and optional Claude Fable quota
 
-## Exhaustion alerts
+## Refill alerts (replaces exhaustion alerts)
 
-Automatic ntfy alerts use the provider's raw consumption, never a rounded display
-percentage. A counter first observed below 100% arms its next exhaustion alert.
-A counter first observed at 100% is recorded silently. Polling, indicator selection,
-missing/invalid/stale data, provider errors and restarting the application do not
-rearm an exhausted counter. A real return below 100%, a changed known reset window,
-or an elapsed known reset followed by fresh data establishes a new cycle.
+Automatic ntfy alerts now fire ONLY on an observed nonfull → full transition:
+raw consumption greater than zero → exactly zero (100% remaining). There is no
+80/90% consumption warning and no exhaustion alert. Never use a rounded display:
+0.4% consumed is 99.6% remaining, not a refill. Missing/invalid/stale data and
+provider errors are not zero. Codex, Claude and optional Fable use the same rule.
 
-The local `ntfy-attempts.json` ledger now records both the reset and exhausted state.
-Existing number/null entries remain readable as already exhausted counters. State
-is saved before attempting delivery; a network failure is not retried until rearmed.
-All new exhaustions collected in one worker refresh are combined into one message,
-with independent state per provider/counter (including Fable).
+First discovery at full is silent, as are repeated full polls and restarts. The
+local `ntfy-attempts.json` ledger records full/nonfull, last observation time, reset,
+attempt and mute state per counter. Old exhaustion objects and number/null entries
+migrate on their first valid sample to a silent refill baseline; no preferences,
+ntfy server/topic, credentials or provider data are changed. State is saved before
+delivery, so failures/interruption cannot repeatedly send the same refill.
+
+For known reset windows, at most one attempt is allowed until the prior reset has
+elapsed; a changed future reset date or small within-cycle fluctuation cannot
+rearm it. An elapsed timestamp alone never sends: a nonfull → full edge is still
+required. Temporarily missing metadata preserves a known future reset. Without a
+reset timestamp, repeated full polls remain silent and a new exact nonfull → full
+edge is the only cycle evidence available; the app cannot independently prove an
+upstream refill versus provider jitter in that case. Older observations are ignored.
+All new refills in one refresh are grouped, independently deduplicated per counter.
 
 ## Fable field provenance
 
@@ -35,7 +44,7 @@ no new endpoint, credential access or inference request is introduced.
 
 Only a bucket explicitly labelled `Fable` (case insensitive) with valid numeric
 utilization is added as `claude:weekly_fable`, labelled "Limite hebdomadaire Fable".
-It uses the normal seven-day metric/reset rendering and exhaustion notification
+It uses the normal seven-day metric/reset rendering and refill notification
 path. Missing/null/invalid buckets produce no Fable row, not an invented 0%.
 Old responses without `model_scoped` keep the existing five-hour and weekly metrics.
 Expired windows use the existing unavailable state; a reported percentage without
@@ -60,7 +69,7 @@ fallback menu; other quotas remain unchanged. No additional provider call is mad
 The notification ledger persists a muted baseline, including when delivery is
 globally disabled. Hidden samples and missing/invalid data cannot replay a hidden
 crossing on reactivation. The first valid enabled sample establishes a silent
-baseline; subsequent real below-100 → 100 transitions notify normally. Existing
+baseline; subsequent nonfull → full transitions notify normally. Existing
 ledger entries without the new muted flag remain readable.
 
 The Fable row is fully opaque (no dimming or dot); the word Fable keeps the normal
@@ -91,8 +100,8 @@ offline; interactive installed-app UI remains a manual review check.
 
 Unit fixtures are synthetic test values following the inspected official schema,
 not claimed captured account responses. Tests cover present/absent/null/invalid
-Fable, real zero, exact exhaustion, reset, unchanged old quotas, grouped alerts,
-first observation at 100%, restart, legacy ledger migration and rearming rules.
+Fable, real zero consumption, exact refill, reset, unchanged old quotas, grouped alerts,
+first observation at full, restart, legacy ledger migration and rearming rules.
 Existing transport tests use a fake local CLI; HTTP delivery tests use loopback
 servers only. No real ntfy notification or model-generation request is needed.
 

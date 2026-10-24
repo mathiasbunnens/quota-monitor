@@ -6,7 +6,7 @@ import CodexConnection from "../setup/CodexConnection";
 import RefreshSettings from "../setup/RefreshSettings";
 import NtfySettings from "./NtfySettings";
 import ResetCredits from "../quota/ResetCredits";
-import type { ClaudeSnapshot, CodexStatus, IndicatorChoice, Preferences } from "../quota/types";
+import type { ClaudeSnapshot, CodexStatus, DisplayMode, IndicatorChoice, Preferences } from "../quota/types";
 import "../../pages/Dashboard/dashboard.scss";
 import "./settings.scss";
 
@@ -21,7 +21,7 @@ const icons: Record<string, ReactNode> = {
 
 const tabs = [
   { id: "providers", label: "Fournisseurs" },
-  { id: "menubar", label: "Barre des menus" },
+  { id: "menubar", label: "Affichage" },
   { id: "refresh", label: "Actualisation" },
   { id: "notifications", label: "Notifications" },
 ] as const;
@@ -31,6 +31,11 @@ const indicatorOptions: { value: IndicatorChoice; label: string }[] = [
   { value: "codex", label: "Codex" },
   { value: "claude", label: "Claude" },
   { value: "both", label: "Les deux" },
+];
+
+const displayModeOptions: { value: DisplayMode; label: string }[] = [
+  { value: "menubar", label: "Barre des menus" },
+  { value: "app", label: "Application" },
 ];
 
 const claudeStates: Record<ClaudeSnapshot["state"], [string, Tone, string]> = {
@@ -126,8 +131,17 @@ export default function Settings() {
   const root = useRef<HTMLElement>(null);
   const [codexMore, setCodexMore] = useState(false);
   const [claudeMore, setClaudeMore] = useState(false);
+  const [canChooseMode, setCanChooseMode] = useState(false);
   useFitWindow(root, [tab, prefs !== null].join());
   const reload = useCallback(() => setRevision((value) => value + 1), []);
+
+  useEffect(() => {
+    let disposed = false;
+    void invoke<string>("get_platform").then((platform) => {
+      if (!disposed) setCanChooseMode(platform === "macos");
+    }).catch(() => undefined);
+    return () => { disposed = true; };
+  }, []);
 
   useEffect(() => {
     const quotas = listen("quota-updated", reload).catch(() => () => {});
@@ -252,7 +266,17 @@ export default function Settings() {
       </div>}
 
       {tab === "menubar" && <div role="tabpanel" id="panel-menubar" aria-labelledby="tab-menubar">
-        <fieldset className="prefs-group" disabled={busy}>
+        {canChooseMode && <fieldset className="prefs-group" disabled={busy}>
+          <legend className="prefs-group__legend">Mode d’affichage</legend>
+          <div className="prefs-segmented" role="radiogroup" aria-label="Mode d’affichage">
+            {displayModeOptions.map((option) => <label key={option.value} className={prefs.displayMode === option.value ? "is-selected" : ""}>
+              <input type="radio" name="displayMode" value={option.value} checked={prefs.displayMode === option.value}
+                onChange={() => void update({ displayMode: option.value })} />{option.label}
+            </label>)}
+          </div>
+          <p>{prefs.displayMode === "app" ? "Icône dans le Dock, sans icône dans la barre des menus." : "Icône dans la barre des menus, sans icône dans le Dock."}</p>
+        </fieldset>}
+        {(!canChooseMode || prefs.displayMode !== "app") && <fieldset className="prefs-group" disabled={busy}>
           <legend className="prefs-group__legend">Afficher dans la barre des menus</legend>
           <div className="prefs-segmented" role="radiogroup" aria-label="Indicateur de la barre des menus">
             {indicatorOptions.map((option) => <label key={option.value} className={prefs.indicator === option.value ? "is-selected" : ""}>
@@ -261,7 +285,7 @@ export default function Settings() {
             </label>)}
           </div>
           <p>Quota restant sur la limite 5 heures.</p>
-        </fieldset>
+        </fieldset>}
       </div>}
 
       {tab === "refresh" && <div role="tabpanel" id="panel-refresh" aria-labelledby="tab-refresh">

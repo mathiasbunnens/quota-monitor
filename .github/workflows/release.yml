@@ -68,12 +68,14 @@ jobs:
           releaseBody: |
             Application macOS, Windows et Linux pour surveiller les quotas Codex et Claude.
 
-            Version 3.0.4.
+            Version 3.1.0.
 
-            - Nouvelle icône d’application issue du PNG final approuvé, avec icône de barre des menus inchangée.
-            - Fenêtre de mise à jour harmonisée avec les Réglages, en clair et sombre, et hauteur ajustée au contenu dans les limites de l’écran.
-            - Barre de progression et pourcentage alignés ; progression fondée sur les octets reçus et état indéterminé lorsque la taille est inconnue.
-            - Phase de vérification et d’installation distincte ; 100 % réservé à la réussite réelle de l’installation.
+            - Sur macOS, choix persistant dans les Réglages entre barre des menus (mode par défaut conservé) et application avec fenêtre, Dock et Cmd+Tab.
+            - Fenêtre application compacte reprenant les jauges et couleurs du panneau de quotas ; accès aux Réglages et aux mises à jour par deux boutons en haut à droite.
+            - Notifications uniquement au retour à exactement 100 % de quota restant, une fois par cycle : aucune alerte au démarrage déjà plein, à l’épuisement ou aux valeurs simplement arrondies à 100 %.
+            - Mascotte de barre des menus affinée avec pupille aux trois quarts et quart transparent, adaptée aux apparences claire et sombre.
+            - Informations du panneau natif macOS non sélectionnables pour éviter le surlignage bleu au survol.
+            - Conservation des améliorations de la fenêtre de mise à jour et de la compatibilité des mises à jour depuis la version 3.0.4.
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

@@ -26,12 +26,14 @@ export type CodexStatus = {
 };
 
 export type IndicatorChoice = "codex" | "claude" | "both";
+export type DisplayMode = "menubar" | "app";
 export type NtfyConfig = { enabled: boolean; serverUrl: string; topic: string };
 export type Preferences = {
   codexEnabled: boolean;
   claudeEnabled: boolean;
   fableEnabled: boolean;
   indicator: IndicatorChoice;
+  displayMode: DisplayMode;
   ntfy: NtfyConfig;
 };
 

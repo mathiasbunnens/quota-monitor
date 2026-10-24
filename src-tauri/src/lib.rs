@@ -2,6 +2,7 @@ mod activity;
 mod claude;
 mod claude_cli;
 mod codex;
+mod display_mode;
 mod indicator;
 mod ntfy;
 mod prefs;
@@ -454,13 +455,7 @@ define_class!(
 
         #[unsafe(method(connectAccount:))]
         fn connect_account(&self, _sender: Option<&AnyObject>) {
-            let Some(app) = APP_HANDLE.get() else { return; };
-            let Some(provider) = app.try_state::<codex::Provider>() else { return; };
-            if provider.status().phase == "missing" {
-                let _ = codex::open_codex_install(app.clone());
-            } else {
-                provider.login(false);
-            }
+            if let Some(app) = APP_HANDLE.get() { let _ = connect_codex_account(app.clone()); }
         }
 
         #[unsafe(method(openSettings:))]
@@ -1048,6 +1043,269 @@ fn panel_header(providers: &[PanelProvider], last_refresh: Option<DateTime<Local
     }
 }
 
+/// "plus" -> "Plus": plan badge as shown at the right of a provider section.
+#[cfg(target_os = "macos")]
+fn pretty_badge(badge: &str) -> String {
+    let mut chars = badge.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect::<String>())
+        .unwrap_or_default()
+}
+
+/// Values at or below 20 % remaining are drawn in red.
+#[cfg(target_os = "macos")]
+fn row_is_low(row: &PanelRow) -> bool {
+    row.remaining.is_some_and(|p| p <= 20)
+}
+
+/// Gauge fill width on the panel track (logical points).
+#[cfg(target_os = "macos")]
+fn row_fill_width(row: &PanelRow) -> f64 {
+    PANEL_INNER_WIDTH * f64::from(row.remaining.unwrap_or(0).min(100)) / 100.0
+}
+
+/// A sub-radius fill renders as a pinched artefact: 0 % shows the track only.
+#[cfg(target_os = "macos")]
+fn row_fill_visible(row: &PanelRow) -> bool {
+    row_fill_width(row) >= 5.0
+}
+
+// ---------------------------------------------------------------------------
+// Compact standalone window (macOS application mode). It serialises the exact
+// panel model of the menu-bar item so both surfaces share labels, order,
+// values, notes and gauge colours; the webview only lays it out.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompactFill {
+    from: &'static str,
+    to: &'static str,
+    fraction: f64,
+    visible: bool,
+    /// Width relative to the track, 0..=1.
+    ratio: f64,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompactRow {
+    model: bool,
+    label: String,
+    remaining: Option<u32>,
+    value: String,
+    reset: String,
+    low: bool,
+    fill: CompactFill,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompactNote {
+    text: String,
+    tone: &'static str,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompactProvider {
+    name: &'static str,
+    section: String,
+    badge: Option<String>,
+    rows: Vec<CompactRow>,
+    note: Option<CompactNote>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompactHeader {
+    title: &'static str,
+    subtitle: String,
+    status: &'static str,
+    tone: &'static str,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompactConnection {
+    label: &'static str,
+    logging_in: bool,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompactPanel {
+    header: CompactHeader,
+    providers: Vec<CompactProvider>,
+    connection: Option<CompactConnection>,
+    version: String,
+    /// Last updater state; `None` while no check has reported anything.
+    update: Option<UpdateStatus>,
+}
+
+#[cfg(target_os = "macos")]
+fn tone_name(tone: Tone) -> &'static str {
+    match tone {
+        Tone::Neutral => "neutral",
+        Tone::Good => "good",
+        Tone::Warning => "warning",
+        Tone::Error => "error",
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn connection_label(logging_in: bool) -> &'static str {
+    if logging_in {
+        "Connexion en cours…"
+    } else {
+        "Se connecter à Codex…"
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn compact_row(row: &PanelRow) -> CompactRow {
+    let (from, to, fraction) = quota_color_transition(row.remaining.unwrap_or(0));
+    CompactRow {
+        model: row.model,
+        label: row.label.clone(),
+        remaining: row.remaining,
+        value: row.value.clone(),
+        reset: row.reset.clone(),
+        low: row_is_low(row),
+        fill: CompactFill {
+            from,
+            to,
+            fraction,
+            visible: row_fill_visible(row),
+            ratio: row_fill_width(row) / PANEL_INNER_WIDTH,
+        },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn compact_panel(model: &PanelModel, version: &str, update: Option<UpdateStatus>) -> CompactPanel {
+    CompactPanel {
+        header: CompactHeader {
+            title: "Quota Monitor",
+            subtitle: model.header.subtitle.clone(),
+            status: model.header.status,
+            tone: tone_name(model.header.tone),
+        },
+        providers: model
+            .providers
+            .iter()
+            .map(|p| CompactProvider {
+                name: p.name,
+                section: p.name.to_uppercase(),
+                badge: p.badge.as_deref().map(pretty_badge),
+                rows: p.rows.iter().map(compact_row).collect(),
+                note: p.note.as_ref().map(|(text, tone)| CompactNote {
+                    text: text.clone(),
+                    tone: tone_name(*tone),
+                }),
+            })
+            .collect(),
+        connection: model.connection.map(|logging_in| CompactConnection {
+            label: connection_label(logging_in),
+            logging_in,
+        }),
+        version: version.to_string(),
+        update,
+    }
+}
+
+/// Everything the menu-bar panel shows, computed once for both surfaces.
+#[cfg(target_os = "macos")]
+struct PanelModel {
+    header: PanelHeader,
+    providers: Vec<PanelProvider>,
+    /// `Some(logging_in)` when the Codex connection action is offered.
+    connection: Option<bool>,
+}
+
+#[cfg(target_os = "macos")]
+fn panel_model(app: &tauri::AppHandle) -> PanelModel {
+    let snapshots = get_quota_snapshots(app.clone());
+    let prefs = prefs::current(app);
+    let claude_snap = claude::snapshot(app);
+    let claude_visible = claude_is_visible(&claude_snap);
+    let codex_status = app
+        .try_state::<codex::Provider>()
+        .map(|provider| provider.status());
+    let connection_phase = codex_status
+        .as_ref()
+        .map(|status| status.phase.clone())
+        .unwrap_or_else(|| "starting".into());
+    let mut providers = Vec::new();
+    if prefs.codex_enabled {
+        providers.push(codex_panel(
+            &snapshots,
+            &connection_phase,
+            codex_status
+                .as_ref()
+                .map(|s| s.message.as_str())
+                .unwrap_or(""),
+            codex_status.as_ref().and_then(|s| s.plan_type.clone()),
+        ));
+    }
+    if claude_visible {
+        providers.push(claude_panel(&claude_snap));
+    }
+    let header = panel_header(
+        &providers,
+        latest_refresh(&snapshots, claude_visible.then_some(&claude_snap)),
+    );
+    PanelModel {
+        header,
+        providers,
+        connection: (prefs.codex_enabled && connection_phase != "ready")
+            .then_some(connection_phase == "logging_in"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn get_compact_panel(app: tauri::AppHandle) -> CompactPanel {
+    let update = app
+        .state::<UpdateState>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|status| status.clone());
+    compact_panel(
+        &panel_model(&app),
+        &app.package_info().version.to_string(),
+        update,
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn get_compact_panel() -> Result<(), String> {
+    Err("La fenêtre compacte n’existe que sur macOS.".into())
+}
+
+/// Same action as the menu's "Se connecter à Codex…" item.
+#[tauri::command]
+fn connect_codex_account(app: tauri::AppHandle) -> Result<(), String> {
+    let provider = app
+        .try_state::<codex::Provider>()
+        .ok_or_else(|| "Service Codex indisponible.".to_string())?;
+    if provider.status().phase == "missing" {
+        codex::open_codex_install(app.clone())
+    } else {
+        codex::start_codex_login(provider, false)
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn note_lines(text: &str) -> f64 {
     // ~46 characters per line at 11 pt across the card's inner width.
@@ -1203,14 +1461,9 @@ fn make_panel_view(
         );
         place(&section, 16.0, top + 2.0, 150.0, 14.0);
         if let Some(badge) = &provider.badge {
-            let mut chars = badge.chars();
-            let pretty = chars
-                .next()
-                .map(|c| c.to_uppercase().chain(chars).collect::<String>())
-                .unwrap_or_default();
             let badge = panel_label(
                 mtm,
-                &pretty,
+                &pretty_badge(badge),
                 &NSFont::systemFontOfSize(10.0),
                 &NSColor::secondaryLabelColor(),
             );
@@ -1244,7 +1497,7 @@ fn make_panel_view(
                 view.setFrame(frame(x, PANEL_ROW_HEIGHT - (top - row_top) - h, w, h));
                 group.addSubview(view);
             };
-            let low = row.remaining.is_some_and(|p| p <= 20);
+            let low = row_is_low(row);
             let label = panel_label(
                 mtm,
                 &row.label,
@@ -1281,10 +1534,8 @@ fn make_panel_view(
                 2.5,
             );
             place(&track, 22.0, row_top + 23.0, PANEL_INNER_WIDTH, 5.0);
-            // A sub-radius fill renders as a pinched artefact: 0 % shows the track only.
-            let fill_width =
-                PANEL_INNER_WIDTH * f64::from(row.remaining.unwrap_or(0).min(100)) / 100.0;
-            if fill_width >= 5.0 {
+            if row_fill_visible(row) {
+                let fill_width = row_fill_width(row);
                 let fill = rounded_box(
                     mtm,
                     &quota_color(row.remaining.unwrap_or(0), row.model),
@@ -1379,39 +1630,12 @@ fn render_native_menu(app: &tauri::AppHandle) {
         else {
             return;
         };
+        let model = panel_model(&app);
         let snapshots = get_quota_snapshots(app.clone());
-        let prefs = prefs::current(&app);
         let claude_snap = claude::snapshot(&app);
-        let claude_visible = claude_is_visible(&claude_snap);
-        let codex_status = app
-            .try_state::<codex::Provider>()
-            .map(|provider| provider.status());
-        let connection_phase = codex_status
-            .as_ref()
-            .map(|status| status.phase.clone())
-            .unwrap_or_else(|| "starting".into());
         let mtm = MainThreadMarker::new().expect("native menu on main thread");
-        let mut providers = Vec::new();
-        if prefs.codex_enabled {
-            providers.push(codex_panel(
-                &snapshots,
-                &connection_phase,
-                codex_status
-                    .as_ref()
-                    .map(|s| s.message.as_str())
-                    .unwrap_or(""),
-                codex_status.as_ref().and_then(|s| s.plan_type.clone()),
-            ));
-        }
-        if claude_visible {
-            providers.push(claude_panel(&claude_snap));
-        }
-        let header = panel_header(
-            &providers,
-            latest_refresh(&snapshots, claude_visible.then_some(&claude_snap)),
-        );
         let indicator = indicator_for(&app, &snapshots, &claude_snap);
-        let panel_view = make_panel_view(mtm, &header, &providers);
+        let panel_view = make_panel_view(mtm, &model.header, &model.providers);
         let open_item = PANEL_ITEM.load(Ordering::Acquire);
         if MENU_OPEN.load(Ordering::Acquire) && open_item != 0 {
             // Live update while the user keeps the menu open.
@@ -1419,52 +1643,14 @@ fn render_native_menu(app: &tauri::AppHandle) {
             update_status_button(&native, mtm, &indicator);
             return;
         }
-        let menu = NSMenu::new(mtm);
-        menu.setAutoenablesItems(false);
         let target = unsafe { &*(native.target as *const QuotaMenuTarget) };
-        menu.setDelegate(Some(ProtocolObject::from_ref(target)));
-        let panel = NSMenuItem::new(mtm);
-        panel.setView(Some(&panel_view));
-        menu.addItem(&panel);
-        menu.addItem(&NSMenuItem::separatorItem(mtm));
-
-        let add_action = |title: &str, action: objc2::runtime::Sel, key: &str, enabled: bool| {
-            let item = NSMenuItem::new(mtm);
-            item.setTitle(&NSString::from_str(title));
-            item.setKeyEquivalent(&NSString::from_str(key));
-            item.setEnabled(enabled);
-            unsafe {
-                item.setTarget(Some(target));
-                item.setAction(Some(action));
-            }
-            menu.addItem(&item);
-        };
-        if prefs.codex_enabled && connection_phase != "ready" {
-            let logging_in = connection_phase == "logging_in";
-            add_action(
-                if logging_in {
-                    "Connexion en cours…"
-                } else {
-                    "Se connecter à Codex…"
-                },
-                objc2::sel!(connectAccount:),
-                "",
-                !logging_in,
-            );
-        }
-        add_action("Réglages…", objc2::sel!(openSettings:), ",", true);
-        add_action(
-            "Vérifier les mises à jour…",
-            objc2::sel!(checkForUpdates:),
-            "",
-            true,
-        );
-        menu.addItem(&NSMenuItem::separatorItem(mtm));
-        add_action("Quitter Quota Monitor", objc2::sel!(quitApp:), "q", true);
-        menu.addItem(&make_version_item(
+        let (menu, panel) = make_native_quota_menu(
             mtm,
+            target,
+            &panel_view,
+            model.connection,
             &app.package_info().version.to_string(),
-        ));
+        );
         unsafe {
             let item = &*(native.status_item as *const objc2_app_kit::NSStatusItem);
             item.setMenu(Some(&menu));
@@ -1473,6 +1659,57 @@ fn render_native_menu(app: &tauri::AppHandle) {
         PANEL_ITEM.store(Retained::as_ptr(&panel) as usize, Ordering::Release);
         update_status_button(&native, mtm, &indicator);
     });
+}
+
+#[cfg(target_os = "macos")]
+fn make_native_quota_menu(
+    mtm: MainThreadMarker,
+    target: &QuotaMenuTarget,
+    panel_view: &NSView,
+    connection: Option<bool>,
+    version: &str,
+) -> (Retained<NSMenu>, Retained<NSMenuItem>) {
+    let menu = NSMenu::new(mtm);
+    menu.setAutoenablesItems(false);
+    menu.setDelegate(Some(ProtocolObject::from_ref(target)));
+    let panel = NSMenuItem::new(mtm);
+    panel.setView(Some(panel_view));
+    // A custom view does not make its NSMenuItem informational. With automatic
+    // validation off, AppKit otherwise highlights this actionless panel on hover.
+    panel.setEnabled(false);
+    menu.addItem(&panel);
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+    let add_action = |title: &str, action: objc2::runtime::Sel, key: &str, enabled: bool| {
+        let item = NSMenuItem::new(mtm);
+        item.setTitle(&NSString::from_str(title));
+        item.setKeyEquivalent(&NSString::from_str(key));
+        item.setEnabled(enabled);
+        unsafe {
+            item.setTarget(Some(target));
+            item.setAction(Some(action));
+        }
+        menu.addItem(&item);
+    };
+    if let Some(logging_in) = connection {
+        add_action(
+            connection_label(logging_in),
+            objc2::sel!(connectAccount:),
+            "",
+            !logging_in,
+        );
+    }
+    add_action("Réglages…", objc2::sel!(openSettings:), ",", true);
+    add_action(
+        "Vérifier les mises à jour…",
+        objc2::sel!(checkForUpdates:),
+        "",
+        true,
+    );
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    add_action("Quitter Quota Monitor", objc2::sel!(quitApp:), "q", true);
+    menu.addItem(&make_version_item(mtm, version));
+    (menu, panel)
 }
 
 fn remaining_percent(used: f64) -> u32 {
@@ -1713,6 +1950,63 @@ pub fn quota_ui_smoke(directory: &str) {
         ),
         ("none", vec![]),
     ];
+    let target = QuotaMenuTarget::new(mtm);
+    // Main-thread AppKit regression checks use the production builder without
+    // starting Tauri, reading preferences, or contacting either quota provider.
+    for (name, providers) in &scenarios {
+        for connection in [None, Some(false), Some(true)] {
+            let header = panel_header(providers, (!providers.is_empty()).then(Local::now));
+            let view = make_panel_view(mtm, &header, providers);
+            let (menu, panel) = make_native_quota_menu(mtm, &target, &view, connection, "fixture");
+            assert!(!menu.autoenablesItems());
+            assert!(
+                !panel.isEnabled(),
+                "informational panel must not be selectable"
+            );
+            assert!(panel.action().is_none());
+            assert_eq!(
+                menu.numberOfItems(),
+                if connection.is_some() { 8 } else { 7 }
+            );
+            let mut actions = Vec::new();
+            let mut separators = 0;
+            for item in menu.itemArray() {
+                if item.isSeparatorItem() {
+                    separators += 1;
+                } else if item.action().is_some() {
+                    assert!(!item.title().is_empty());
+                    actions.push((
+                        item.title().to_string(),
+                        item.isEnabled(),
+                        item.keyEquivalent().to_string(),
+                    ));
+                } else {
+                    assert!(!item.isEnabled(), "non-action item must be disabled");
+                }
+            }
+            assert_eq!(separators, 2);
+            assert!(actions.contains(&("Réglages…".into(), true, ",".into())));
+            assert!(actions.contains(&("Vérifier les mises à jour…".into(), true, "".into())));
+            assert!(actions.contains(&("Quitter Quota Monitor".into(), true, "q".into())));
+            if let Some(logging_in) = connection {
+                assert_eq!(actions[0].1, !logging_in);
+            }
+            // Live refresh replaces only the custom view, never its item or
+            // action siblings. Exercise height/state changes in both directions.
+            for (_, next) in &scenarios {
+                let next_header = panel_header(next, None);
+                let next_view = make_panel_view(mtm, &next_header, next);
+                panel.setView(Some(&next_view));
+                assert!(!panel.isEnabled());
+                assert_eq!(
+                    menu.numberOfItems(),
+                    if connection.is_some() { 8 } else { 7 }
+                );
+                assert_eq!(panel.view().unwrap().frame(), next_view.frame());
+            }
+            println!("NATIVE_MENU_STRUCTURE_PASS {name} connection={connection:?}");
+        }
+    }
     for (name, providers) in scenarios {
         let header = panel_header(&providers, (!providers.is_empty()).then(Local::now));
         for (mode, appearance) in [
@@ -1861,24 +2155,130 @@ fn make_version_item(mtm: MainThreadMarker, version: &str) -> Retained<NSMenuIte
 }
 
 #[cfg(target_os = "macos")]
-fn build_native_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+fn install_status_item(app: &tauri::AppHandle) {
+    let state = app.state::<NativeMenuState>();
+    if state.0.lock().unwrap().is_some() {
+        return;
+    }
     let mtm = MainThreadMarker::new().expect("menu setup on main thread");
     let target = QuotaMenuTarget::new(mtm);
     let status_item =
         NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
     let button = status_item.button(mtm).expect("status item button");
     button.setImage(mascot_image(mtm).as_deref());
-    *app.state::<NativeMenuState>().0.lock().unwrap() = Some(NativeQuotaMenu {
+    *state.0.lock().unwrap() = Some(NativeQuotaMenu {
         status_item: Retained::as_ptr(&status_item) as usize,
         status_button: Retained::as_ptr(&button) as usize,
         target: Retained::as_ptr(&target) as usize,
     });
-    // The status item and its target live for the lifetime of this menu-bar app.
+    // Owned by the state until `remove_status_item` reclaims them.
     std::mem::forget(status_item);
     std::mem::forget(target);
-    render_native_menu(app.handle());
+    render_native_menu(app);
+}
+
+/// Removes the menu-bar item (standalone mode) and releases what
+/// `install_status_item` leaked. Main thread only.
+#[cfg(target_os = "macos")]
+fn remove_status_item(app: &tauri::AppHandle) {
+    let Some(native) = app.state::<NativeMenuState>().0.lock().unwrap().take() else {
+        return;
+    };
+    MENU_OPEN.store(false, Ordering::Release);
+    PANEL_ITEM.store(0, Ordering::Release);
+    unsafe {
+        let item = Retained::from_raw(native.status_item as *mut objc2_app_kit::NSStatusItem);
+        let target = Retained::from_raw(native.target as *mut QuotaMenuTarget);
+        if let Some(item) = &item {
+            NSStatusBar::systemStatusBar().removeStatusItem(item);
+        }
+        drop(item);
+        drop(target);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn activate_app(app: &tauri::AppHandle) {
+    let _ = app.run_on_main_thread(|| {
+        let mtm = MainThreadMarker::new().expect("activation runs on main thread");
+        NSApplication::sharedApplication(mtm).activate();
+    });
+}
+
+/// Marks the standalone window so the webview renders the compact panel view.
+#[cfg(target_os = "macos")]
+const COMPACT_VIEW_SCRIPT: &str = "window.__QUOTA_MONITOR_VIEW__ = \"compact\";";
+
+/// Dashboard window of the standalone mode. The red button hides it (macOS
+/// convention); the Dock icon or Cmd+Tab brings it back, Cmd+Q quits.
+#[cfg(target_os = "macos")]
+fn show_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let window = if let Some(window) = app.get_webview_window("main") {
+        window
+    } else {
+        let window = tauri::WebviewWindowBuilder::new(
+            app,
+            "main",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .title("Quota Monitor")
+        // Compact view of the menu-bar panel (320 pt wide) with its actions as
+        // icons; the flag is set before any script so the first paint is right.
+        .initialization_script(COMPACT_VIEW_SCRIPT)
+        .inner_size(360.0, 520.0)
+        .min_inner_size(300.0, 260.0)
+        .center()
+        .build()?;
+        window.on_window_event({
+            let window = window.clone();
+            move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    if window.hide().is_ok() {
+                        api.prevent_close();
+                    }
+                }
+            }
+        });
+        window
+    };
+    window.show()?;
+    window.unminimize()?;
+    window.set_focus()?;
+    activate_app(app);
     Ok(())
 }
+
+/// Applies the saved display mode live (main thread). The way in is always
+/// created before the previous one is removed.
+#[cfg(target_os = "macos")]
+fn apply_display_mode(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let app = handle;
+        let layout =
+            display_mode::layout(&prefs::current(&app).display_mode, display_mode::SUPPORTED);
+        if layout.window {
+            if let Err(error) = show_main_window(&app) {
+                // Keep the menu-bar item rather than leave no entry point.
+                eprintln!("Quota Monitor window unavailable: {error}");
+                return;
+            }
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+            remove_status_item(&app);
+            activate_app(&app);
+        } else {
+            install_status_item(&app);
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.hide();
+            }
+            render_native_menu(&app);
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_display_mode(_app: &tauri::AppHandle) {}
 
 #[cfg(not(target_os = "macos"))]
 fn show_dashboard(app: &tauri::AppHandle) {
@@ -2050,6 +2450,8 @@ pub fn run() {
             ntfy::test_ntfy,
             get_platform,
             get_quota_snapshots,
+            get_compact_panel,
+            connect_codex_account,
             request_quota_refresh,
             open_settings,
             prefs::get_preferences,
@@ -2103,13 +2505,24 @@ pub fn run() {
             )
             .build()?;
             #[cfg(target_os = "macos")]
-            app.handle()
-                .set_activation_policy(tauri::ActivationPolicy::Accessory)?;
-
-            #[cfg(target_os = "macos")]
             {
                 app.manage(NativeMenuState::default());
-                build_native_menu(app)?;
+                let layout = display_mode::layout(
+                    &prefs::current(app.handle()).display_mode,
+                    display_mode::SUPPORTED,
+                );
+                let mut standalone = false;
+                if layout.window {
+                    app.handle()
+                        .set_activation_policy(tauri::ActivationPolicy::Regular)?;
+                    standalone = show_main_window(app.handle()).is_ok();
+                }
+                if !standalone {
+                    // Menu-bar mode, or fallback so the app is never unreachable.
+                    app.handle()
+                        .set_activation_policy(tauri::ActivationPolicy::Accessory)?;
+                    install_status_item(app.handle());
+                }
             }
 
             #[cfg(not(target_os = "macos"))]
@@ -2123,10 +2536,25 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             // Closing the Settings/updater window must not quit the menu-bar app.
+            // Standalone mode honours Cmd+Q / Dock "Quit".
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
-                if code.is_none() {
+                if code.is_none()
+                    && !display_mode::allow_system_exit(
+                        &prefs::current(app).display_mode,
+                        display_mode::SUPPORTED,
+                    )
+                {
                     api.prevent_exit();
+                }
+            }
+            // Dock icon click in standalone mode reopens the hidden dashboard.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = &event {
+                if display_mode::layout(&prefs::current(app).display_mode, display_mode::SUPPORTED)
+                    .window
+                {
+                    let _ = show_main_window(app);
                 }
             }
             if let tauri::RunEvent::Exit = event {
@@ -2140,6 +2568,91 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compact_window_serialises_the_exact_menu_panel_model() {
+        let soon = (Local::now() + chrono::Duration::minutes(95)).to_rfc3339();
+        let week = (Local::now() + chrono::Duration::days(4)).to_rfc3339();
+        let rows = vec![
+            demo_payload("Réserve", "reserve-weekly", 1, &week, None),
+            demo_payload("Limite hebdomadaire", "weekly", 85, &week, Some(10080)),
+            demo_payload("Limite 5 heures", "five-hour", 20, &soon, Some(300)),
+        ];
+        let codex = codex_panel(&rows, "ready", "", Some("plus".into()));
+        let claude = PanelProvider {
+            name: "Claude",
+            badge: None,
+            rows: vec![],
+            note: Some(("Lecture via Claude Code…".into(), Tone::Warning)),
+        };
+        let providers = vec![codex.clone(), claude];
+        let model = PanelModel {
+            header: panel_header(&providers, None),
+            providers: providers.clone(),
+            connection: Some(false),
+        };
+        let panel = compact_panel(&model, "9.9.9", None);
+        assert_eq!(panel.header.title, "Quota Monitor");
+        assert_eq!(panel.header.subtitle, model.header.subtitle);
+        assert_eq!(panel.header.status, "Lecture…");
+        assert_eq!(panel.header.tone, "warning");
+        assert_eq!(panel.providers.len(), 2);
+        let compact = &panel.providers[0];
+        assert_eq!((compact.name, compact.section.as_str()), ("Codex", "CODEX"));
+        assert_eq!(compact.badge.as_deref(), Some("Plus"));
+        // Same order, labels, values and reset phrases as the tray rows.
+        for (tray, row) in codex.rows.iter().zip(&compact.rows) {
+            assert_eq!(row.label, tray.label);
+            assert_eq!(row.value, tray.value);
+            assert_eq!(row.reset, tray.reset);
+            assert_eq!(row.remaining, tray.remaining);
+            assert_eq!(row.low, row_is_low(tray));
+            assert_eq!(row.fill.visible, row_fill_visible(tray));
+            let (from, to, fraction) = quota_color_transition(tray.remaining.unwrap());
+            assert_eq!(
+                (row.fill.from, row.fill.to, row.fill.fraction),
+                (from, to, fraction)
+            );
+        }
+        assert_eq!(compact.rows.len(), 3);
+        assert!(compact.rows[0].label.starts_with("Limite sur"));
+        assert_eq!(compact.rows[2].label, "Réserve");
+        assert!(compact.rows[0].low && compact.rows[0].fill.visible);
+        // 1 % is narrower than the gauge radius: track only, like the tray.
+        assert!(!compact.rows[2].fill.visible);
+        assert_eq!(
+            panel.providers[1].note,
+            Some(CompactNote {
+                text: "Lecture via Claude Code…".into(),
+                tone: "warning"
+            })
+        );
+        assert_eq!(
+            panel.connection,
+            Some(CompactConnection {
+                label: "Se connecter à Codex…",
+                logging_in: false
+            })
+        );
+        let json = serde_json::to_value(&panel).unwrap();
+        assert_eq!(json["version"], "9.9.9");
+        assert!(json["update"].is_null());
+        assert_eq!(json["providers"][0]["rows"][0]["fill"]["visible"], true);
+        assert!(json["connection"]["loggingIn"].is_boolean());
+        let logging = compact_panel(
+            &PanelModel {
+                connection: Some(true),
+                ..model
+            },
+            "9.9.9",
+            None,
+        );
+        assert_eq!(
+            logging.connection.map(|c| c.label),
+            Some("Connexion en cours…")
+        );
+    }
 
     #[test]
     fn indicator_uses_short_window_even_when_reserve_is_first() {
