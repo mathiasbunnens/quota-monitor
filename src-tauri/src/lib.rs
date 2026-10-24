@@ -5,6 +5,10 @@ mod codex;
 mod indicator;
 mod ntfy;
 mod prefs;
+#[cfg(target_os = "macos")]
+mod settings_smoke;
+#[cfg(target_os = "macos")]
+pub use settings_smoke::settings_ui_smoke;
 #[cfg(any(not(target_os = "macos"), test))]
 mod tray_percentage;
 
@@ -543,20 +547,27 @@ fn request_quota_refresh(app: tauri::AppHandle) {
     }
 }
 
-fn show_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let window = if let Some(window) = app.get_webview_window("settings") {
-        window
-    } else {
-        tauri::WebviewWindowBuilder::new(
-            app,
-            "settings",
-            tauri::WebviewUrl::App("index.html".into()),
-        )
+/// Settings window as opened by the menu (shared with the settings smoke).
+fn settings_window_builder(
+    app: &tauri::AppHandle,
+) -> tauri::WebviewWindowBuilder<'_, tauri::Wry, tauri::AppHandle> {
+    tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App("index.html".into()))
         .title("Réglages de Quota Monitor")
         .inner_size(600.0, 520.0)
         .min_inner_size(520.0, 240.0)
         .center()
-        .build()?
+}
+
+/// Application context; generated once so assets are embedded a single time.
+fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
+fn show_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let window = if let Some(window) = app.get_webview_window("settings") {
+        window
+    } else {
+        settings_window_builder(app).build()?
     };
     window.show()?;
     window.unminimize()?;
@@ -645,11 +656,13 @@ fn quota_color_transition(percentage: u32) -> (&'static str, &'static str, f64) 
 }
 
 #[cfg(target_os = "macos")]
-fn quota_color(percentage: u32) -> Retained<NSColor> {
+fn quota_color(percentage: u32, model: bool) -> Retained<NSColor> {
     let (from, to, fraction) = quota_color_transition(percentage);
+    // Model-scoped rows swap only the healthy hue for teal; warning/low stay identical.
     let color = |name| match name {
         "red" => NSColor::systemRedColor(),
         "orange" => NSColor::systemOrangeColor(),
+        _ if model => NSColor::systemTealColor(),
         _ => NSColor::systemGreenColor(),
     };
     let from_color = color(from);
@@ -690,6 +703,8 @@ enum Tone {
 #[cfg(target_os = "macos")]
 #[derive(Clone, Debug, PartialEq)]
 struct PanelRow {
+    /// Model-scoped row (Fable): normal-size model name matching the fill, full opacity.
+    model: bool,
     label: String,
     remaining: Option<u32>,
     value: String,
@@ -788,6 +803,7 @@ fn codex_panel(
             let short = rank(p) == 0;
             let remaining = p.remaining.min(100);
             PanelRow {
+                model: false,
                 label: match rank(p) {
                     0 => limit_label(Some(&p.reset_at), "Limite 5 heures"),
                     1 => limit_label(Some(&p.reset_at), "Limite hebdomadaire"),
@@ -827,8 +843,7 @@ fn codex_panel(
 
 #[cfg(target_os = "macos")]
 fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
-    let rows: Vec<PanelRow> = snapshot
-        .metrics
+    let rows: Vec<PanelRow> = claude::display_metrics(&snapshot.metrics)
         .iter()
         .map(|m| {
             let remaining = m
@@ -841,7 +856,10 @@ fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
                 "—"
             };
             PanelRow {
-                label: if remaining.is_some() {
+                model: m.id == "claude:weekly_fable",
+                label: if m.id == "claude:weekly_fable" {
+                    "Limite Fable".into()
+                } else if remaining.is_some() {
                     limit_label(m.reset_at.as_deref(), m.label)
                 } else {
                     m.label.to_string()
@@ -973,6 +991,33 @@ fn panel_label(
 }
 
 #[cfg(target_os = "macos")]
+fn style_model_label(label: &NSTextField, row: &PanelRow) {
+    use objc2::AnyThread;
+    use objc2_app_kit::NSForegroundColorAttributeName;
+    use objc2_foundation::{NSDictionary, NSMutableAttributedString, NSRange};
+
+    let Some(prefix) = row.label.strip_suffix(" Fable") else {
+        return;
+    };
+    // Use the exact fill function, including its continuous warning transitions.
+    let color = quota_color(row.remaining.unwrap_or(0), true);
+    let keys = unsafe { [NSForegroundColorAttributeName] };
+    let values: [&AnyObject; 1] = [&color];
+    let attributes = NSDictionary::from_slices(&keys, &values);
+    let text = NSMutableAttributedString::initWithAttributedString(
+        NSMutableAttributedString::alloc(),
+        &label.attributedStringValue(),
+    );
+    unsafe {
+        text.addAttributes_range(
+            &attributes,
+            NSRange::new(prefix.encode_utf16().count() + 1, "Fable".len()),
+        );
+    }
+    label.setAttributedStringValue(&text);
+}
+
+#[cfg(target_os = "macos")]
 fn rounded_box(mtm: MainThreadMarker, color: &NSColor, radius: f64) -> Retained<NSBox> {
     let shape = NSBox::initWithFrame(mtm.alloc(), frame(0.0, 0.0, 1.0, 1.0));
     shape.setBoxType(NSBoxType::Custom);
@@ -1075,6 +1120,21 @@ fn make_panel_view(
 
         let mut row_top = top + 8.0;
         for row in &provider.rows {
+            // Composite the complete row once: track, fill, value, label and reset.
+            let group = NSView::initWithFrame(
+                mtm.alloc(),
+                frame(
+                    0.0,
+                    height - row_top - PANEL_ROW_HEIGHT,
+                    PANEL_WIDTH,
+                    PANEL_ROW_HEIGHT,
+                ),
+            );
+            root.addSubview(&group);
+            let place = |view: &NSView, x: f64, top: f64, w: f64, h: f64| {
+                view.setFrame(frame(x, PANEL_ROW_HEIGHT - (top - row_top) - h, w, h));
+                group.addSubview(view);
+            };
             let low = row.remaining.is_some_and(|p| p <= 20);
             let label = panel_label(
                 mtm,
@@ -1082,6 +1142,9 @@ fn make_panel_view(
                 &NSFont::systemFontOfSize_weight(12.0, regular),
                 &NSColor::labelColor(),
             );
+            if row.model {
+                style_model_label(&label, row);
+            }
             place(&label, 20.0, row_top + 3.0, 180.0, 16.0);
             let value_color = if low {
                 NSColor::systemRedColor()
@@ -1113,7 +1176,11 @@ fn make_panel_view(
             let fill_width =
                 PANEL_INNER_WIDTH * f64::from(row.remaining.unwrap_or(0).min(100)) / 100.0;
             if fill_width >= 5.0 {
-                let fill = rounded_box(mtm, &quota_color(row.remaining.unwrap_or(0)), 2.5);
+                let fill = rounded_box(
+                    mtm,
+                    &quota_color(row.remaining.unwrap_or(0), row.model),
+                    2.5,
+                );
                 place(&fill, 22.0, row_top + 23.0, fill_width, 5.0);
             }
             let reset = panel_label(
@@ -1499,25 +1566,17 @@ pub fn quota_ui_smoke(directory: &str) {
         ));
         println!("NATIVE_STATUS_PASS {mode}: {}x{}", size.width, size.height);
     }
-    let claude = PanelProvider {
-        name: "Claude",
-        badge: Some("pro".into()),
-        rows: vec![
-            PanelRow {
-                label: limit_label(Some(&soon), "Limite 5 heures"),
-                remaining: Some(12),
-                value: "12 %".into(),
-                reset: reset_phrase(&soon, true).unwrap(),
-            },
-            PanelRow {
-                label: limit_label(Some(&week), "Limite hebdomadaire"),
-                remaining: Some(86),
-                value: "86 %".into(),
-                reset: reset_phrase(&week, false).unwrap(),
-            },
-        ],
-        note: None,
-    };
+    // Exercise the production projection, including the duplicate weekly window.
+    let claude = claude_panel(&claude::usage_snapshot(
+        &serde_json::json!({"subscription_type":"pro", "rate_limits":{
+            "five_hour":{"utilization":88,"resets_at":soon},
+            "seven_day":{"utilization":37,"resets_at":week},
+            "model_scoped":[{"display_name":"Fable","utilization":37,"resets_at":week}]
+        }}),
+        Local::now().timestamp(),
+    ));
+    assert_eq!(claude.rows.len(), 2);
+    assert_eq!(claude.rows[1].label, "Limite Fable");
     let scenarios: Vec<(&str, Vec<PanelProvider>)> = vec![
         (
             "two-providers",
@@ -1950,7 +2009,7 @@ pub fn run() {
             claude::start_watcher(app.handle().clone());
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("error while building tauri application")
         .run(|app, event| {
             // Closing the Settings/updater window must not quit the menu-bar app.
@@ -2064,6 +2123,46 @@ mod tests {
             label: None,
             window_minutes: minutes,
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_fable_label_is_exact_with_known_and_unknown_resets() {
+        let now = Local::now().timestamp();
+        let reset = (Local::now() + chrono::Duration::hours(30)).to_rfc3339();
+        let snap = claude::usage_snapshot(
+            &serde_json::json!({"rate_limits":{
+                "five_hour":{"utilization":10,"resets_at":reset},
+                "seven_day":{"utilization":20,"resets_at":reset},
+                "model_scoped":[{"display_name":"Fable","utilization":30,"resets_at":reset}]
+            }}),
+            now,
+        );
+        let panel = claude_panel(&snap);
+        assert_eq!(panel.rows.len(), 3);
+        assert!(!panel.rows[0].label.contains("Fable"));
+        assert!(!panel.rows[1].label.contains("Fable"));
+        assert!(!panel.rows[0].model);
+        assert!(!panel.rows[1].model);
+        assert!(panel.rows[2].model);
+        assert_eq!(panel.rows[2].label, "Limite Fable");
+        // A countdown is not a new 30h quota window: duration remains weekly.
+        assert_eq!(snap.metrics[2].period_duration_seconds, 604800);
+        let unknown = claude::usage_snapshot(
+            &serde_json::json!({"rate_limits":{
+                "model_scoped":[{"display_name":"Fable","utilization":30}]
+            }}),
+            now,
+        );
+        assert_eq!(claude_panel(&unknown).rows[2].label, "Limite Fable");
+        let mut duplicate = snap.clone();
+        duplicate.metrics[1].used_percent = duplicate.metrics[2].used_percent;
+        let merged = claude_panel(&duplicate);
+        assert_eq!(merged.rows.len(), 2);
+        assert_eq!(merged.rows[1].label, "Limite Fable");
+        assert_eq!(merged.rows[1].value, "70 %");
+        assert!(merged.rows[1].model);
+        assert!(merged.rows[1].reset.contains("Réinitialisation"));
     }
 
     #[cfg(target_os = "macos")]

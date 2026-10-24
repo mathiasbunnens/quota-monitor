@@ -12,6 +12,7 @@ pub const INDICATORS: [&str; 3] = ["codex", "claude", "both"];
 pub struct Prefs {
     pub codex_enabled: bool,
     pub claude_enabled: bool,
+    pub fable_enabled: bool,
     /// Menu-bar indicator: "codex", "claude" or "both".
     pub indicator: String,
     pub ntfy: crate::ntfy::Config,
@@ -22,6 +23,7 @@ impl Default for Prefs {
         Self {
             codex_enabled: true,
             claude_enabled: false,
+            fable_enabled: true,
             indicator: "codex".into(),
             ntfy: crate::ntfy::Config::default(),
         }
@@ -114,6 +116,7 @@ mod tests {
     fn defaults_keep_codex_only_behaviour() {
         let p = Prefs::default();
         assert!(p.codex_enabled && !p.claude_enabled);
+        assert!(p.fable_enabled);
         assert_eq!(p.indicator, "codex");
     }
 
@@ -124,6 +127,7 @@ mod tests {
         // Partial file from an older version keeps defaults for absent keys.
         let p = parse(br#"{"claudeEnabled":true}"#);
         assert!(p.claude_enabled && p.codex_enabled && p.indicator == "codex");
+        assert!(p.fable_enabled);
     }
 
     #[test]
@@ -131,10 +135,15 @@ mod tests {
         let saved = Prefs {
             codex_enabled: false,
             claude_enabled: true,
+            fable_enabled: false,
             indicator: "both".into(),
             ntfy: crate::ntfy::Config::default(),
         };
         let bytes = serde_json::to_vec(&saved).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["fableEnabled"],
+            false
+        );
         assert_eq!(parse(&bytes), saved);
     }
 }

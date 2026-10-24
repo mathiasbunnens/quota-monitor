@@ -232,6 +232,11 @@ export default function Settings() {
               onChange={(value) => void update({ claudeEnabled: value })} />
           </header>
           {(!prefs.claudeEnabled || !claudeReady) && <p className={"prefs-state prefs-state--" + claudeTone} role="status">{claudeMessage}</p>}
+          <div className="prefs-group__head prefs-fable">
+            <div><h3>Quota Fable</h3></div>
+            <Switch label="Afficher le quota Fable et ses alertes" checked={prefs.fableEnabled} disabled={busy || !prefs.claudeEnabled}
+              onChange={(value) => void update({ fableEnabled: value })} />
+          </div>
           {prefs.claudeEnabled && <div className="prefs-links">
             <UsageLink label="Usage détaillé sur claude.ai" command="open_claude_usage" />
             <More label="Avancé" open={claudeMore} onToggle={() => setClaudeMore((v) => !v)} />

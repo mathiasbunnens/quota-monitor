@@ -2,11 +2,11 @@
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --desktop-bg: #f5f5f7; --desktop-card: #fff; --desktop-ink: #1d1d1f;
   --desktop-muted: #6e6e73; --desktop-border: #dedee3; --desktop-accent: #007aff;
-  --desktop-radius: 12px; color-scheme: light;
+  --desktop-radius: 12px; --model-accent: #30b0c7; color-scheme: light;
 }
 @media (prefers-color-scheme: dark) { :root {
   --desktop-bg: #202023; --desktop-card: #2c2c2e; --desktop-ink: #f5f5f7;
-  --desktop-muted: #ababaf; --desktop-border: #444448; --desktop-accent: #64aaff; color-scheme: dark;
+  --desktop-muted: #ababaf; --desktop-border: #444448; --desktop-accent: #64aaff; --model-accent: #40c8e0; color-scheme: dark;
 }}
 .dashboard {
   min-height: 100vh; padding: 24px; background: var(--desktop-bg); color: var(--desktop-ink);
@@ -23,9 +23,9 @@
   &__quota-heading small { font-size: 11px; font-weight: 400; letter-spacing: 0; color: var(--desktop-muted); }
   &__quota > p { margin: 12px 0 0; color: var(--desktop-muted); font-size: 11px; line-height: 1.5; }
   &__progress { height: 7px; margin-top: 14px; background: var(--desktop-border); border-radius: 8px; overflow: hidden; }
-  &__progress span { display: block; height: 100%; border-radius: inherit; background: #30a46c; transition: width 250ms ease; }
-  &__progress--warning span { background: #d68b12; }
-  &__progress--low span { background: #e5484d; }
+  &__progress span { display: block; height: 100%; border-radius: inherit; background: var(--quota-fill, #30a46c); transition: width 250ms ease; }
+  &__progress--warning { --quota-fill: #d68b12; }
+  &__progress--low { --quota-fill: #e5484d; }
   &__footer { color: var(--desktop-muted); font-size: 11px; }
   &__footer button { color: var(--desktop-accent); }
 }
@@ -75,3 +75,8 @@
 .provider-row + .provider-row { margin-top: 14px; }
 .provider-row__missing { font-size: 13px !important; font-weight: 500; color: var(--desktop-muted); letter-spacing: 0 !important; }
 .provider-row__reset { margin: 8px 0 0; color: var(--desktop-muted); font-size: 11px; line-height: 1.5; }
+/* The model name and fill share one state colour, without dimming or a dot. */
+.provider-row--model.provider-row--healthy { --quota-fill: var(--model-accent); }
+.provider-row--warning { --quota-fill: #d68b12; }
+.provider-row--low { --quota-fill: #e5484d; }
+.provider-row__model-label { color: var(--quota-fill); }

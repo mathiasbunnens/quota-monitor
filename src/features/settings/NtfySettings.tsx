@@ -24,7 +24,8 @@ export default function NtfySettings({ config, onSave }: {
   };
   return <section className="prefs-group" aria-labelledby="ntfy-heading">
     <h2 id="ntfy-heading">Notifications téléphone · ntfy</h2>
-    <p>Alerte quand une limite Codex ou Claude atteint 100 % consommé (0 % restant).</p>
+    <p>Alerte uniquement au passage d’une limite Codex ou Claude à 100 % réellement consommé (0 % restant).
+      Une limite déjà épuisée à sa première observation ne déclenche pas d’alerte.</p>
     <fieldset disabled={busy} className="ntfy-fields">
       <label><input type="checkbox" checked={draft.enabled}
         onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} /> Activer les alertes automatiques</label>
@@ -46,7 +47,8 @@ export default function NtfySettings({ config, onSave }: {
     <p>Sans authentification, le topic est public : toute personne qui connaît son nom peut lire ou publier.
       Choisissez un nom imprévisible et ne le partagez pas. HTTPS est recommandé ; aucune authentification n’est envoyée.</p>
     <p className="prefs-footnote">Le test utilise les champs ci-dessus sans les enregistrer, même si les alertes sont désactivées.
-      L’application doit rester ouverte et connectée. Une seule tentative par fenêtre et cycle, conservée au redémarrage ;
+      L’application doit rester ouverte et connectée. Aucun rappel tant que la limite reste épuisée, même après redémarrage.
+      Les limites atteintes au même rafraîchissement sont regroupées. Réarmement après réinitialisation ou retour réel sous 100 % ;
       en cas d’erreur réseau, pas de nouvel essai automatique avant réarmement.</p>
   </section>;
 }

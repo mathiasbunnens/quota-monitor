@@ -15,6 +15,11 @@ fn main() {
         return;
     }
     #[cfg(target_os = "macos")]
+    if args.iter().any(|a| a == "--settings-ui-smoke") {
+        chatgpt_quota_monitor_lib::settings_ui_smoke();
+        return;
+    }
+    #[cfg(target_os = "macos")]
     if let Some(index) = args.iter().position(|a| a == "--quota-ui-smoke") {
         let path = args.get(index + 1).expect("PNG directory required");
         chatgpt_quota_monitor_lib::quota_ui_smoke(path);

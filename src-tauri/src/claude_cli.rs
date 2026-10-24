@@ -194,6 +194,18 @@ pub fn read_usage(executable: &Path, cwd: &Path) -> Result<Value, &'static str> 
     result
 }
 
+/// Claude Code 2.1.299's get_usage schema projects weekly server limits into
+/// model_scoped ({display_name, utilization, resets_at}); not seven_day_fable.
+/// An absent/hidden/null bucket must not become a zero-percent counter.
+pub fn fable_window(limits: &Value) -> Option<crate::claude::Window> {
+    limits["model_scoped"].as_array()?.iter().find_map(|row| {
+        row["display_name"]
+            .as_str()
+            .filter(|name| name.eq_ignore_ascii_case("Fable"))
+            .and_then(|_| window(row))
+    })
+}
+
 pub fn window(value: &Value) -> Option<crate::claude::Window> {
     let used = value["utilization"].as_f64()?;
     if !used.is_finite() || !(0.0..=100.0).contains(&used) {
