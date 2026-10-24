@@ -140,7 +140,9 @@ test("model label and bar share the state token in both themes", () => {
     assert.ok(css.includes(`&__progress--${state} { --quota-fill: ${colour}; }`));
   }
   assert.doesNotMatch(css, /model-dot/);
-  assert.equal((css.match(/--model-accent: #[0-9a-f]{6};/g) || []).length, 2);
+  const tokens = fs.readFileSync(new URL("../src/styles/_desktop.scss", import.meta.url), "utf8");
+  assert.match(css, /@use "\.\.\/\.\.\/styles\/desktop"/);
+  assert.equal((tokens.match(/--model-accent: #[0-9a-f]{6};/g) || []).length, 2);
   assert.doesNotMatch(css, /provider-row[^{]*\{[^}]*opacity/);
 });
 

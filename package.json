@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "icon:app": "tauri icon assets/app-icon.png",
     "icon:tray": "node scripts/render-tray-icon.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
