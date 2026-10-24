@@ -25,9 +25,9 @@ function mascotContains(x, y) {
   const body = roundedRect(x, y, 10, 21, 24, 18, 1.5);
   const feet = roundedRect(x, y, 13, 36, 7, 6, 1.5) || roundedRect(x, y, 24, 36, 7, 6, 1.5);
   const eye = circle(x, y, 22, 23, 7.5);
-  // A broad, uninterrupted counterform and one solid pupil survive 16pt.
-  // No gauge arc: its narrow gaps merged into noise at non-Retina sizes.
-  const pupil = circle(x, y, 22, 23, 3.5);
+  // A solid three-quarter pupil, not a thin gauge arc. The transparent
+  // upper-left quarter follows the app mascot and adapts to either theme.
+  const pupil = circle(x, y, 22, 23, 3.5) && !(x < 22 && y < 23);
   const mouth = roundedRect(x, y, 16, 33, 12, 1.5, 0.75)
     || roundedRect(x, y, 17.5, 36, 9, 1.5, 0.75);
   return antenna || ((dome || body || feet) && !mouth && (!eye || pupil));

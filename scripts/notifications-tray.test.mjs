@@ -39,14 +39,17 @@ test("runtime template has transparent corners, antenna, simple eye and separate
   assert.equal(alpha(0, 0), 0);
   assert(alpha(22, 4) > 240, "antenna");
   assert(alpha(12, 30) > 240, "body");
-  assert(alpha(22, 23) > 240, "single pupil");
+  assert(alpha(23.5, 24.5) > 240, "lower-right pupil quadrant");
+  assert.equal(alpha(20.5, 21.5), 0, "transparent upper-left quarter, matching app gauge");
+  assert(alpha(23.5, 21.5) > 240, "upper-right pupil quadrant");
+  assert(alpha(20.5, 24.5) > 240, "lower-left pupil quadrant");
   assert.equal(alpha(17.7, 19.8), 0, "eye counterform");
-  assert(alpha(24, 23) > 240, "broad solid pupil");
+  assert(alpha(24, 23) > 240, "broad three-quarter pupil");
   for (const [x, y] of [[22, 17.5], [27.5, 23], [22, 28.5], [16.5, 23]]) {
     assert.equal(alpha(x, y), 0, "uninterrupted counterform, no gauge arc");
   }
   const svg = readFileSync(new URL("../src-tauri/icons/mascot-menu.svg", import.meta.url), "utf8");
-  assert.match(svg, /<circle cx="22" cy="23" r="3.5"\/>/);
+  assert.match(svg, /<path d="M22 23V19.5A3.5 3.5 0 1 1 18.5 23Z"\/>/);
   assert.doesNotMatch(svg, /stroke-width|stroke-linecap/);
   assert.equal(alpha(22, 33.7), 0, "mouth");
   assert.equal(alpha(22, 41), 0, "foot gap");
