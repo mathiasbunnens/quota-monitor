@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "chatgpt-quota-monitor"
-version = "3.0.2"
+version = "3.0.3"
 dependencies = [
  "block2",
  "chrono",

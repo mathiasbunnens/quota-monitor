@@ -68,9 +68,13 @@ jobs:
           releaseBody: |
             Application macOS, Windows et Linux pour surveiller les quotas Codex et Claude.
 
-            Version 3.0.2.
+            Version 3.0.3.
 
-            Correction de la détection Claude
+            - Notifications uniquement lors d'un franchissement réel à 100 %, avec état anti-spam conservé entre les redémarrages et reprise silencieuse après désactivation.
+            - Quota Claude Fable optionnel dans les réglages, affiché seulement lorsque le fournisseur le transmet.
+            - Fusion des doublons hebdomadaire/Fable en « Limite Fable » uniquement si consommation, durée et reset concordent ; les quotas distincts restent séparés.
+            - Libellé Fable de taille normale, assorti à sa barre, sans puce ni atténuation.
+            - Correctifs de la fenêtre Réglages autonome et de l'affichage de ses contrôles.
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
