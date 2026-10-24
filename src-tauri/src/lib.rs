@@ -1419,52 +1419,15 @@ fn render_native_menu(app: &tauri::AppHandle) {
             update_status_button(&native, mtm, &indicator);
             return;
         }
-        let menu = NSMenu::new(mtm);
-        menu.setAutoenablesItems(false);
         let target = unsafe { &*(native.target as *const QuotaMenuTarget) };
-        menu.setDelegate(Some(ProtocolObject::from_ref(target)));
-        let panel = NSMenuItem::new(mtm);
-        panel.setView(Some(&panel_view));
-        menu.addItem(&panel);
-        menu.addItem(&NSMenuItem::separatorItem(mtm));
-
-        let add_action = |title: &str, action: objc2::runtime::Sel, key: &str, enabled: bool| {
-            let item = NSMenuItem::new(mtm);
-            item.setTitle(&NSString::from_str(title));
-            item.setKeyEquivalent(&NSString::from_str(key));
-            item.setEnabled(enabled);
-            unsafe {
-                item.setTarget(Some(target));
-                item.setAction(Some(action));
-            }
-            menu.addItem(&item);
-        };
-        if prefs.codex_enabled && connection_phase != "ready" {
-            let logging_in = connection_phase == "logging_in";
-            add_action(
-                if logging_in {
-                    "Connexion en cours…"
-                } else {
-                    "Se connecter à Codex…"
-                },
-                objc2::sel!(connectAccount:),
-                "",
-                !logging_in,
-            );
-        }
-        add_action("Réglages…", objc2::sel!(openSettings:), ",", true);
-        add_action(
-            "Vérifier les mises à jour…",
-            objc2::sel!(checkForUpdates:),
-            "",
-            true,
-        );
-        menu.addItem(&NSMenuItem::separatorItem(mtm));
-        add_action("Quitter Quota Monitor", objc2::sel!(quitApp:), "q", true);
-        menu.addItem(&make_version_item(
+        let (menu, panel) = make_native_quota_menu(
             mtm,
+            target,
+            &panel_view,
+            (prefs.codex_enabled && connection_phase != "ready")
+                .then_some(connection_phase == "logging_in"),
             &app.package_info().version.to_string(),
-        ));
+        );
         unsafe {
             let item = &*(native.status_item as *const objc2_app_kit::NSStatusItem);
             item.setMenu(Some(&menu));
@@ -1473,6 +1436,61 @@ fn render_native_menu(app: &tauri::AppHandle) {
         PANEL_ITEM.store(Retained::as_ptr(&panel) as usize, Ordering::Release);
         update_status_button(&native, mtm, &indicator);
     });
+}
+
+#[cfg(target_os = "macos")]
+fn make_native_quota_menu(
+    mtm: MainThreadMarker,
+    target: &QuotaMenuTarget,
+    panel_view: &NSView,
+    connection: Option<bool>,
+    version: &str,
+) -> (Retained<NSMenu>, Retained<NSMenuItem>) {
+    let menu = NSMenu::new(mtm);
+    menu.setAutoenablesItems(false);
+    menu.setDelegate(Some(ProtocolObject::from_ref(target)));
+    let panel = NSMenuItem::new(mtm);
+    panel.setView(Some(panel_view));
+    // A custom view does not make its NSMenuItem informational. With automatic
+    // validation off, AppKit otherwise highlights this actionless panel on hover.
+    panel.setEnabled(false);
+    menu.addItem(&panel);
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+    let add_action = |title: &str, action: objc2::runtime::Sel, key: &str, enabled: bool| {
+        let item = NSMenuItem::new(mtm);
+        item.setTitle(&NSString::from_str(title));
+        item.setKeyEquivalent(&NSString::from_str(key));
+        item.setEnabled(enabled);
+        unsafe {
+            item.setTarget(Some(target));
+            item.setAction(Some(action));
+        }
+        menu.addItem(&item);
+    };
+    if let Some(logging_in) = connection {
+        add_action(
+            if logging_in {
+                "Connexion en cours…"
+            } else {
+                "Se connecter à Codex…"
+            },
+            objc2::sel!(connectAccount:),
+            "",
+            !logging_in,
+        );
+    }
+    add_action("Réglages…", objc2::sel!(openSettings:), ",", true);
+    add_action(
+        "Vérifier les mises à jour…",
+        objc2::sel!(checkForUpdates:),
+        "",
+        true,
+    );
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    add_action("Quitter Quota Monitor", objc2::sel!(quitApp:), "q", true);
+    menu.addItem(&make_version_item(mtm, version));
+    (menu, panel)
 }
 
 fn remaining_percent(used: f64) -> u32 {
@@ -1713,6 +1731,63 @@ pub fn quota_ui_smoke(directory: &str) {
         ),
         ("none", vec![]),
     ];
+    let target = QuotaMenuTarget::new(mtm);
+    // Main-thread AppKit regression checks use the production builder without
+    // starting Tauri, reading preferences, or contacting either quota provider.
+    for (name, providers) in &scenarios {
+        for connection in [None, Some(false), Some(true)] {
+            let header = panel_header(providers, (!providers.is_empty()).then(Local::now));
+            let view = make_panel_view(mtm, &header, providers);
+            let (menu, panel) = make_native_quota_menu(mtm, &target, &view, connection, "fixture");
+            assert!(!menu.autoenablesItems());
+            assert!(
+                !panel.isEnabled(),
+                "informational panel must not be selectable"
+            );
+            assert!(panel.action().is_none());
+            assert_eq!(
+                menu.numberOfItems(),
+                if connection.is_some() { 8 } else { 7 }
+            );
+            let mut actions = Vec::new();
+            let mut separators = 0;
+            for item in menu.itemArray() {
+                if item.isSeparatorItem() {
+                    separators += 1;
+                } else if item.action().is_some() {
+                    assert!(!item.title().is_empty());
+                    actions.push((
+                        item.title().to_string(),
+                        item.isEnabled(),
+                        item.keyEquivalent().to_string(),
+                    ));
+                } else {
+                    assert!(!item.isEnabled(), "non-action item must be disabled");
+                }
+            }
+            assert_eq!(separators, 2);
+            assert!(actions.contains(&("Réglages…".into(), true, ",".into())));
+            assert!(actions.contains(&("Vérifier les mises à jour…".into(), true, "".into())));
+            assert!(actions.contains(&("Quitter Quota Monitor".into(), true, "q".into())));
+            if let Some(logging_in) = connection {
+                assert_eq!(actions[0].1, !logging_in);
+            }
+            // Live refresh replaces only the custom view, never its item or
+            // action siblings. Exercise height/state changes in both directions.
+            for (_, next) in &scenarios {
+                let next_header = panel_header(next, None);
+                let next_view = make_panel_view(mtm, &next_header, next);
+                panel.setView(Some(&next_view));
+                assert!(!panel.isEnabled());
+                assert_eq!(
+                    menu.numberOfItems(),
+                    if connection.is_some() { 8 } else { 7 }
+                );
+                assert_eq!(panel.view().unwrap().frame(), next_view.frame());
+            }
+            println!("NATIVE_MENU_STRUCTURE_PASS {name} connection={connection:?}");
+        }
+    }
     for (name, providers) in scenarios {
         let header = panel_header(&providers, (!providers.is_empty()).then(Local::now));
         for (mode, appearance) in [
