@@ -63,3 +63,21 @@ icon:tray` writes the 36px RGBA template used at 18pt by `mascot_image` in
 `src-tauri/src/lib.rs`. Initial, single-provider and stacked-provider macOS
 paths all use it; the stacked image also remains a template. Numeric text,
 status indicators and Windows/Linux numeric tray rendering are unchanged.
+
+## Compact standalone window
+
+Open `http://127.0.0.1:1437/tests/renderer/compact.html`, then run:
+
+    await (await import('./compact-checks.js')).checkCompact()
+
+This mounts the real `CompactWindow` (macOS application mode) with synthetic
+panel models shaped like `get_compact_panel`. All IPC is intercepted: no quota
+provider, updater check, settings window or notification runs. The checks
+cover the two top-right icon buttons (names, tooltips, focus, Cmd+,), their
+dispatch to `open_settings` / `start_update_check`, in-flight locking and
+rejected IPC, every updater state (busy/available/ready/error), row order and
+fields against the model, notes, the Codex connection action and the empty
+state. Run at 360px light, 300px dark with reduced motion and 420px. Keep the
+tab visible: hidden pages throttle timers. Browser captures are not evidence of
+native window, Dock or activation behaviour. `node --test
+scripts/compact-window.test.mjs` covers the pure view without a browser.
