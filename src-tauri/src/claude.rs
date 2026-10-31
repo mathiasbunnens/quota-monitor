@@ -673,30 +673,28 @@ fn refresh_live(app: &tauri::AppHandle) {
         if GENERATION.load(Ordering::Acquire) != generation || !prefs::current(app).claude_enabled {
             break;
         }
-        poll_profile(&LIVE, &a.profile, executable.as_deref(), &dir, || {
+        poll_profile(&LIVE, &a, executable.as_deref(), &dir, || {
             crate::publish_quotas(app)
         });
     }
 }
 fn poll_profile(
     store: &std::sync::Mutex<crate::claude_accounts::RefreshStore>,
-    profile: &crate::claude_accounts::Profile,
+    account: &crate::claude_accounts::Discovered,
     executable: Option<&Path>,
     dir: &Path,
     mut changed: impl FnMut(),
 ) -> bool {
+    let profile = &account.profile;
     let Some(ticket) = store.lock().unwrap().begin(&profile.id) else {
         return false;
     };
     changed();
     let previous = store.lock().unwrap().snapshot(&profile.id);
     let snap = if let Some(exe) = executable {
-        let result = crate::claude_cli::read_usage_for(
-            exe,
-            &profile_workspace(dir, &profile.id),
-            Path::new(&profile.path),
-        );
-        result_snapshot(result, previous, unix_now())
+        let cwd = profile_workspace(dir, &profile.id);
+        let result = collect(account, exe, &cwd);
+        result_snapshot_for(result, previous, unix_now(), account.launch.as_deref())
     } else {
         compute(true, false, FileState::Missing, unix_now())
     };
@@ -706,6 +704,20 @@ fn poll_profile(
     }
     committed
 }
+/// Primary: exactly as 3.1.0 — inherit the app environment untouched (Claude
+/// Code derives its credential slot from CLAUDE_CONFIG_DIR's presence/value, so
+/// forcing it, even to ~/.claude, signs the child out). Extra profiles: the
+/// path string as discovered/entered, never canonicalized.
+fn collect(
+    account: &crate::claude_accounts::Discovered,
+    exe: &Path,
+    cwd: &Path,
+) -> Result<Value, &'static str> {
+    match account.launch.as_deref() {
+        None => crate::claude_cli::read_usage(exe, cwd),
+        Some(config) => crate::claude_cli::read_usage_for(exe, cwd, config),
+    }
+}
 fn profile_workspace(dir: &Path, id: &str) -> PathBuf {
     // Bound each path component on filesystems with NAME_MAX=255.
     id.as_bytes()
@@ -713,6 +725,39 @@ fn profile_workspace(dir: &Path, id: &str) -> PathBuf {
         .fold(dir.join("claude-cli-workspaces"), |p, part| {
             p.join(std::str::from_utf8(part).unwrap())
         })
+}
+/// `launch` is the account's CLAUDE_CONFIG_DIR (None = primary, inherited env).
+pub(crate) fn result_snapshot_for(
+    result: Result<Value, &'static str>,
+    previous: Option<ClaudeSnapshot>,
+    now: i64,
+    launch: Option<&Path>,
+) -> ClaudeSnapshot {
+    let signed_out = matches!(&result, Ok(v) if v["rate_limits_available"] == false
+        && v["subscription_type"].is_null());
+    let mut snap = result_snapshot(result, previous, now);
+    if signed_out {
+        snap.error_kind = Some("not_signed_in");
+        snap.message = match launch {
+            None => "Claude non connecté. Connectez-vous avec claude auth login.".into(),
+            Some(path) => format!(
+                "Profil Claude non connecté. Connectez-vous avec CLAUDE_CONFIG_DIR={} claude auth login.",
+                shell_word(&path.to_string_lossy())
+            ),
+        };
+    }
+    snap
+}
+/// Copyable POSIX shell word for the actionable login hint.
+fn shell_word(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+@%,".contains(c))
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
 }
 pub(crate) fn result_snapshot(
     result: Result<Value, &'static str>,
@@ -1030,18 +1075,27 @@ cat >/dev/null
         let store = std::sync::Mutex::new(crate::claude_accounts::RefreshStore::new());
         let before = std::env::var_os("CLAUDE_CONFIG_DIR");
         let mut profiles = vec![];
+        let mut accounts = vec![];
         for name in ["personal", "broken", "work"] {
             let path = root.join(name);
             fs::create_dir_all(&path).unwrap();
             // Non-sensitive session sentinel: the production collector must not touch it.
             fs::write(path.join("session-sentinel"), "unchanged").unwrap();
-            let profile = crate::claude_accounts::Profile {
-                id: crate::claude_accounts::identity(&path),
-                path: path.to_str().unwrap().into(),
-                name: name.into(),
+            let account = crate::claude_accounts::Discovered {
+                profile: crate::claude_accounts::Profile {
+                    id: crate::claude_accounts::identity(&path),
+                    path: path.to_str().unwrap().into(),
+                    name: name.into(),
+                    visible: true,
+                },
+                primary: false,
+                launch: Some(path.clone()),
+                available: true,
                 visible: true,
             };
-            assert!(poll_profile(&store, &profile, Some(&exe), &root, || {}));
+            assert!(poll_profile(&store, &account, Some(&exe), &root, || {}));
+            let profile = account.profile.clone();
+            accounts.push(account);
             assert_eq!(
                 fs::read_to_string(profile_workspace(&root, &profile.id).join("profile-seen"))
                     .unwrap()
@@ -1094,7 +1148,7 @@ cat >/dev/null
         let held = store.lock().unwrap().begin(&profiles[0].id).unwrap();
         assert!(!poll_profile(
             &store,
-            &profiles[0],
+            &accounts[0],
             Some(&exe),
             &root,
             || panic!("overlap")
@@ -1107,13 +1161,242 @@ cat >/dev/null
         let cached = store.lock().unwrap().snapshot(&profiles[0].id);
         assert!(!poll_profile(
             &store,
-            &profiles[0],
+            &accounts[0],
             Some(&exe),
             &root,
             || store.lock().unwrap().invalidate()
         ));
         assert_eq!(store.lock().unwrap().snapshot(&profiles[0].id), cached);
         fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(unix)]
+    const ENV_PROBE_CLI: &str = r#"#!/bin/sh
+printf '%s\n' "${CLAUDE_CONFIG_DIR-<unset>}" > "$PWD/profile-seen"
+read init
+printf '%s\n' '{"type":"control_response","response":{"request_id":"init","subtype":"success","response":{}}}'
+read usage
+case "$CLAUDE_CONFIG_DIR" in
+  *loggedout*) printf '%s\n' '{"type":"control_response","response":{"request_id":"usage","subtype":"success","response":{"rate_limits_available":false,"subscription_type":null}}}' ;;
+  *) printf '%s\n' '{"type":"control_response","response":{"request_id":"usage","subtype":"success","response":{"rate_limits_available":true,"subscription_type":"max","rate_limits":{"five_hour":{"utilization":10,"resets_at":"2030-01-01T00:00:00Z"}}}}}' ;;
+esac
+cat >/dev/null
+"#;
+    #[cfg(unix)]
+    fn env_probe_cli(root: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let exe = root.join("env-probe-claude");
+        fs::write(&exe, ENV_PROBE_CLI).unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
+        exe
+    }
+    /// Child half of `primary_inherits_app_environment_exactly` (re-executed
+    /// test binary with a controlled environment). No-op when run directly.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "helper re-executed by primary_inherits_app_environment_exactly"]
+    fn primary_env_probe_child() {
+        let (Some(home), Some(expected)) = (
+            std::env::var_os("QM_PROBE_HOME"),
+            std::env::var("QM_PROBE_EXPECT").ok(),
+        ) else {
+            return;
+        };
+        let home = PathBuf::from(home);
+        let before = std::env::var_os("CLAUDE_CONFIG_DIR");
+        // Same inputs as profiles(): the app's own CLAUDE_CONFIG_DIR, if any.
+        let config = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+        let found = crate::claude_accounts::discover(&home, config.as_deref(), &Default::default());
+        let primary = found.iter().find(|a| a.primary).unwrap();
+        let exe = env_probe_cli(&home);
+        let store = std::sync::Mutex::new(crate::claude_accounts::RefreshStore::new());
+        assert!(poll_profile(&store, primary, Some(&exe), &home, || {}));
+        let seen =
+            fs::read_to_string(profile_workspace(&home, &primary.profile.id).join("profile-seen"))
+                .unwrap();
+        assert_eq!(seen.trim_end_matches('\n'), expected);
+        assert_eq!(std::env::var_os("CLAUDE_CONFIG_DIR"), before);
+        let snap = store.lock().unwrap().snapshot(&primary.profile.id).unwrap();
+        assert_eq!(snap.plan_type.as_deref(), Some("max"));
+        println!("QM_PRIMARY_ENV_PROBE_OK");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn primary_inherits_app_environment_exactly() {
+        let root = std::env::temp_dir().join(format!("qm-primary-env-{}", std::process::id()));
+        fs::create_dir_all(root.join(".claude")).unwrap();
+        let home = root.canonicalize().unwrap();
+        // Inherited value is passed through verbatim (double slash, trailing slash).
+        let raw = format!("{}//.claude/", home.display());
+        for (set, expected) in [(None, "<unset>".to_string()), (Some(raw.clone()), raw)] {
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.args([
+                "--exact",
+                "claude::tests::primary_env_probe_child",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("QM_PROBE_HOME", &home)
+            .env("QM_PROBE_EXPECT", &expected);
+            match &set {
+                Some(v) => cmd.env("CLAUDE_CONFIG_DIR", v),
+                None => cmd.env_remove("CLAUDE_CONFIG_DIR"),
+            };
+            let out = cmd.output().unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains("QM_PRIMARY_ENV_PROBE_OK"),
+                "primary probe with CLAUDE_CONFIG_DIR={set:?} failed:\n{stdout}\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn extra_profiles_get_exact_raw_path_and_primary_alias_is_deduplicated() {
+        let root = std::env::temp_dir().join(format!("qm-extra-env-{}", std::process::id()));
+        fs::create_dir_all(root.join(".claude")).unwrap();
+        fs::create_dir_all(root.join(".claude-work")).unwrap();
+        fs::create_dir_all(root.join(".claude-loggedout")).unwrap();
+        fs::create_dir_all(root.join("manual")).unwrap();
+        let home = root.canonicalize().unwrap();
+        let exe = env_probe_cli(&home);
+        let mut prefs = crate::claude_accounts::AccountPrefs::default();
+        let manual_raw = format!("{}/manual/", home.display());
+        let manual =
+            crate::claude_accounts::manual_profile(&home, None, &prefs, &manual_raw).unwrap();
+        assert_eq!(manual.path, manual_raw);
+        prefs.profiles.push(manual);
+        // A saved profile that designates ~/.claude is the primary (one entry, no env).
+        let alias = home.join(".claude/");
+        prefs.profiles.push(crate::claude_accounts::Profile {
+            id: crate::claude_accounts::identity(&home.join(".claude")),
+            path: alias.to_str().unwrap().into(),
+            name: "Alias".into(),
+            visible: true,
+        });
+        assert!(prefs.validate().is_ok());
+        let found = crate::claude_accounts::discover(&home, None, &prefs);
+        assert_eq!(found.len(), 4);
+        // The settings UI writes profile.path back: it must stay the raw string.
+        assert_eq!(found[3].profile.path, manual_raw);
+        assert!(found[0].primary && found[0].launch.is_none());
+        assert_eq!(found.iter().filter(|a| a.primary).count(), 1);
+        assert_eq!(
+            found[0].profile.id,
+            crate::claude_accounts::identity(&home.join(".claude"))
+        );
+        let before = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let store = std::sync::Mutex::new(crate::claude_accounts::RefreshStore::new());
+        let expected = [
+            format!("{}/.claude-loggedout", home.display()),
+            format!("{}/.claude-work", home.display()),
+            manual_raw.clone(),
+        ];
+        for (account, expected) in found[1..].iter().zip(expected) {
+            assert_eq!(account.launch.as_deref(), Some(Path::new(&expected)));
+            assert!(poll_profile(&store, account, Some(&exe), &home, || {}));
+            let seen = fs::read_to_string(
+                profile_workspace(&home, &account.profile.id).join("profile-seen"),
+            )
+            .unwrap();
+            assert_eq!(seen.trim_end_matches('\n'), expected);
+        }
+        assert_eq!(std::env::var_os("CLAUDE_CONFIG_DIR"), before);
+        let out = store
+            .lock()
+            .unwrap()
+            .snapshot(&found[1].profile.id)
+            .unwrap();
+        assert_eq!(
+            (out.state, out.error_kind),
+            ("error", Some("not_signed_in"))
+        );
+        assert!(out.metrics.is_empty());
+        assert!(out.message.contains(&format!(
+            "CLAUDE_CONFIG_DIR={}/.claude-loggedout claude",
+            home.display()
+        )));
+        // The signed-out account does not break the others.
+        let work = store
+            .lock()
+            .unwrap()
+            .snapshot(&found[2].profile.id)
+            .unwrap();
+        assert_eq!(work.state, "ready");
+        assert_eq!(work.metrics[0].used_percent, Some(10.0));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn signed_out_reply_is_not_connected_not_an_empty_quota() {
+        let signed_out = json!({"rate_limits_available":false,"subscription_type":null});
+        let previous = result_snapshot(
+            Ok(
+                json!({"rate_limits_available":true,"subscription_type":"max","rate_limits":{
+                "five_hour":{"utilization":0,"resets_at":"2030-01-01T00:00:00Z"}}}),
+            ),
+            None,
+            NOW,
+        );
+        let primary = result_snapshot_for(Ok(signed_out.clone()), Some(previous), NOW, None);
+        assert_eq!(
+            (primary.state, primary.error_kind),
+            ("error", Some("not_signed_in"))
+        );
+        assert!(primary.metrics.is_empty() && primary.plan_type.is_none());
+        assert!(primary.message.contains("claude auth login"));
+        assert!(!primary.message.contains("CLAUDE_CONFIG_DIR"));
+        let extra = result_snapshot_for(
+            Ok(signed_out),
+            None,
+            NOW,
+            Some(Path::new("/Users/me/.claude-work")),
+        );
+        assert_eq!(extra.error_kind, Some("not_signed_in"));
+        assert!(extra
+            .message
+            .contains("CLAUDE_CONFIG_DIR=/Users/me/.claude-work claude"));
+        let spaced = result_snapshot_for(
+            Ok(json!({"rate_limits_available":false})),
+            None,
+            NOW,
+            Some(Path::new("/Users/me/Claude Work")),
+        );
+        assert!(spaced
+            .message
+            .contains("CLAUDE_CONFIG_DIR='/Users/me/Claude Work' claude"));
+        // A connected account without subscription limits keeps the old auth error.
+        let api = result_snapshot_for(
+            Ok(json!({"rate_limits_available":false,"subscription_type":"pro"})),
+            None,
+            NOW,
+            None,
+        );
+        assert_eq!(api.error_kind, Some("auth"));
+    }
+    /// Read-only live check of the primary collector on this machine. Prints
+    /// only subtype / subscription_type / rate_limits_available.
+    #[test]
+    #[ignore = "Explicit opt-in: real Claude Code get_usage for the primary profile"]
+    fn live_primary_collector_is_signed_in() {
+        let exe = crate::claude_cli::discover().expect("Claude Code installed");
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let config = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+        let found = crate::claude_accounts::discover(&home, config.as_deref(), &Default::default());
+        let primary = found.iter().find(|a| a.primary).unwrap();
+        assert!(primary.launch.is_none());
+        let cwd = std::env::temp_dir().join("qm-live-primary-probe");
+        let value = collect(primary, &exe, &cwd);
+        let (subtype, value) = match value {
+            Ok(v) => ("success", v),
+            Err(kind) => (kind, Value::Null),
+        };
+        println!(
+            "QM_LIVE subtype={subtype} subscription_type={} rate_limits_available={}",
+            value["subscription_type"], value["rate_limits_available"]
+        );
+        assert_eq!(value["rate_limits_available"], true);
     }
     #[test]
     fn usage_keeps_fable_extra_and_errors_in_their_own_cache() {

@@ -55,6 +55,10 @@ impl AccountPrefs {
 pub struct Discovered {
     pub profile: Profile,
     pub primary: bool,
+    /// Exact path string for CLAUDE_CONFIG_DIR of the child (never canonicalized:
+    /// Claude Code derives its credential location from the raw value). `None`
+    /// for the primary profile, which must inherit the app environment untouched.
+    pub launch: Option<PathBuf>,
     pub available: bool,
     pub visible: bool,
 }
@@ -116,7 +120,7 @@ pub fn manual_profile(
     }
     Ok(Profile {
         id,
-        path: path.to_string_lossy().into_owned(),
+        path: raw.to_string(),
         name: path
             .file_name()
             .unwrap_or_default()
@@ -145,24 +149,20 @@ pub fn discover(home: &Path, config: Option<&Path>, prefs: &AccountPrefs) -> Vec
                     .is_some_and(|n| n.starts_with(".claude-"))
                     && e.path().is_dir()
             })
-            .map(|e| normalized(&e.path()))
+            .map(|e| e.path())
             .collect();
         extras.sort();
         paths.extend(extras);
     }
-    paths.extend(
-        prefs
-            .profiles
-            .iter()
-            .map(|p| normalized(Path::new(&p.path))),
-    );
+    paths.extend(prefs.profiles.iter().map(|p| PathBuf::from(&p.path)));
     let mut seen = std::collections::HashSet::new();
     let selected = prefs.selected_id.as_deref().unwrap_or("");
-    let selected_exists = paths.iter().any(|p| identity(p) == selected);
+    let selected_exists = paths.iter().any(|p| identity(&normalized(p)) == selected);
     paths
         .into_iter()
-        .filter(|p| seen.insert(p.clone()))
-        .map(|p| {
+        .filter(|raw| seen.insert(normalized(raw)))
+        .map(|raw| {
+            let p = normalized(&raw);
             let id = identity(&p);
             let is_primary = p == primary;
             let saved = prefs
@@ -171,7 +171,11 @@ pub fn discover(home: &Path, config: Option<&Path>, prefs: &AccountPrefs) -> Vec
                 .find(|s| normalized(Path::new(&s.path)) == p);
             let profile = Profile {
                 id: id.clone(),
-                path: p.to_string_lossy().into_owned(),
+                // Extras keep the discovered/entered string (also what the
+                // settings UI writes back), so edits never canonicalize it.
+                path: if is_primary { &p } else { &raw }
+                    .to_string_lossy()
+                    .into_owned(),
                 name: saved.map(|s| s.name.clone()).unwrap_or_else(|| {
                     if is_primary {
                         "Principal".into()
@@ -194,6 +198,7 @@ pub fn discover(home: &Path, config: Option<&Path>, prefs: &AccountPrefs) -> Vec
             };
             Discovered {
                 available: p.is_dir(),
+                launch: if is_primary { None } else { Some(raw) },
                 profile,
                 primary: is_primary,
                 visible,

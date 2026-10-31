@@ -37,5 +37,16 @@ Branche `feature/claude-multi-account-3.1`, base `1bcc2e5` (= `v3.1.0` = `origin
 ## Limites
 
 - Windows/Linux : rendu React et helper tray testés sur macOS uniquement, pas d'exécution native.
-- Aucun vrai compte interrogé, aucune notification/ntfy réelle, application normale jamais lancée.
+- Portage initial : aucun vrai compte interrogé. Correctif de connexion ci-dessous : seule une lecture `get_usage` du principal a été exécutée explicitement, sans appel de modèle ni lecture d'identifiants. Aucune notification/ntfy réelle, application normale jamais lancée.
+
+## Correctif : session du compte principal
+
+Le multi-comptes forçait `CLAUDE_CONFIG_DIR=~/.claude` même pour le principal. Sur macOS, cette présence explicite sélectionne une autre session Claude Code : la même lecture renvoyait `subscription_type: null` et `rate_limits_available: false`, alors que sans la variable elle renvoyait `max` et `true`.
+
+- Principal : hériter exactement de l'environnement de l'app, comme en 3.1.0. Ne pas ajouter la variable si elle est absente ; si elle existe, ne pas réécrire sa valeur.
+- Autres profils : définir la variable seulement sur l'enfant avec le chemin brut découvert/saisi, sans canonicalisation (identité/cache/déduplication restent canoniques). Le chemin sauvegardé par les Réglages reste brut.
+- Réponse sans session : état `not_signed_in`, aucune barre/quota inventé, et indication de connexion propre au profil. Les autres comptes fonctionnent indépendamment.
+- Test de régression observé en échec avant le correctif : le faux CLI recevait le chemin du principal au lieu de `<unset>` ; après correction, les deux cas absent/hérité passent, ainsi que les chemins supplémentaires exacts et la déduplication du principal.
+- Vérifications du correctif : `cargo test --offline` 109 réussis, 4 ignorés (deux intégrations historiques, un helper de sous-processus exécuté par son test parent, une sonde réelle opt-in) ; 45 tests Node affectés réussis ; `npm run build` OK. Une exécution explicite de `live_primary_collector_is_signed_in --ignored --nocapture` passe avec seulement `subtype=success subscription_type="max" rate_limits_available=true` imprimés.
+- Fixture navigateur du profil non connecté inspectée en clair/sombre : indication lisible, aucun débordement horizontal, compte voisin inchangé. Aucune modification de styles.
 - Les preuves (`evidence/`) ne sont pas commitées.
