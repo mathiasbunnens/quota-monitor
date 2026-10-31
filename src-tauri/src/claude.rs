@@ -1,7 +1,6 @@
-//! Claude provider. Source: the official Claude Code `statusLine` JSON, relayed
-//! locally and opt-in. No credential is read, stored or sent; the relay keeps
-//! only `rate_limits` percentages/reset times and a local receipt time.
-//! Independent from Codex: own state, own file, own watcher, own generation.
+//! Claude quota provider: isolated official CLI get_usage requests per profile.
+//! No direct credential reads or session switching. Each profile owns its cache
+//! and refresh ticket. Legacy statusLine relay helpers remain for compatibility.
 use crate::prefs;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -28,7 +27,7 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 pub fn on_enabled_changed() {
     GENERATION.fetch_add(1, Ordering::AcqRel);
     REFRESH_REQUESTED.store(true, Ordering::Release);
-    *LIVE.lock().unwrap() = None;
+    LIVE.lock().unwrap().invalidate();
 }
 
 // ---------------------------------------------------------------- relay file
@@ -444,11 +443,104 @@ fn read_file_state(dir: &Path) -> FileState {
     }
 }
 
-static LIVE: std::sync::Mutex<Option<ClaudeSnapshot>> = std::sync::Mutex::new(None);
+static LIVE: std::sync::Mutex<crate::claude_accounts::RefreshStore> =
+    std::sync::Mutex::new(crate::claude_accounts::RefreshStore::new());
 static REFRESH_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSnapshot {
+    #[serde(flatten)]
+    pub profile: crate::claude_accounts::Profile,
+    pub primary: bool,
+    pub available: bool,
+    pub refreshing: bool,
+    pub snapshot: ClaudeSnapshot,
+}
+fn profiles(app: &tauri::AppHandle, p: &prefs::Prefs) -> Vec<crate::claude_accounts::Discovered> {
+    let Ok(home) = app.path().home_dir() else {
+        return vec![];
+    };
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+    crate::claude_accounts::discover(&home, config.as_deref(), &p.claude_accounts)
+}
+/// Display view of every discovered profile (Fable preference applied per
+/// account). Visibility is presentation only: hidden profiles are included.
+pub fn accounts(app: &tauri::AppHandle) -> Vec<AccountSnapshot> {
+    let fable = prefs::current(app).fable_enabled;
+    collect_accounts(app, Some(fable))
+}
+/// Raw view (no Fable filtering/coalescing) for notifications.
+pub fn raw_accounts(app: &tauri::AppHandle) -> Vec<AccountSnapshot> {
+    collect_accounts(app, None)
+}
+fn collect_accounts(app: &tauri::AppHandle, fable: Option<bool>) -> Vec<AccountSnapshot> {
+    let p = prefs::current(app);
+    let executable = crate::claude_cli::discover().is_some();
+    profiles(app, &p)
+        .into_iter()
+        .map(|a| {
+            let store = LIVE.lock().unwrap();
+            let snap = store.snapshot(&a.profile.id).unwrap_or_else(|| {
+                compute(p.claude_enabled, executable, FileState::Missing, unix_now())
+            });
+            let refreshing = store.refreshing(&a.profile.id);
+            drop(store);
+            let mut profile = a.profile;
+            profile.visible = a.visible && p.claude_enabled;
+            AccountSnapshot {
+                profile,
+                primary: a.primary,
+                available: a.available,
+                refreshing,
+                snapshot: account_view(snap, p.claude_enabled, a.available, fable),
+            }
+        })
+        .collect()
+}
+/// Per-account projection. `fable: Some(enabled)` is the display view (v3.1.0
+/// Fable visibility + "Limite Fable" coalescing); `None` keeps raw metrics.
+pub(crate) fn account_view(
+    snap: ClaudeSnapshot,
+    enabled: bool,
+    available: bool,
+    fable: Option<bool>,
+) -> ClaudeSnapshot {
+    let snap = prepare_snapshot(snap, enabled, available);
+    match fable {
+        Some(fable_enabled) => filter_fable(snap, fable_enabled),
+        None => snap,
+    }
+}
+#[tauri::command]
+pub fn get_claude_accounts(app: tauri::AppHandle) -> Vec<AccountSnapshot> {
+    accounts(&app)
+}
+#[tauri::command]
+pub fn add_claude_profile(app: tauri::AppHandle, path: String) -> Result<prefs::Prefs, String> {
+    let mut p = prefs::current(&app);
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|_| "Dossier utilisateur introuvable.")?;
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+    let profile = crate::claude_accounts::manual_profile(
+        &home,
+        config.as_deref(),
+        &p.claude_accounts,
+        &path,
+    )?;
+    p.claude_accounts.profiles.push(profile);
+    prefs::set_preferences(app, p)
+}
+/// Legacy consumers and the tray indicator show one real account, never an
+/// average. Multi mode uses the first visible account in deterministic order.
 pub fn snapshot(app: &tauri::AppHandle) -> ClaudeSnapshot {
-    filter_fable(raw_snapshot(app), prefs::current(app).fable_enabled)
+    accounts(app)
+        .into_iter()
+        .find(|a| a.profile.visible)
+        .map(|a| a.snapshot)
+        .unwrap_or_else(|| compute(false, false, FileState::Missing, unix_now()))
 }
 
 fn filter_fable(mut snap: ClaudeSnapshot, enabled: bool) -> ClaudeSnapshot {
@@ -499,16 +591,7 @@ pub(crate) fn display_metrics(metrics: &[Metric]) -> Vec<Metric> {
     rows
 }
 
-pub(crate) fn raw_snapshot(app: &tauri::AppHandle) -> ClaudeSnapshot {
-    let enabled = prefs::current(app).claude_enabled;
-    let mut snap = LIVE.lock().unwrap().clone().unwrap_or_else(|| {
-        compute(
-            enabled,
-            crate::claude_cli::discover().is_some(),
-            FileState::Missing,
-            unix_now(),
-        )
-    });
+fn prepare_snapshot(mut snap: ClaudeSnapshot, enabled: bool, available: bool) -> ClaudeSnapshot {
     snap.enabled = enabled;
     snap.source = Some(Source {
         kind: "official_cli_control",
@@ -531,6 +614,11 @@ pub(crate) fn raw_snapshot(app: &tauri::AppHandle) -> ClaudeSnapshot {
     }
     if !enabled {
         snap.state = "disabled";
+        snap.metrics.clear();
+    } else if !available {
+        snap.state = "error";
+        snap.error_kind = Some("profile_unavailable");
+        snap.message = "Dossier de profil Claude indisponible.".into();
         snap.metrics.clear();
     } else if !snap.configured {
         snap.message =
@@ -572,24 +660,69 @@ pub(crate) fn usage_snapshot(value: &Value, now: i64) -> ClaudeSnapshot {
 
 fn refresh_live(app: &tauri::AppHandle) {
     let generation = GENERATION.load(Ordering::Acquire);
-    let Some(executable) = crate::claude_cli::discover() else {
-        // Do not silently return: surface the missing executable even if a
-        // previous successful refresh left cached data in LIVE.
-        if generation == GENERATION.load(Ordering::Acquire) && prefs::current(app).claude_enabled {
-            *LIVE.lock().unwrap() = Some(compute(true, false, FileState::Missing, unix_now()));
-            crate::publish_quotas(app);
-        }
+    let p = prefs::current(app);
+    if !p.claude_enabled {
         return;
-    };
+    }
+    let executable = crate::claude_cli::discover();
     let Ok(dir) = data_dir(app) else {
         return;
     };
-    let result = crate::claude_cli::read_usage(&executable, &dir.join("claude-cli-workspace"));
-    if generation != GENERATION.load(Ordering::Acquire) || !prefs::current(app).claude_enabled {
-        return;
+    // Refresh is serial and each call uses a distinct canonical profile path.
+    for a in profiles(app, &p) {
+        if GENERATION.load(Ordering::Acquire) != generation || !prefs::current(app).claude_enabled {
+            break;
+        }
+        poll_profile(&LIVE, &a.profile, executable.as_deref(), &dir, || {
+            crate::publish_quotas(app)
+        });
     }
-    let now = unix_now();
+}
+fn poll_profile(
+    store: &std::sync::Mutex<crate::claude_accounts::RefreshStore>,
+    profile: &crate::claude_accounts::Profile,
+    executable: Option<&Path>,
+    dir: &Path,
+    mut changed: impl FnMut(),
+) -> bool {
+    let Some(ticket) = store.lock().unwrap().begin(&profile.id) else {
+        return false;
+    };
+    changed();
+    let previous = store.lock().unwrap().snapshot(&profile.id);
+    let snap = if let Some(exe) = executable {
+        let result = crate::claude_cli::read_usage_for(
+            exe,
+            &profile_workspace(dir, &profile.id),
+            Path::new(&profile.path),
+        );
+        result_snapshot(result, previous, unix_now())
+    } else {
+        compute(true, false, FileState::Missing, unix_now())
+    };
+    let committed = store.lock().unwrap().finish(ticket, snap);
+    if committed {
+        changed();
+    }
+    committed
+}
+fn profile_workspace(dir: &Path, id: &str) -> PathBuf {
+    // Bound each path component on filesystems with NAME_MAX=255.
+    id.as_bytes()
+        .chunks(64)
+        .fold(dir.join("claude-cli-workspaces"), |p, part| {
+            p.join(std::str::from_utf8(part).unwrap())
+        })
+}
+pub(crate) fn result_snapshot(
+    result: Result<Value, &'static str>,
+    previous: Option<ClaudeSnapshot>,
+    now: i64,
+) -> ClaudeSnapshot {
     let mut snap = match result {
+        // v3.1.0 parser: five_hour/seven_day + model_scoped Fable. The legacy
+        // seven_day_{fable,sonnet,opus} keys of 2d298ad are not reintroduced
+        // (they would duplicate Fable and change the Unique presentation).
         Ok(value) if value["rate_limits_available"] == true => usage_snapshot(&value, now),
         Ok(_) => {
             let mut s = compute(true, true, FileState::Missing, now);
@@ -599,11 +732,7 @@ fn refresh_live(app: &tauri::AppHandle) {
             s
         }
         Err(kind) => {
-            let mut s = LIVE
-                .lock()
-                .unwrap()
-                .clone()
-                .unwrap_or_else(|| compute(true, true, FileState::Missing, now));
+            let mut s = previous.unwrap_or_else(|| compute(true, true, FileState::Missing, now));
             s.state = "error";
             s.error_kind = Some(kind);
             s.message = "Lecture Claude impossible : vérifiez la connexion et une version de Claude Code compatible avec get_usage. Dernières valeurs éventuellement conservées, non actualisées.".into();
@@ -617,8 +746,7 @@ fn refresh_live(app: &tauri::AppHandle) {
     snap.capability = Capability {
         refresh: "on_demand",
     };
-    *LIVE.lock().unwrap() = Some(snap);
-    crate::publish_quotas(app);
+    snap
 }
 
 // ------------------------------------------------------------------ commands
@@ -628,8 +756,7 @@ pub fn get_claude_snapshot(app: tauri::AppHandle) -> ClaudeSnapshot {
     snapshot(&app)
 }
 
-/// Claude exposes quotas only while Claude Code runs: this re-reads the local
-/// relay file; it never contacts a server and never touches Codex.
+/// Coalesces a quota-only CLI refresh for all profiles; never touches Codex.
 #[tauri::command]
 pub fn request_claude_refresh(app: tauri::AppHandle) -> ClaudeSnapshot {
     REFRESH_REQUESTED.store(true, Ordering::Release);
@@ -651,10 +778,22 @@ pub fn uninstall_claude_relay(app: tauri::AppHandle) -> Result<ClaudeSnapshot, S
     Ok(snapshot(&app))
 }
 
-/// Watches for new events only while Claude is enabled; idle otherwise.
+fn refresh_due(
+    elapsed: Duration,
+    interval: Duration,
+    requested: &std::sync::atomic::AtomicBool,
+) -> bool {
+    let manual = requested.swap(false, Ordering::AcqRel);
+    elapsed >= interval || manual
+}
+
+/// One serial collector, idle while disabled. View-only choices do not filter
+/// collection, and reset-time changes from every account update the native menu.
 pub fn start_watcher(app: tauri::AppHandle) {
     std::thread::spawn(move || {
-        let mut last: Option<ClaudeSnapshot> = None;
+        let mut last: Option<Vec<AccountSnapshot>> = None;
+        #[cfg(target_os = "macos")]
+        let mut rendered_minute = 0;
         let mut last_read = std::time::Instant::now() - Duration::from_secs(3600);
         loop {
             std::thread::sleep(Duration::from_secs(1));
@@ -667,20 +806,32 @@ pub fn start_watcher(app: tauri::AppHandle) {
                 .map(|p| p.status().refresh_seconds)
                 .unwrap_or(60)
                 .max(15);
-            if last_read.elapsed() >= Duration::from_secs(interval)
-                || REFRESH_REQUESTED.swap(false, Ordering::AcqRel)
-            {
+            if refresh_due(
+                last_read.elapsed(),
+                Duration::from_secs(interval),
+                &REFRESH_REQUESTED,
+            ) {
                 refresh_live(&app);
                 last_read = std::time::Instant::now();
             }
             let generation = GENERATION.load(Ordering::Acquire);
-            let next = snapshot(&app);
+            let next = accounts(&app);
             if generation != GENERATION.load(Ordering::Acquire) {
                 continue; // disabled/re-enabled meanwhile: drop the stale result
             }
             if last.as_ref() != Some(&next) {
                 last = Some(next);
                 crate::publish_quotas(&app);
+            }
+            #[cfg(target_os = "macos")]
+            {
+                // Reuse this watcher's tick; presentation must not trigger
+                // collection, notifications or frontend events to move a clock.
+                let minute = chrono::Local::now().timestamp() / 60;
+                if minute != rendered_minute {
+                    rendered_minute = minute;
+                    crate::render_native_menu(&app);
+                }
             }
         }
     });
@@ -831,6 +982,193 @@ mod tests {
             assert_eq!(snap.metrics[2].reset_at, None);
             assert_eq!(snap.metrics[2].exhausted, exhausted);
         }
+    }
+
+    #[test]
+    fn due_poll_consumes_manual_request_without_scheduling_a_duplicate() {
+        let requested = std::sync::atomic::AtomicBool::new(true);
+        assert!(refresh_due(
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            &requested
+        ));
+        assert!(!refresh_due(
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+            &requested
+        ));
+        requested.store(true, Ordering::Release);
+        assert!(refresh_due(
+            Duration::ZERO,
+            Duration::from_secs(60),
+            &requested
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn fake_cli_end_to_end_isolates_failures_caches_session_and_late_results() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("qm-poll-integration-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let exe = root.join("fake-claude");
+        fs::write(&exe, r#"#!/bin/sh
+printf '%s\n' "$CLAUDE_CONFIG_DIR" > "$PWD/profile-seen"
+read init
+printf '%s\n' '{"type":"control_response","response":{"request_id":"init","subtype":"success","response":{}}}'
+read usage
+case "$CLAUDE_CONFIG_DIR" in
+  *broken) printf '%s\n' '{"type":"control_response","response":{"request_id":"usage","subtype":"error"}}' ;;
+  *work) used=80 ;;
+  *) used=25 ;;
+esac
+if [ -n "$used" ]; then
+printf '{"type":"control_response","response":{"request_id":"usage","subtype":"success","response":{"rate_limits_available":true,"subscription_type":"pro","rate_limits":{"five_hour":{"utilization":%s,"resets_at":"2030-01-01T00:00:00Z"}}}}}\n' "$used"
+fi
+cat >/dev/null
+"#).unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
+        let store = std::sync::Mutex::new(crate::claude_accounts::RefreshStore::new());
+        let before = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let mut profiles = vec![];
+        for name in ["personal", "broken", "work"] {
+            let path = root.join(name);
+            fs::create_dir_all(&path).unwrap();
+            // Non-sensitive session sentinel: the production collector must not touch it.
+            fs::write(path.join("session-sentinel"), "unchanged").unwrap();
+            let profile = crate::claude_accounts::Profile {
+                id: crate::claude_accounts::identity(&path),
+                path: path.to_str().unwrap().into(),
+                name: name.into(),
+                visible: true,
+            };
+            assert!(poll_profile(&store, &profile, Some(&exe), &root, || {}));
+            assert_eq!(
+                fs::read_to_string(profile_workspace(&root, &profile.id).join("profile-seen"))
+                    .unwrap()
+                    .trim(),
+                profile.path
+            );
+            assert_eq!(
+                fs::read_to_string(path.join("session-sentinel")).unwrap(),
+                "unchanged"
+            );
+            profiles.push(profile);
+        }
+        assert_eq!(std::env::var_os("CLAUDE_CONFIG_DIR"), before);
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .snapshot(&profiles[0].id)
+                .unwrap()
+                .metrics[0]
+                .used_percent,
+            Some(25.0)
+        );
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .snapshot(&profiles[1].id)
+                .unwrap()
+                .state,
+            "error"
+        );
+        assert!(store
+            .lock()
+            .unwrap()
+            .snapshot(&profiles[1].id)
+            .unwrap()
+            .metrics
+            .is_empty());
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .snapshot(&profiles[2].id)
+                .unwrap()
+                .metrics[0]
+                .used_percent,
+            Some(80.0)
+        );
+        let held = store.lock().unwrap().begin(&profiles[0].id).unwrap();
+        assert!(!poll_profile(
+            &store,
+            &profiles[0],
+            Some(&exe),
+            &root,
+            || panic!("overlap")
+        ));
+        store.lock().unwrap().invalidate();
+        assert!(!store
+            .lock()
+            .unwrap()
+            .finish(held, compute(true, true, FileState::Missing, NOW)));
+        let cached = store.lock().unwrap().snapshot(&profiles[0].id);
+        assert!(!poll_profile(
+            &store,
+            &profiles[0],
+            Some(&exe),
+            &root,
+            || store.lock().unwrap().invalidate()
+        ));
+        assert_eq!(store.lock().unwrap().snapshot(&profiles[0].id), cached);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn usage_keeps_fable_extra_and_errors_in_their_own_cache() {
+        // v3.1.0 schema: Fable arrives in model_scoped, not seven_day_fable.
+        let value = json!({"rate_limits_available":true,"subscription_type":"max_20x","rate_limits": {
+            "five_hour":{"utilization":25,"resets_at":"2030-01-01T00:00:00Z"},
+            "seven_day":{"utilization":100,"resets_at":"2030-01-02T00:00:00Z"},
+            "model_scoped":[{"display_name":"Fable","utilization":12,"resets_at":"2030-01-02T00:00:00Z"}],
+            "extra_usage":{"is_enabled":true,"spend_limit_reached":true}
+        }});
+        let a = result_snapshot(Ok(value), None, NOW);
+        assert_eq!(a.metrics.len(), 3);
+        assert_eq!(a.metrics[2].id, "claude:weekly_fable");
+        assert_eq!(a.metrics[0].used_percent, Some(25.0));
+        assert_eq!(a.plan_type.as_deref(), Some("max_20x"));
+        assert!(a.extra_usage.as_ref().unwrap().limit_reached);
+        let b = result_snapshot(Err("unsupported_or_auth"), None, NOW);
+        assert_eq!(b.state, "error");
+        assert!(b.metrics.is_empty());
+        let cached_a = result_snapshot(Err("timeout"), Some(a.clone()), NOW);
+        assert_eq!(cached_a.metrics, a.metrics);
+        assert_eq!(cached_a.observed_at, a.observed_at);
+        assert_eq!(cached_a.state, "error");
+        assert_ne!(
+            profile_workspace(Path::new("/scratch"), "a"),
+            profile_workspace(Path::new("/scratch"), "b")
+        );
+    }
+    #[test]
+    fn fable_visibility_and_coalescing_apply_to_each_account_view_but_not_raw() {
+        let reset = iso(NOW + 3600).unwrap();
+        let raw = usage_snapshot(
+            &json!({"rate_limits": {
+                "five_hour":{"utilization":10,"resets_at":reset},
+                "seven_day":{"utilization":37.5,"resets_at":reset},
+                "model_scoped":[{"display_name":"Fable","utilization":37.5,"resets_at":reset}]
+            }}),
+            NOW,
+        );
+        // Display view of one account: v3.1.0 coalescing into "Limite Fable".
+        let shown = account_view(raw.clone(), true, true, Some(true));
+        assert_eq!(shown.metrics.len(), 2);
+        assert_eq!(shown.metrics[1].label, "Limite Fable");
+        // Fable hidden by the persisted preference: hidden for this account too.
+        let hidden = account_view(raw.clone(), true, true, Some(false));
+        assert!(hidden.metrics.iter().all(|m| m.id != "claude:weekly_fable"));
+        assert_eq!(hidden.metrics.len(), 2);
+        // Raw view (notifications): every metric, original labels.
+        let untouched = account_view(raw.clone(), true, true, None);
+        assert_eq!(untouched.metrics.len(), 3);
+        assert_eq!(untouched.metrics[2].label, "Limite hebdomadaire Fable");
+        // Unavailable profile directory: explicit error, no metrics.
+        let missing = account_view(raw, true, false, Some(true));
+        assert_eq!(missing.state, "error");
+        assert!(missing.metrics.is_empty());
     }
 
     #[test]

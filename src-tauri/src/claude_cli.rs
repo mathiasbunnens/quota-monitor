@@ -107,8 +107,25 @@ fn claude_command(executable: &Path) -> Command {
     command
 }
 pub fn read_usage(executable: &Path, cwd: &Path) -> Result<Value, &'static str> {
+    read_usage_inner(executable, cwd, None)
+}
+pub fn read_usage_for(executable: &Path, cwd: &Path, config: &Path) -> Result<Value, &'static str> {
+    if !config.is_absolute() || !config.is_dir() {
+        return Err("profile_unavailable");
+    }
+    read_usage_inner(executable, cwd, Some(config))
+}
+fn read_usage_inner(
+    executable: &Path,
+    cwd: &Path,
+    config: Option<&Path>,
+) -> Result<Value, &'static str> {
     std::fs::create_dir_all(cwd).map_err(|_| "workspace")?;
-    let mut child = claude_command(executable)
+    let mut command = claude_command(executable);
+    if let Some(config) = config {
+        command.env("CLAUDE_CONFIG_DIR", config);
+    }
+    let mut child = command
         .args([
             "--safe-mode",
             "--strict-mcp-config",
@@ -249,6 +266,33 @@ mod tests {
         assert!(!found.contains(&home.join(".local/bin/claude")));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn profile_queries_set_child_environment_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("qm-isolated-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let exe = root.join("cli");
+        std::fs::write(&exe, r#"#!/bin/sh
+read init
+printf '%s\n' '{"type":"control_response","response":{"request_id":"init","subtype":"success","response":{}}}'
+read usage
+printf '{"type":"control_response","response":{"request_id":"usage","subtype":"success","response":{"profile":"%s","cwd":"%s"}}}\n' "$CLAUDE_CONFIG_DIR" "$PWD"
+cat >/dev/null
+"#).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let before = std::env::var_os("CLAUDE_CONFIG_DIR");
+        for name in ["personal", "work"] {
+            let config = root.join(name);
+            std::fs::create_dir_all(&config).unwrap();
+            let cwd = root.join(format!("cache-{name}"));
+            let value = read_usage_for(&exe, &cwd, &config).unwrap();
+            assert_eq!(value["profile"], config.to_str().unwrap());
+            assert_eq!(value["cwd"], cwd.canonicalize().unwrap().to_str().unwrap());
+            assert_eq!(std::env::var_os("CLAUDE_CONFIG_DIR"), before);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn explicit_binary_has_priority() {
         let path = std::env::current_dir().unwrap().join("custom-claude");

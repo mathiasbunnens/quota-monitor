@@ -23,6 +23,8 @@ export type CompactRow = {
   remaining: number | null;
   value: string;
   reset: string;
+  /** Time left before the reset ("3h30", "42 min", "3j 8h"); "—" when unknown. */
+  countdown: string;
   low: boolean;
   fill: CompactFill;
 };
@@ -30,6 +32,8 @@ export type CompactRow = {
 export type CompactProvider = {
   name: string;
   section: string;
+  /** Claude multi-account card: 5 h and 7 j paired, like the menu. */
+  compact: boolean;
   badge: string | null;
   rows: CompactRow[];
   note: { text: string; tone: CompactTone } | null;

@@ -71,3 +71,21 @@
 .provider-row--warning { --quota-fill: #d68b12; }
 .provider-row--low { --quota-fill: #e5484d; }
 .provider-row__model-label { color: var(--quota-fill); }
+
+// Multi-account cards only: labels stay above two adjacent quota tracks.
+.provider-card__paired-values {
+  display: grid; gap: 4px;
+  .dashboard__quota-heading { font-size: 11px; gap: 6px; }
+  strong { font-size: 15px; letter-spacing: -0.2px; }
+}
+.provider-card__paired-bars { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+// 5 h: inherit the exact Unique track/fill thickness and radius (.dashboard__progress).
+.provider-card__window--short { margin-top: 0; }
+.provider-card__window--week { height: 3px; margin-top: 0; }
+@media (max-width: 520px) { .provider-grid--accounts { grid-template-columns: minmax(0, 1fr); } }
+.provider-card:has(.provider-card__paired-bars) {
+  padding: 12px;
+  h2 { font-size: 13px; overflow-wrap: anywhere; }
+  .plan-badge { font-size: 10px; }
+  .provider-card__header { align-items: flex-start; }
+}

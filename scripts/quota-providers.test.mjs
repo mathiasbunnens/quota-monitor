@@ -25,7 +25,7 @@ test("optional Fable uses normal remaining-percentage and reset rendering", () =
   assert.deepEqual(rows[1], {
     id: "claude:weekly_fable", label: "Limite Fable", modelLabel: "Fable",
     remaining: 63, exhausted: false, missing: "Non communiquée",
-    resetText: formatResetDate(reset),
+    resetText: formatResetDate(reset), resetAt: reset,
   });
 });
 

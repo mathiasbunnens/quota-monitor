@@ -18,6 +18,7 @@ pub struct Prefs {
     /// "menubar" (default) or "app" (standalone Dock application, macOS only).
     pub display_mode: String,
     pub ntfy: crate::ntfy::Config,
+    pub claude_accounts: crate::claude_accounts::AccountPrefs,
 }
 
 impl Default for Prefs {
@@ -29,6 +30,7 @@ impl Default for Prefs {
             indicator: "codex".into(),
             display_mode: crate::display_mode::MENUBAR.into(),
             ntfy: crate::ntfy::Config::default(),
+            claude_accounts: crate::claude_accounts::AccountPrefs::default(),
         }
     }
 }
@@ -89,22 +91,13 @@ pub fn set_preferences(app: tauri::AppHandle, mut prefs: Prefs) -> Result<Prefs,
     } else {
         crate::display_mode::MENUBAR.into()
     };
-    if !prefs.valid() {
-        return Err("Indicateur de barre des menus non pris en charge.".into());
-    }
+    // Validation (indicator, ntfy, Claude profiles) happens in save_to before
+    // the file or the in-memory state is replaced.
     let file = path(&app)?;
-    prefs.ntfy.validate()?;
-    if let Some(dir) = file.parent() {
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let tmp = file.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_vec(&prefs).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
-
     let previous = {
         let state = app.state::<PrefsState>();
         let mut guard = state.0.lock().map_err(|_| "Préférences indisponibles.")?;
+        save_to(&file, &prefs)?;
         std::mem::replace(&mut *guard, prefs.clone())
     };
     if previous.codex_enabled != prefs.codex_enabled {
@@ -115,7 +108,7 @@ pub fn set_preferences(app: tauri::AppHandle, mut prefs: Prefs) -> Result<Prefs,
             provider.set_enabled(prefs.codex_enabled);
         }
     }
-    if previous.claude_enabled != prefs.claude_enabled {
+    if collection_changed(&previous, &prefs) {
         claude::on_enabled_changed();
     }
     if previous.display_mode != prefs.display_mode {
@@ -125,10 +118,119 @@ pub fn set_preferences(app: tauri::AppHandle, mut prefs: Prefs) -> Result<Prefs,
     Ok(prefs)
 }
 
+fn collection_changed(previous: &Prefs, next: &Prefs) -> bool {
+    let sources = |p: &Prefs| {
+        p.claude_accounts
+            .profiles
+            .iter()
+            .map(|a| (a.id.clone(), a.path.clone()))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    previous.claude_enabled != next.claude_enabled || sources(previous) != sources(next)
+}
+
+fn save_to(file: &std::path::Path, prefs: &Prefs) -> Result<(), String> {
+    if !prefs.valid() {
+        return Err("Indicateur de barre des menus non pris en charge.".into());
+    }
+    prefs.ntfy.validate()?;
+    prefs.claude_accounts.validate()?;
+    if let Some(dir) = file.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = file.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec(&prefs).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn v310_preferences_file_loads_without_loss_and_defaults_to_single_primary() {
+        // Shape written by v3.1.0 (display mode, Fable opt-out, ntfy), no
+        // claudeAccounts key yet. Refresh settings live in the Codex file.
+        let bytes = br#"{"codexEnabled":true,"claudeEnabled":true,"fableEnabled":false,"indicator":"both","displayMode":"app","ntfy":{"enabled":true,"serverUrl":"https://ntfy.example.invalid","topic":"fixture-topic_1"}}"#;
+        let p = parse(bytes);
+        assert!(p.codex_enabled && p.claude_enabled && !p.fable_enabled);
+        assert_eq!(p.indicator, "both");
+        assert_eq!(p.display_mode, "app");
+        assert!(p.ntfy.enabled);
+        assert_eq!(p.ntfy.server_url, "https://ntfy.example.invalid");
+        assert_eq!(p.ntfy.topic, "fixture-topic_1");
+        assert_eq!(p.claude_accounts.mode, "single");
+        assert_eq!(p.claude_accounts.selected_id, None);
+        assert!(p.claude_accounts.profiles.is_empty());
+        // Round trip keeps every v3.1.0 key.
+        let v: serde_json::Value = serde_json::to_value(&p).unwrap();
+        for key in [
+            "codexEnabled",
+            "claudeEnabled",
+            "fableEnabled",
+            "indicator",
+            "displayMode",
+            "ntfy",
+        ] {
+            assert!(v.get(key).is_some(), "{key}");
+        }
+        assert_eq!(parse(&serde_json::to_vec(&p).unwrap()), p);
+    }
+    #[test]
+    fn visibility_selection_mode_and_names_do_not_restart_collection() {
+        let before = Prefs::default();
+        let mut after = before.clone();
+        after.claude_accounts.mode = "multi".into();
+        after.claude_accounts.selected_id = Some("display-only".into());
+        assert!(!collection_changed(&before, &after));
+        after.claude_enabled = true;
+        assert!(collection_changed(&before, &after));
+        let before = after.clone();
+        after
+            .claude_accounts
+            .profiles
+            .push(crate::claude_accounts::Profile {
+                id: "profile:a".into(),
+                path: "/fixture/a".into(),
+                name: "A".into(),
+                visible: true,
+            });
+        assert!(collection_changed(&before, &after));
+        let before = after.clone();
+        after.claude_accounts.profiles[0].name = "Personnel".into();
+        after.claude_accounts.profiles[0].visible = false;
+        assert!(!collection_changed(&before, &after));
+    }
+    #[test]
+    fn account_preferences_persist_on_disk_and_invalid_edits_do_not_replace_them() {
+        let root = std::env::temp_dir().join(format!("qm-prefs-profile-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let profile_dir = root.join("profile");
+        fs::create_dir_all(&profile_dir).unwrap();
+        let profile_dir = profile_dir.canonicalize().unwrap();
+        let file = root.join("prefs.json");
+        let mut p = parse(br#"{"claudeEnabled":true,"indicator":"both"}"#);
+        p.claude_accounts.mode = "multi".into();
+        p.claude_accounts
+            .profiles
+            .push(crate::claude_accounts::Profile {
+                id: crate::claude_accounts::identity(&profile_dir),
+                path: profile_dir.to_str().unwrap().into(),
+                name: "Personnel".into(),
+                visible: false,
+            });
+        p.claude_accounts.selected_id = Some(p.claude_accounts.profiles[0].id.clone());
+        save_to(&file, &p).unwrap();
+        assert_eq!(parse(&fs::read(&file).unwrap()), p);
+        let bytes = fs::read(&file).unwrap();
+        p.claude_accounts.profiles[0].name = String::new();
+        assert!(save_to(&file, &p).is_err());
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn defaults_keep_codex_only_behaviour() {
         let p = Prefs::default();
@@ -170,6 +272,7 @@ mod tests {
             indicator: "both".into(),
             display_mode: "app".into(),
             ntfy: crate::ntfy::Config::default(),
+            claude_accounts: crate::claude_accounts::AccountPrefs::default(),
         };
         let bytes = serde_json::to_vec(&saved).unwrap();
         assert_eq!(

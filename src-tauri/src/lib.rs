@@ -1,5 +1,6 @@
 mod activity;
 mod claude;
+mod claude_accounts;
 mod claude_cli;
 mod codex;
 mod display_mode;
@@ -438,7 +439,11 @@ define_class!(
         #[unsafe(method(menuWillOpen:))]
         fn menu_will_open(&self, _menu: &NSMenu) {
             MENU_OPEN.store(true, Ordering::Release);
-            if let Some(app) = APP_HANDLE.get() { request_quota_refresh(app.clone()); }
+            if let Some(app) = APP_HANDLE.get() {
+                // Countdowns are computed at render time: redraw on open.
+                render_native_menu(app);
+                request_quota_refresh(app.clone());
+            }
         }
 
         #[unsafe(method(menuDidClose:))]
@@ -813,12 +818,17 @@ struct PanelRow {
     remaining: Option<u32>,
     value: String,
     reset: String,
+    /// Time left before the reset ("3h30", "42 min", "3j 8h"), computed from
+    /// the structured reset and the local clock; "—" when absent or passed.
+    countdown: String,
 }
 
 #[cfg(target_os = "macos")]
 #[derive(Clone, Debug, PartialEq)]
 struct PanelProvider {
-    name: &'static str,
+    name: String,
+    /// Multi-account card: 5 h and 7 j paired with visible countdowns.
+    compact: bool,
     badge: Option<String>,
     rows: Vec<PanelRow>,
     note: Option<(String, Tone)>,
@@ -916,6 +926,7 @@ fn codex_panel(
                 },
                 remaining: Some(remaining),
                 value: value_text(Some(remaining), false, ""),
+                countdown: "—".into(),
                 reset: reset_phrase(&p.reset_at, short)
                     .or_else(|| {
                         p.reset_label
@@ -938,7 +949,8 @@ fn codex_panel(
         _ => Some((non_empty(message, "Connexion à Codex…"), Tone::Warning)),
     };
     PanelProvider {
-        name: "Codex",
+        name: "Codex".into(),
+        compact: false,
         badge: plan,
         rows,
         note,
@@ -970,6 +982,7 @@ fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
                 },
                 remaining,
                 value: value_text(remaining, m.exhausted, missing),
+                countdown: reset_countdown(m.reset_at.as_deref(), Local::now().timestamp()),
                 reset: m
                     .reset_at
                     .as_deref()
@@ -998,10 +1011,99 @@ fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
         _ => None,
     };
     PanelProvider {
-        name: "Claude",
+        name: "Claude".into(),
+        compact: false,
         badge: snapshot.plan_type.clone(),
         rows,
         note,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn claude_account_panels(accounts: &[claude::AccountSnapshot]) -> Vec<PanelProvider> {
+    let visible: Vec<_> = accounts.iter().filter(|a| a.profile.visible).collect();
+    let compact = visible.len() > 1;
+    visible
+        .into_iter()
+        .map(|a| {
+            let mut panel = claude_panel(&a.snapshot);
+            if !compact {
+                // One visible account: the exact v3.1.0 Claude card.
+                return panel;
+            }
+            panel.compact = true;
+            panel.name = format!("Claude · {}", a.profile.name);
+            if let Some(extra) = &a.snapshot.extra_usage {
+                if extra.enabled {
+                    let extra_text = if extra.limit_reached {
+                        "Usage supplémentaire : plafond atteint"
+                    } else {
+                        "Usage supplémentaire activé"
+                    };
+                    panel.note = Some(match panel.note {
+                        Some((text, tone)) => (format!("{text} · {extra_text}"), tone),
+                        None => (
+                            extra_text.into(),
+                            if extra.limit_reached {
+                                Tone::Warning
+                            } else {
+                                Tone::Neutral
+                            },
+                        ),
+                    });
+                }
+            }
+            panel
+        })
+        .collect()
+}
+#[cfg(target_os = "macos")]
+fn compact_tracks() -> ((f64, f64), (f64, f64)) {
+    (
+        (24.0, PANEL_TRACK_HEIGHT),
+        (24.0 + PANEL_TRACK_HEIGHT + 2.0, 3.0),
+    )
+}
+
+/// Track/fill thickness of a Unique quota row, measured on v3.1.0 (5 pt,
+/// radius 2.5 in make_panel_view).
+#[cfg(target_os = "macos")]
+const PANEL_TRACK_HEIGHT: f64 = 5.0;
+
+/// Same rounded-up format as `remaining_span`; "—" for absent, invalid or
+/// passed resets (never negative, never invented).
+#[cfg(target_os = "macos")]
+fn reset_countdown(reset_at: Option<&str>, now: i64) -> String {
+    reset_at
+        .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| at.timestamp() - now)
+        .filter(|left| *left > 0)
+        .map(remaining_span)
+        .unwrap_or_else(|| "—".into())
+}
+
+/// Visible compact text: live countdown + provider value ("27 %", "Épuisé",
+/// missing text). Without a usable reset, only the value is shown.
+#[cfg(target_os = "macos")]
+fn compact_heading(row: &PanelRow) -> String {
+    let text = if row.countdown == "—" {
+        row.value.clone()
+    } else {
+        format!("{} · {}", row.countdown, row.value)
+    };
+    if row.model {
+        format!("Fable · {text}")
+    } else {
+        text
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn compact_value(row: &PanelRow) -> String {
+    match row.remaining {
+        Some(0) => "0 % · épuisé".into(),
+        Some(n) => format!("{n} % restants"),
+        None => row.value.clone(),
     }
 }
 
@@ -1098,6 +1200,7 @@ struct CompactRow {
     remaining: Option<u32>,
     value: String,
     reset: String,
+    countdown: String,
     low: bool,
     fill: CompactFill,
 }
@@ -1114,8 +1217,10 @@ struct CompactNote {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CompactProvider {
-    name: &'static str,
+    name: String,
     section: String,
+    /// Same Multi pairing as the native menu card.
+    compact: bool,
     badge: Option<String>,
     rows: Vec<CompactRow>,
     note: Option<CompactNote>,
@@ -1179,6 +1284,7 @@ fn compact_row(row: &PanelRow) -> CompactRow {
         remaining: row.remaining,
         value: row.value.clone(),
         reset: row.reset.clone(),
+        countdown: row.countdown.clone(),
         low: row_is_low(row),
         fill: CompactFill {
             from,
@@ -1203,8 +1309,9 @@ fn compact_panel(model: &PanelModel, version: &str, update: Option<UpdateStatus>
             .providers
             .iter()
             .map(|p| CompactProvider {
-                name: p.name,
+                name: p.name.clone(),
                 section: p.name.to_uppercase(),
+                compact: p.compact,
                 badge: p.badge.as_deref().map(pretty_badge),
                 rows: p.rows.iter().map(compact_row).collect(),
                 note: p.note.as_ref().map(|(text, tone)| CompactNote {
@@ -1235,8 +1342,11 @@ struct PanelModel {
 fn panel_model(app: &tauri::AppHandle) -> PanelModel {
     let snapshots = get_quota_snapshots(app.clone());
     let prefs = prefs::current(app);
-    let claude_snap = claude::snapshot(app);
-    let claude_visible = claude_is_visible(&claude_snap);
+    // Every visible Claude profile; one visible = the historic v3.1.0 card.
+    let accounts: Vec<_> = claude::accounts(app)
+        .into_iter()
+        .filter(|a| a.profile.visible && claude_is_visible(&a.snapshot))
+        .collect();
     let codex_status = app
         .try_state::<codex::Provider>()
         .map(|provider| provider.status());
@@ -1256,13 +1366,9 @@ fn panel_model(app: &tauri::AppHandle) -> PanelModel {
             codex_status.as_ref().and_then(|s| s.plan_type.clone()),
         ));
     }
-    if claude_visible {
-        providers.push(claude_panel(&claude_snap));
-    }
-    let header = panel_header(
-        &providers,
-        latest_refresh(&snapshots, claude_visible.then_some(&claude_snap)),
-    );
+    providers.extend(claude_account_panels(&accounts));
+    let claude_snaps: Vec<_> = accounts.iter().map(|a| &a.snapshot).collect();
+    let header = panel_header(&providers, latest_refresh(&snapshots, &claude_snaps));
     PanelModel {
         header,
         providers,
@@ -1314,7 +1420,11 @@ fn note_lines(text: &str) -> f64 {
 
 #[cfg(target_os = "macos")]
 fn card_height(provider: &PanelProvider) -> f64 {
-    let rows = provider.rows.len() as f64 * PANEL_ROW_HEIGHT;
+    let rows = if provider.compact && provider.rows.len() >= 2 {
+        40.0 + provider.rows.len().saturating_sub(2) as f64 * PANEL_ROW_HEIGHT
+    } else {
+        provider.rows.len() as f64 * PANEL_ROW_HEIGHT
+    };
     let note = provider
         .note
         .as_ref()
@@ -1481,7 +1591,78 @@ fn make_panel_view(
         place(&card, 10.0, top, PANEL_WIDTH - 20.0, card_h);
 
         let mut row_top = top + 8.0;
-        for row in &provider.rows {
+        // Multi-account card: 5 h and 7 j share one 40 pt block with their
+        // countdowns visible; the 5 h track/fill keeps the Unique thickness.
+        let paired = provider.compact && provider.rows.len() >= 2;
+        if paired {
+            let group = NSView::initWithFrame(
+                mtm.alloc(),
+                frame(0.0, height - row_top - 40.0, PANEL_WIDTH, 40.0),
+            );
+            root.addSubview(&group);
+            let place = |view: &NSView, x: f64, top: f64, w: f64, h: f64| {
+                view.setFrame(frame(x, 40.0 - (top - row_top) - h, w, h));
+                group.addSubview(view);
+            };
+            let tracks = compact_tracks();
+            for (index, row) in provider.rows.iter().take(2).enumerate() {
+                let window = if index == 0 {
+                    "Limite 5 heures"
+                } else {
+                    "Limite hebdomadaire"
+                };
+                let tooltip = NSString::from_str(&format!(
+                    "{window} · {} · {} · {}",
+                    row.label,
+                    compact_value(row),
+                    row.reset
+                ));
+                let color = if row_is_low(row) {
+                    NSColor::systemRedColor()
+                } else {
+                    NSColor::labelColor()
+                };
+                let label = panel_label(
+                    mtm,
+                    &compact_heading(row),
+                    &NSFont::monospacedDigitSystemFontOfSize_weight(11.0, semibold),
+                    &color,
+                );
+                if index == 1 {
+                    label.setAlignment(NSTextAlignment::Right);
+                }
+                label.setToolTip(Some(&tooltip));
+                place(
+                    &label,
+                    20.0 + index as f64 * 138.0,
+                    row_top + 2.0,
+                    138.0,
+                    16.0,
+                );
+                let (offset, thickness) = if index == 0 { tracks.0 } else { tracks.1 };
+                let track = rounded_box(
+                    mtm,
+                    &NSColor::systemGrayColor().colorWithAlphaComponent(0.28),
+                    thickness / 2.0,
+                );
+                track.setToolTip(Some(&tooltip));
+                place(&track, 22.0, row_top + offset, PANEL_INNER_WIDTH, thickness);
+                // Same rule as Unique: a fill narrower than its own height is a
+                // pinched artefact, so only the track remains.
+                let width = row_fill_width(row);
+                if width >= thickness {
+                    let fill = rounded_box(
+                        mtm,
+                        &quota_color(row.remaining.unwrap_or(0), row.model),
+                        thickness / 2.0,
+                    );
+                    fill.setToolTip(Some(&tooltip));
+                    place(&fill, 22.0, row_top + offset, width, thickness);
+                }
+            }
+            row_top += 40.0;
+        }
+        for row in provider.rows.iter().skip(if paired { 2 } else { 0 }) {
             // Composite the complete row once: track, fill, value, label and reset.
             let group = NSView::initWithFrame(
                 mtm.alloc(),
@@ -1576,7 +1757,7 @@ fn make_panel_view(
 #[cfg(target_os = "macos")]
 fn latest_refresh(
     rows: &[QuotaPayload],
-    claude_snap: Option<&claude::ClaudeSnapshot>,
+    claude_snaps: &[&claude::ClaudeSnapshot],
 ) -> Option<DateTime<Local>> {
     let parse = |value: &str| {
         DateTime::parse_from_rfc3339(value)
@@ -1584,9 +1765,10 @@ fn latest_refresh(
             .map(|d| d.with_timezone(&Local))
     };
     let codex = rows.iter().filter_map(|r| parse(&r.checked_at)).max();
-    let claude = claude_snap
-        .and_then(|s| s.observed_at.as_deref())
-        .and_then(parse);
+    let claude = claude_snaps
+        .iter()
+        .filter_map(|s| s.observed_at.as_deref().and_then(parse))
+        .max();
     codex.into_iter().chain(claude).max()
 }
 
@@ -1729,6 +1911,46 @@ fn claude_status_line(state: &str) -> Option<&'static str> {
         "error" | "unavailable" | "auth_required" => Some("Claude : erreur de lecture"),
         _ => None,
     }
+}
+
+/// Windows/Linux tray lines for the visible Claude accounts. One visible
+/// account keeps the exact v3.1.0 wording; several are prefixed by name.
+#[cfg(any(not(target_os = "macos"), test))]
+fn claude_tray_lines(accounts: &[claude::AccountSnapshot]) -> Vec<String> {
+    let visible: Vec<_> = accounts
+        .iter()
+        .filter(|a| a.profile.visible && claude_is_visible(&a.snapshot))
+        .collect();
+    let named = visible.len() > 1;
+    let mut lines = Vec::new();
+    for account in visible {
+        let snap = &account.snapshot;
+        let name = if named {
+            format!("Claude · {}", account.profile.name)
+        } else {
+            "Claude".to_string()
+        };
+        if snap.metrics.is_empty() {
+            lines.push(format!("{name} · {}", snap.message));
+        }
+        for m in &snap.metrics {
+            let text = match (m.availability, m.used_percent) {
+                ("available", Some(_)) if m.exhausted => "épuisé".to_string(),
+                ("available", Some(u)) => format!("{} % restants", remaining_percent(u)),
+                ("unavailable", _) => "réinitialisée · en attente".to_string(),
+                _ => "non communiquée".to_string(),
+            };
+            lines.push(format!("{name} · {} · {text}", m.label));
+        }
+        if let Some(line) = claude_status_line(snap.state) {
+            lines.push(if named {
+                line.replacen("Claude", &name, 1)
+            } else {
+                line.to_string()
+            });
+        }
+    }
+    lines
 }
 
 fn short_codex_quota(rows: &[QuotaPayload]) -> Option<&QuotaPayload> {
@@ -1923,7 +2145,7 @@ pub fn quota_ui_smoke(directory: &str) {
     ));
     assert_eq!(claude.rows.len(), 2);
     assert_eq!(claude.rows[1].label, "Limite Fable");
-    let scenarios: Vec<(&str, Vec<PanelProvider>)> = vec![
+    let mut scenarios: Vec<(&str, Vec<PanelProvider>)> = vec![
         (
             "two-providers",
             vec![
@@ -1950,6 +2172,84 @@ pub fn quota_ui_smoke(directory: &str) {
         ),
         ("none", vec![]),
     ];
+    // Multi-account fixtures: real projection (usage_snapshot -> AccountSnapshot
+    // -> claude_account_panels), synthetic data only, no Claude process.
+    let fixture = |name: &str,
+                   plan: &str,
+                   used5: Option<f64>,
+                   used7: Option<f64>,
+                   fable: Option<f64>| {
+        let (m5, h7) = if name == "Personnel" {
+            (210, 80)
+        } else {
+            (42, 49)
+        };
+        let at = |d: chrono::Duration| (Local::now() + d).to_rfc3339();
+        let window = |used: Option<f64>, reset: String| {
+            used.map(|u| serde_json::json!({"utilization":u,"resets_at":reset}))
+        };
+        let mut limits = serde_json::json!({
+            "five_hour": window(used5, at(chrono::Duration::minutes(m5))),
+            "seven_day": window(used7, at(chrono::Duration::hours(h7))),
+        });
+        if let Some(f) = fable {
+            limits["model_scoped"] = serde_json::json!([
+                {"display_name":"Fable","utilization":f,"resets_at":at(chrono::Duration::hours(h7 + 20))}
+            ]);
+        }
+        claude::AccountSnapshot {
+            profile: claude_accounts::Profile {
+                id: name.into(),
+                name: name.into(),
+                path: format!("/fixture/{name}"),
+                visible: true,
+            },
+            primary: name == "Personnel",
+            available: true,
+            refreshing: false,
+            snapshot: claude::usage_snapshot(
+                &serde_json::json!({"subscription_type":plan,"rate_limits":limits}),
+                Local::now().timestamp(),
+            ),
+        }
+    };
+    let personal = fixture("Personnel", "pro", Some(27.0), Some(14.0), None);
+    let work = fixture("Travail", "max", Some(65.0), Some(80.0), None);
+    scenarios.push(("single-account", claude_account_panels(&[personal.clone()])));
+    scenarios.push((
+        "multi-accounts",
+        claude_account_panels(&[personal.clone(), work.clone()]),
+    ));
+    scenarios.push((
+        "multi-fable",
+        claude_account_panels(&[
+            fixture("Personnel", "pro", Some(27.0), Some(14.0), Some(40.0)),
+            fixture("Travail", "max", Some(65.0), Some(80.0), Some(91.0)),
+        ]),
+    ));
+    let mut exhausted = fixture("Épuisé", "max", Some(100.0), None, Some(15.0));
+    exhausted.snapshot.extra_usage = Some(claude::ExtraUsage {
+        enabled: true,
+        limit_reached: true,
+    });
+    let mut failed = work.clone();
+    failed.snapshot =
+        claude::result_snapshot(Err("unsupported_or_auth"), None, Local::now().timestamp());
+    let mut missing = fixture("Absent", "pro", None, None, None);
+    missing.available = false;
+    missing.snapshot.state = "error";
+    missing.snapshot.message = "Dossier de profil Claude indisponible.".into();
+    missing.snapshot.metrics.clear();
+    scenarios.push((
+        "multi-edge-cases",
+        claude_account_panels(&[exhausted, failed, missing]),
+    ));
+    let mut hidden = work.clone();
+    hidden.profile.visible = false;
+    scenarios.push((
+        "multi-one-visible",
+        claude_account_panels(&[personal, hidden]),
+    ));
     let target = QuotaMenuTarget::new(mtm);
     // Main-thread AppKit regression checks use the production builder without
     // starting Tauri, reading preferences, or contacting either quota provider.
@@ -2015,6 +2315,44 @@ pub fn quota_ui_smoke(directory: &str) {
         ] {
             let panel = make_panel_view(mtm, &header, &providers);
             let bounds = panel.bounds();
+            if matches!(name, "single-account" | "multi-accounts" | "two-providers") {
+                // Measure the real AppKit frames (rows are composited in group
+                // views since v3.1.0): every track/fill at x = 22, in root space.
+                fn bars(root: &NSView, view: &NSView, out: &mut Vec<NSRect>) {
+                    for sub in view.subviews().iter() {
+                        let r = sub.convertRect_toView(sub.bounds(), Some(root));
+                        if (r.origin.x - 22.0).abs() < 0.01 && r.size.height <= 7.0 {
+                            out.push(r);
+                        }
+                        bars(root, &sub, out);
+                    }
+                }
+                let mut found = Vec::new();
+                bars(&panel, &panel, &mut found);
+                // Top-down order (AppKit y grows upwards).
+                found.sort_by(|a, b| {
+                    (b.origin.y + b.size.height)
+                        .partial_cmp(&(a.origin.y + a.size.height))
+                        .unwrap()
+                });
+                let heights: Vec<f64> = found.iter().map(|r| r.size.height).collect();
+                let unique_claude = vec![PANEL_TRACK_HEIGHT; 4];
+                match name {
+                    "single-account" => assert_eq!(heights, unique_claude),
+                    "multi-accounts" => {
+                        let pair = [PANEL_TRACK_HEIGHT, PANEL_TRACK_HEIGHT, 3.0, 3.0];
+                        assert_eq!(heights, [pair, pair].concat());
+                        for block in found.chunks(4) {
+                            // 2 pt between the bottom of the 5 h track and the 7 j track.
+                            let gap =
+                                block[0].origin.y - (block[2].origin.y + block[2].size.height);
+                            assert!((gap - 2.0).abs() < 0.01, "gap {gap}");
+                        }
+                    }
+                    _ => assert!(heights.iter().all(|h| *h == PANEL_TRACK_HEIGHT)),
+                }
+                println!("NATIVE_TRACK_PARITY_PASS {name} {mode}: heights={heights:?}");
+            }
             assert_eq!(bounds.size.width, PANEL_WIDTH);
             assert_eq!(bounds.size.height, panel_height(&providers));
             let background = rounded_box(mtm, &NSColor::windowBackgroundColor(), 0.0);
@@ -2325,32 +2663,8 @@ fn desktop_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri
             None::<&str>,
         )?)?;
     }
-    if claude_is_visible(&claude_snap) {
-        if claude_snap.metrics.is_empty() {
-            menu.append(&MenuItem::new(
-                app,
-                format!("Claude · {}", claude_snap.message),
-                false,
-                None::<&str>,
-            )?)?;
-        }
-        for m in &claude_snap.metrics {
-            let text = match (m.availability, m.used_percent) {
-                ("available", Some(_)) if m.exhausted => "épuisé".to_string(),
-                ("available", Some(u)) => format!("{} % restants", remaining_percent(u)),
-                ("unavailable", _) => "réinitialisée · en attente".to_string(),
-                _ => "non communiquée".to_string(),
-            };
-            menu.append(&MenuItem::new(
-                app,
-                format!("Claude · {} · {text}", m.label),
-                false,
-                None::<&str>,
-            )?)?;
-        }
-        if let Some(line) = claude_status_line(claude_snap.state) {
-            menu.append(&MenuItem::new(app, line, false, None::<&str>)?)?;
-        }
+    for line in claude_tray_lines(&claude::accounts(app)) {
+        menu.append(&MenuItem::new(app, line, false, None::<&str>)?)?;
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     for (id, title) in [
@@ -2457,6 +2771,8 @@ pub fn run() {
             prefs::get_preferences,
             prefs::set_preferences,
             claude::get_claude_snapshot,
+            claude::get_claude_accounts,
+            claude::add_claude_profile,
             claude::request_claude_refresh,
             claude::install_claude_relay,
             claude::uninstall_claude_relay,
@@ -2581,7 +2897,8 @@ mod tests {
         ];
         let codex = codex_panel(&rows, "ready", "", Some("plus".into()));
         let claude = PanelProvider {
-            name: "Claude",
+            name: "Claude".into(),
+            compact: false,
             badge: None,
             rows: vec![],
             note: Some(("Lecture via Claude Code…".into(), Tone::Warning)),
@@ -2599,7 +2916,10 @@ mod tests {
         assert_eq!(panel.header.tone, "warning");
         assert_eq!(panel.providers.len(), 2);
         let compact = &panel.providers[0];
-        assert_eq!((compact.name, compact.section.as_str()), ("Codex", "CODEX"));
+        assert_eq!(
+            (compact.name.as_str(), compact.section.as_str()),
+            ("Codex", "CODEX")
+        );
         assert_eq!(compact.badge.as_deref(), Some("Plus"));
         // Same order, labels, values and reset phrases as the tray rows.
         for (tray, row) in codex.rows.iter().zip(&compact.rows) {
@@ -2865,6 +3185,254 @@ mod tests {
             PANEL_ROW_HEIGHT
         );
         assert!(panel_height(&[two.clone(), two]) > PANEL_HEADER_HEIGHT * 2.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fixture_account(
+        id: &str,
+        visible: bool,
+        rate_limits: serde_json::Value,
+    ) -> claude::AccountSnapshot {
+        claude::AccountSnapshot {
+            profile: claude_accounts::Profile {
+                id: id.into(),
+                path: format!("/scratch/{id}"),
+                name: id.into(),
+                visible,
+            },
+            primary: id == "Personnel",
+            available: true,
+            refreshing: false,
+            snapshot: claude::usage_snapshot(
+                &serde_json::json!({"subscription_type":"pro","rate_limits":rate_limits}),
+                Local::now().timestamp(),
+            ),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fixture_limits(used5: f64, used7: f64, minutes5: i64, hours7: i64) -> serde_json::Value {
+        let at = |d: chrono::Duration| (Local::now() + d).to_rfc3339();
+        serde_json::json!({
+            "five_hour":{"utilization":used5,"resets_at":at(chrono::Duration::minutes(minutes5))},
+            "seven_day":{"utilization":used7,"resets_at":at(chrono::Duration::hours(hours7))},
+            "model_scoped":[{"display_name":"Fable","utilization":10,"resets_at":at(chrono::Duration::hours(hours7 + 1))}],
+            "extra_usage":{"is_enabled":true,"spend_limit_reached":true}
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn one_visible_account_keeps_the_exact_v310_claude_card() {
+        let personal = fixture_account("Personnel", true, fixture_limits(27.0, 14.0, 210, 80));
+        let hidden = fixture_account("Travail", false, fixture_limits(65.0, 80.0, 42, 49));
+        let panels = claude_account_panels(&[personal.clone(), hidden]);
+        assert_eq!(panels.len(), 1);
+        // Historic presentation: same provider as v3.1.0 claude_panel, no
+        // account name, no compact pairing, no extra-usage note added.
+        assert_eq!(panels[0], claude_panel(&personal.snapshot));
+        assert_eq!(panels[0].name, "Claude");
+        assert!(!panels[0].compact);
+        assert_eq!(panels[0].note, None);
+        assert!(claude_account_panels(&[fixture_account(
+            "Personnel",
+            false,
+            fixture_limits(1.0, 1.0, 5, 5)
+        )])
+        .is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn multi_account_cards_keep_fable_extra_and_countdowns_per_account() {
+        let personal = fixture_account("Personnel", true, fixture_limits(27.0, 14.0, 210, 80));
+        let work = fixture_account("Travail", true, fixture_limits(65.0, 80.0, 42, 49));
+        let multi = claude_account_panels(&[personal, work]);
+        assert_eq!(multi.len(), 2);
+        assert!(multi.iter().all(|p| p.compact));
+        assert_eq!(multi[0].name, "Claude · Personnel");
+        assert_eq!(multi[1].name, "Claude · Travail");
+        for panel in &multi {
+            // 5 h, hebdomadaire, then the v3.1.0 Fable row: nothing removed.
+            assert_eq!(panel.rows.len(), 3);
+            assert_eq!(panel.rows[2].label, "Limite Fable");
+            assert!(panel.rows[2].model);
+            assert!(panel
+                .note
+                .as_ref()
+                .unwrap()
+                .0
+                .contains("Usage supplémentaire"));
+        }
+        assert_eq!(multi[0].rows[0].countdown, "3h30");
+        assert_eq!(multi[0].rows[1].countdown, "3j 8h");
+        assert_eq!(multi[1].rows[0].countdown, "42 min");
+        assert_eq!(multi[1].rows[1].countdown, "2j 1h");
+        // Paired 5 h/7 j block (40 pt) replaces two 48 pt rows; Fable keeps its row.
+        let mut unpaired = multi[0].clone();
+        unpaired.compact = false;
+        assert_eq!(
+            card_height(&unpaired) - card_height(&multi[0]),
+            2.0 * PANEL_ROW_HEIGHT - 40.0
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compact_window_serialises_the_same_multi_cards_as_the_menu() {
+        let personal = fixture_account("Personnel", true, fixture_limits(27.0, 14.0, 210, 80));
+        let work = fixture_account("Travail", true, fixture_limits(65.0, 80.0, 42, 49));
+        let providers = claude_account_panels(&[personal, work]);
+        let model = PanelModel {
+            header: panel_header(&providers, None),
+            providers: providers.clone(),
+            connection: None,
+        };
+        let panel = compact_panel(&model, "3.1.0", None);
+        assert_eq!(panel.providers.len(), 2);
+        for (menu, window) in providers.iter().zip(&panel.providers) {
+            assert_eq!(window.name, menu.name);
+            assert_eq!(window.section, menu.name.to_uppercase());
+            assert_eq!(window.compact, menu.compact);
+            assert_eq!(window.rows.len(), menu.rows.len());
+            for (m, w) in menu.rows.iter().zip(&window.rows) {
+                assert_eq!(w.countdown, m.countdown);
+                assert_eq!(w.value, m.value);
+                assert_eq!(w.label, m.label);
+            }
+        }
+        let json = serde_json::to_value(&panel).unwrap();
+        assert_eq!(json["providers"][1]["compact"], true);
+        assert_eq!(json["providers"][1]["rows"][0]["countdown"], "42 min");
+        assert_eq!(json["providers"][1]["section"], "CLAUDE · TRAVAIL");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn header_freshness_uses_the_newest_visible_claude_account() {
+        let mut older = fixture_account("Personnel", true, fixture_limits(1.0, 1.0, 5, 5)).snapshot;
+        let mut newer = older.clone();
+        older.observed_at = Some("2030-01-01T10:00:00Z".into());
+        newer.observed_at = Some("2030-01-01T10:05:00Z".into());
+        let at = latest_refresh(&[], &[&older, &newer]).unwrap();
+        assert_eq!(
+            at.with_timezone(&chrono::Utc).to_rfc3339(),
+            "2030-01-01T10:05:00+00:00"
+        );
+        assert!(latest_refresh(&[], &[]).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn multi_track_thickness_is_the_measured_unique_thickness() {
+        // The Unique row draws its track/fill at PANEL_TRACK_HEIGHT (5 pt,
+        // radius 2.5 in v3.1.0). Multi 5 h reuses it, weekly is finer, gap 2.
+        assert_eq!(PANEL_TRACK_HEIGHT, 5.0);
+        let ((top5, h5), (top7, h7)) = compact_tracks();
+        assert_eq!(h5, PANEL_TRACK_HEIGHT);
+        assert!(h7 < h5);
+        assert_eq!(h7, 3.0);
+        assert_eq!(top7 - top5 - h5, 2.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compact_heading_shows_countdown_and_honest_fallbacks() {
+        let row = PanelRow {
+            model: false,
+            label: "Limite 5 heures".into(),
+            remaining: Some(0),
+            value: "Épuisé".into(),
+            reset: "—".into(),
+            countdown: "—".into(),
+        };
+        assert_eq!(compact_value(&row), "0 % · épuisé");
+        assert_eq!(compact_heading(&row), "Épuisé");
+        let live = PanelRow {
+            countdown: "42 min".into(),
+            ..row.clone()
+        };
+        assert_eq!(compact_heading(&live), "42 min · Épuisé");
+        let missing = PanelRow {
+            remaining: None,
+            value: "—".into(),
+            ..row
+        };
+        assert_eq!(compact_value(&missing), "—");
+        assert_eq!(compact_heading(&missing), "—");
+        // Weekly window coalesced into "Limite Fable" (v3.1.0): pairing must
+        // not hide the model name.
+        let fable = PanelRow {
+            model: true,
+            label: "Limite Fable".into(),
+            remaining: Some(86),
+            value: "86 %".into(),
+            reset: "—".into(),
+            countdown: "3j 8h".into(),
+        };
+        assert_eq!(compact_heading(&fable), "Fable · 3j 8h · 86 %");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compact_countdown_uses_local_time_and_honest_fallbacks() {
+        let now = 1_800_000_000;
+        let reset = |seconds| {
+            chrono::DateTime::from_timestamp(now + seconds, 0)
+                .unwrap()
+                .to_rfc3339()
+        };
+        let short = reset(210 * 60);
+        let week = reset(80 * 3600);
+        assert_eq!(reset_countdown(Some(&short), now), "3h30");
+        assert_eq!(reset_countdown(Some(&short), now + 60), "3h29");
+        assert_eq!(reset_countdown(Some(&week), now), "3j 8h");
+        assert_eq!(reset_countdown(Some(&reset(42 * 60)), now), "42 min");
+        for at in [None, Some("invalid"), Some("2000-01-01T00:00:00Z")] {
+            assert_eq!(reset_countdown(at, now), "—");
+        }
+    }
+    #[test]
+    fn tray_text_keeps_v310_lines_for_one_account_and_names_multi_accounts() {
+        let snap = |used: f64| {
+            claude::usage_snapshot(
+                &serde_json::json!({"rate_limits":{"five_hour":{"utilization":used}}}),
+                1_700_000_000,
+            )
+        };
+        let account = |name: &str, used: f64, visible: bool| claude::AccountSnapshot {
+            profile: claude_accounts::Profile {
+                id: name.into(),
+                path: format!("/scratch/{name}"),
+                name: name.into(),
+                visible,
+            },
+            primary: name == "Personnel",
+            available: true,
+            refreshing: false,
+            snapshot: snap(used),
+        };
+        let single = claude_tray_lines(&[
+            account("Personnel", 27.0, true),
+            account("Travail", 65.0, false),
+        ]);
+        assert_eq!(single[0], "Claude · Limite 5 heures · 73 % restants");
+        assert!(single
+            .iter()
+            .all(|l| !l.contains("Personnel") && !l.contains("Travail")));
+        let multi = claude_tray_lines(&[
+            account("Personnel", 27.0, true),
+            account("Travail", 65.0, true),
+        ]);
+        assert!(multi.contains(&"Claude · Personnel · Limite 5 heures · 73 % restants".to_string()));
+        assert!(multi.contains(&"Claude · Travail · Limite 5 heures · 35 % restants".to_string()));
+        let mut failed = account("Travail", 65.0, true);
+        failed.snapshot.state = "error";
+        assert!(
+            claude_tray_lines(&[account("Personnel", 27.0, true), failed])
+                .contains(&"Claude · Travail : erreur de lecture".to_string())
+        );
+        assert!(claude_tray_lines(&[account("Personnel", 1.0, false)]).is_empty());
     }
 
     #[test]

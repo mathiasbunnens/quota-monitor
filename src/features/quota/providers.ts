@@ -35,6 +35,8 @@ export type QuotaRow = {
   /** Human text shown instead of a percentage when remaining is null. */
   missing: string;
   resetText: string;
+  /** Structured reset (RFC 3339) for local countdowns; absent for Codex rows. */
+  resetAt?: string | null;
 };
 
 export function codexRows(snapshots: QuotaSnapshot[]): QuotaRow[] {
@@ -66,6 +68,7 @@ export function claudeRows(snapshot: ClaudeSnapshot, fableEnabled = true): Quota
       exhausted: available && metric.exhausted,
       missing: metric.availability === "unavailable" ? "Réinitialisée · en attente" : "Non communiquée",
       resetText: metric.resetAt ? formatResetDate(metric.resetAt) : "non communiquée",
+      resetAt: metric.resetAt,
     };
   });
 }

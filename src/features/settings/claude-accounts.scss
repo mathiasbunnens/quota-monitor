@@ -1,0 +1,12 @@
+.claude-accounts {
+  margin-top: 10px;
+  &__profile { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--desktop-border); }
+  &__heading, &__rename { display: flex; align-items: center; gap: 8px; }
+  &__heading { justify-content: space-between; }
+  &__heading strong { min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+  &__heading small { color: var(--desktop-muted); font-weight: 400; }
+  &__rename input { min-width: 0; }
+  &__rename button { flex: none; }
+  &__add { margin-top: 12px; }
+  code { display: block; margin: 4px 0; color: var(--desktop-muted); }
+}

@@ -5,8 +5,9 @@ import ExternalIcon from "../ui/ExternalIcon";
 import CodexConnection from "../setup/CodexConnection";
 import RefreshSettings from "../setup/RefreshSettings";
 import NtfySettings from "./NtfySettings";
+import ClaudeAccountsSettings from "./ClaudeAccountsSettings";
 import ResetCredits from "../quota/ResetCredits";
-import type { ClaudeSnapshot, CodexStatus, DisplayMode, IndicatorChoice, Preferences } from "../quota/types";
+import type { ClaudeAccount, ClaudeSnapshot, CodexStatus, DisplayMode, IndicatorChoice, Preferences } from "../quota/types";
 import "../../pages/Dashboard/dashboard.scss";
 import "./settings.scss";
 
@@ -131,6 +132,9 @@ export default function Settings() {
   const root = useRef<HTMLElement>(null);
   const [codexMore, setCodexMore] = useState(false);
   const [claudeMore, setClaudeMore] = useState(false);
+  const [accounts, setAccounts] = useState<ClaudeAccount[]>([]);
+  const [accountsError, setAccountsError] = useState<string | null>(null);
+  const mutation = useRef(false);
   const [canChooseMode, setCanChooseMode] = useState(false);
   useFitWindow(root, [tab, prefs !== null].join());
   const reload = useCallback(() => setRevision((value) => value + 1), []);
@@ -152,13 +156,16 @@ export default function Settings() {
     let disposed = false;
     let timer: number;
     const poll = async () => {
-      const [p, s, k] = await Promise.allSettled([
+      const [p, s, k, a] = await Promise.allSettled([
         invoke<Preferences>("get_preferences"),
         invoke<CodexStatus>("get_codex_status"),
         invoke<ClaudeSnapshot>("get_claude_snapshot"),
+        invoke<ClaudeAccount[]>("get_claude_accounts"),
       ]);
       if (disposed) return;
-      if (p.status === "fulfilled") setPrefs(p.value);
+      if (p.status === "fulfilled" && !mutation.current) setPrefs(p.value);
+      if (a.status === "fulfilled") setAccounts(a.value);
+      setAccountsError(a.status === "rejected" ? "Impossible de découvrir les comptes Claude. Nouvelle tentative automatique…" : null);
       if (s.status === "fulfilled") setStatus(s.value);
       if (k.status === "fulfilled") setClaude(k.value);
       timer = window.setTimeout(() => void poll(), 2000);
@@ -168,11 +175,19 @@ export default function Settings() {
   }, [revision]);
 
   const update = async (patch: Partial<Preferences>) => {
-    if (!prefs) return false;
+    if (!prefs || mutation.current) return false;
+    mutation.current = true;
     setError(null); setBusy(true);
     try { setPrefs(await invoke<Preferences>("set_preferences", { prefs: { ...prefs, ...patch } })); reload(); return true; }
     catch (cause) { setError(String(cause)); return false; }
-    finally { setBusy(false); }
+    finally { mutation.current = false; setBusy(false); }
+  };
+  const addProfile = async (path: string) => {
+    if (mutation.current) return false;
+    mutation.current = true; setError(null); setBusy(true);
+    try { setPrefs(await invoke<Preferences>("add_claude_profile", { path })); reload(); return true; }
+    catch (cause) { setError(String(cause)); return false; }
+    finally { mutation.current = false; setBusy(false); }
   };
   const relay = async (command: "install_claude_relay" | "uninstall_claude_relay") => {
     setError(null); setBusy(true);
@@ -255,6 +270,8 @@ export default function Settings() {
             <UsageLink label="Usage détaillé sur claude.ai" command="open_claude_usage" />
             <More label="Avancé" open={claudeMore} onToggle={() => setClaudeMore((v) => !v)} />
           </div>}
+          <ClaudeAccountsSettings prefs={prefs} accounts={accounts} busy={busy} onUpdate={update} onAdd={addProfile} />
+          {accountsError && <p className="prefs-state prefs-state--error" role="alert">{accountsError}</p>}
           {prefs.claudeEnabled && claudeMore && <div className="prefs-advanced">
               <p className="prefs-footnote">Lu via Claude Code (<code>claude auth login</code>), sans jeton ni requête de modèle.</p>
               <div className="prefs-actions">

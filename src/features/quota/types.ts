@@ -28,7 +28,20 @@ export type CodexStatus = {
 export type IndicatorChoice = "codex" | "claude" | "both";
 export type DisplayMode = "menubar" | "app";
 export type NtfyConfig = { enabled: boolean; serverUrl: string; topic: string };
+export type ClaudeProfile = { id: string; path: string; name: string; visible: boolean };
+export type ClaudeAccountsPreferences = {
+  mode: "single" | "multi";
+  selectedId: string | null;
+  profiles: ClaudeProfile[];
+};
+export type ClaudeAccount = ClaudeProfile & {
+  primary: boolean;
+  available: boolean;
+  refreshing: boolean;
+  snapshot: ClaudeSnapshot;
+};
 export type Preferences = {
+  claudeAccounts: ClaudeAccountsPreferences;
   codexEnabled: boolean;
   claudeEnabled: boolean;
   fableEnabled: boolean;

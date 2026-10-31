@@ -146,3 +146,60 @@ test("errors are announced and the actions stay reachable without data", () => {
   assert.match(markup, /aria-label="Réglages"/);
   assert.match(markup, /aria-label="Vérifier les mises à jour"/);
 });
+
+// --- Claude multi-account cards (same model as the native menu card) -------
+const multiRow = (label, remaining, countdown, extra = {}) => ({
+  model: false, label, remaining, value: remaining === null ? "—" : `${remaining} %`,
+  reset: "Réinitialisation à 15h40", countdown, low: remaining !== null && remaining <= 20,
+  fill: fill("green", "green", 0, (remaining ?? 0) / 100), ...extra,
+});
+const multiPanel = {
+  ...panel,
+  providers: [
+    { name: "Claude · Personnel", section: "CLAUDE · PERSONNEL", compact: true, badge: "Pro", note: null, rows: [
+      multiRow("Limite sur 3h30", 73, "3h30"),
+      multiRow("Limite sur 3j 8h", 86, "3j 8h"),
+      multiRow("Limite Fable", 60, "4j 4h", { model: true }),
+    ] },
+    { name: "Claude · Travail", section: "CLAUDE · TRAVAIL", compact: true, badge: "Max",
+      note: { text: "Usage supplémentaire : plafond atteint", tone: "warning" }, rows: [
+      multiRow("Limite sur 42 min", 0, "42 min", { value: "Épuisé", low: true, fill: fill("red", "red", 0, 0) }),
+      multiRow("Limite Fable", 86, "3j 8h", { model: true }),
+    ] },
+  ],
+};
+
+test("multi-account cards pair 5 h and 7 j with visible countdowns, like the menu", () => {
+  const markup = html({ panel: multiPanel });
+  assert.equal((markup.match(/class="compact-pair"/g) ?? []).length, 2);
+  assert.match(markup, /CLAUDE · PERSONNEL/);
+  assert.match(markup, /CLAUDE · TRAVAIL/);
+  // Countdown + provider value; the window name stays in the accessible label.
+  assert.match(markup, />3h30 · 73 %</);
+  assert.match(markup, />3j 8h · 86 %</);
+  assert.match(markup, />42 min · Épuisé</);
+  assert.match(markup, /aria-label="Limite 5 heures : Limite sur 3h30 · 73 % restant"/);
+  // Weekly window coalesced into Fable keeps the model name visible.
+  assert.match(markup, />Fable · 3j 8h · 86 %</);
+  // 5 h track = the Unique track class (same 5 px), 7 j finer.
+  assert.equal((markup.match(/compact-row__track compact-pair__track--short/g) ?? []).length, 2);
+  assert.equal((markup.match(/compact-row__track compact-pair__track--week/g) ?? []).length, 2);
+  // A separate Fable row stays visible as a normal row (nothing dropped).
+  assert.match(markup, /Limite <span style="color:var\(--compact-teal\)">Fable<\/span>/);
+  assert.match(markup, /Usage supplémentaire : plafond atteint/);
+});
+
+test("single-account and Codex cards keep the v3.1.0 rows (no pairing)", () => {
+  const markup = html();
+  assert.doesNotMatch(markup, /compact-pair/);
+  assert.equal((markup.match(/class="compact-row"/g) ?? []).length, 3);
+});
+
+test("compact window thickness: 5 h inherits the 5 px Unique track, 7 j is 3 px with a 2 px gap", async () => {
+  const sass = await import("sass");
+  const css = sass.compile(new URL("../src/features/compact/compact.scss", import.meta.url).pathname).css;
+  assert.match(css, /\.compact-row__track\s*\{[^}]*height: 5px/);
+  assert.doesNotMatch(css, /\.compact-pair__track--short\s*\{[^}]*height:/);
+  assert.match(css, /\.compact-pair__track--week\s*\{[^}]*height: 3px[^}]*border-radius: 1\.5px/);
+  assert.match(css, /\.compact-pair__bars\s*\{[^}]*gap: 2px/);
+});

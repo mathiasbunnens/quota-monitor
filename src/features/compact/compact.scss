@@ -238,6 +238,43 @@ html:has(.compact) body {
   text-overflow: ellipsis;
 }
 
+// Claude multi-account card: same 40 pt block as the menu (heading at +2,
+// 5 h track at +24 with the Unique 5 px thickness, 7 j 3 px, 2 px gap).
+.compact-pair {
+  height: 40px;
+  padding-top: 2px;
+}
+
+.compact-pair__values {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+
+  span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .is-low { color: var(--compact-red); }
+}
+
+.compact-pair__bars {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+
+  .compact-row__track { margin-top: 0; }
+}
+
+.compact-pair__track--week {
+  height: 3px;
+  border-radius: 1.5px;
+
+  .compact-row__fill { border-radius: 1.5px; }
+}
+
 .compact-card__note {
   font-size: 11px;
   line-height: 14px;

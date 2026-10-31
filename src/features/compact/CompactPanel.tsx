@@ -55,6 +55,53 @@ function RowLabel({ row }: { row: CompactRow }) {
   return <span className="compact-row__label">{row.label}</span>;
 }
 
+/** Same text as the native compact_heading: countdown · value (+ Fable name). */
+export function pairHeading(row: CompactRow): string {
+  const text = row.countdown && row.countdown !== "—" ? `${row.countdown} · ${row.value}` : row.value;
+  return row.model ? `Fable · ${text}` : text;
+}
+
+/** Multi-account block (40 pt like the menu): 5 h + 7 j, countdowns visible. */
+function Pair({ rows }: { rows: CompactRow[] }) {
+  const windows = ["Limite 5 heures", "Limite hebdomadaire"];
+  return <div className="compact-pair">
+    <div className="compact-pair__values">
+      {rows.map((row, index) => <span key={index} className={row.low ? "is-low" : undefined}
+        title={`${windows[index]} · ${row.label} · ${row.reset}`}>{pairHeading(row)}</span>)}
+    </div>
+    <div className="compact-pair__bars">
+      {rows.map((row, index) => {
+        const week = index === 1;
+        // A fill narrower than its own track height only shows the track.
+        const visible = row.fill.ratio * 276 >= (week ? 3 : 5);
+        return <div key={index} className={"compact-row__track compact-pair__track--" + (week ? "week" : "short")}
+          role="meter" aria-label={`${windows[index]} : ${row.label} · ${row.remaining === null ? row.value : `${row.value} restant`}`}
+          aria-valuemin={0} aria-valuemax={100} aria-valuenow={row.remaining ?? undefined}
+          aria-valuetext={row.remaining === null ? row.value : `${row.value} restant`}>
+          {visible && <span className="compact-row__fill"
+            style={{ width: `${row.fill.ratio * 100}%`, background: fillColor(row.fill, row.model) }} />}
+        </div>;
+      })}
+    </div>
+  </div>;
+}
+
+function Row({ row }: { row: CompactRow }) {
+  return <div className="compact-row">
+    <div className="compact-row__line">
+      <RowLabel row={row} />
+      <span className={"compact-row__value" + (row.low ? " is-low" : "")}>{row.value}</span>
+    </div>
+    <div className="compact-row__track" role="meter" aria-label={`${row.label} : quota restant`}
+      aria-valuemin={0} aria-valuemax={100} aria-valuenow={row.remaining ?? undefined}
+      aria-valuetext={row.remaining === null ? row.value : `${row.value} restant`}>
+      {row.fill.visible && <span className="compact-row__fill"
+        style={{ width: `${row.fill.ratio * 100}%`, background: fillColor(row.fill, row.model) }} />}
+    </div>
+    <span className="compact-row__reset">{row.reset}</span>
+  </div>;
+}
+
 function GearIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
     <circle cx="12" cy="12" r="3" />
@@ -112,26 +159,16 @@ export function CompactPanel({ panel, error, pending, onSettings, onUpdate, onCo
       </div>
     </header>
     {error && <p className="compact__alert" role="alert">{error}</p>}
-    {panel?.providers.map((provider) => <section key={provider.name} className="compact-provider"
+    {panel?.providers.map((provider, providerIndex) => <section key={`${provider.name}-${providerIndex}`} className="compact-provider"
       aria-label={provider.badge ? `${provider.name} (${provider.badge})` : provider.name}>
       <div className="compact-provider__head" aria-hidden="true">
         <span>{provider.section}</span>
         {provider.badge && <span className="compact-provider__badge">{provider.badge}</span>}
       </div>
       <div className="compact-card">
-        {provider.rows.map((row, index) => <div key={`${row.label}-${index}`} className="compact-row">
-          <div className="compact-row__line">
-            <RowLabel row={row} />
-            <span className={"compact-row__value" + (row.low ? " is-low" : "")}>{row.value}</span>
-          </div>
-          <div className="compact-row__track" role="meter" aria-label={`${row.label} : quota restant`}
-            aria-valuemin={0} aria-valuemax={100} aria-valuenow={row.remaining ?? undefined}
-            aria-valuetext={row.remaining === null ? row.value : `${row.value} restant`}>
-            {row.fill.visible && <span className="compact-row__fill"
-              style={{ width: `${row.fill.ratio * 100}%`, background: fillColor(row.fill, row.model) }} />}
-          </div>
-          <span className="compact-row__reset">{row.reset}</span>
-        </div>)}
+        {provider.compact && provider.rows.length >= 2 && <Pair rows={provider.rows.slice(0, 2)} />}
+        {provider.rows.slice(provider.compact && provider.rows.length >= 2 ? 2 : 0)
+          .map((row, index) => <Row key={`${row.label}-${index}`} row={row} />)}
         {provider.note && <p className={`compact-card__note compact-tone--${provider.note.tone}`
           + (provider.rows.length ? " has-rows" : "")}>{provider.note.text}</p>}
       </div>

@@ -109,7 +109,7 @@ pub fn wake(app: &tauri::AppHandle) {
 #[derive(Clone, Debug)]
 struct Observation {
     key: String,
-    provider: &'static str,
+    provider: String,
     window: &'static str,
     used: Option<f64>,
     checked: Option<i64>,
@@ -131,7 +131,7 @@ fn observations(app: &tauri::AppHandle, p: &prefs::Prefs) -> Vec<Observation> {
             for row in rows.iter() {
                 out.push(Observation {
                     key: format!("Codex:{}", row.period),
-                    provider: "Codex",
+                    provider: "Codex".into(),
                     window: if crate::is_reserve(row) {
                         "réserve"
                     } else {
@@ -150,17 +150,53 @@ fn observations(app: &tauri::AppHandle, p: &prefs::Prefs) -> Vec<Observation> {
         }
     }
     if p.claude_enabled {
-        out.extend(claude_observations(&claude::raw_snapshot(app)));
+        out.extend(claude_profile_observations(&claude::raw_accounts(app)));
     }
     out
 }
 
+/// Every profile is observed (visibility is display-only) with a stable key
+/// `Claude:<profile id>:<metric>`. The account name appears in the message
+/// only when several profiles exist; a single profile keeps the v3.1.0 text.
+fn claude_profile_observations(accounts: &[claude::AccountSnapshot]) -> Vec<Observation> {
+    let named = accounts.len() > 1;
+    accounts
+        .iter()
+        .flat_map(|a| {
+            claude_account_observations(
+                &a.snapshot,
+                Some(a.profile.id.as_str()),
+                if named { a.profile.name.as_str() } else { "" },
+            )
+        })
+        .collect()
+}
+
+fn is_fable_key(key: &str) -> bool {
+    key.starts_with("Claude:") && key.ends_with(":claude:weekly_fable")
+}
+
+#[cfg(test)]
 fn claude_observations(snap: &claude::ClaudeSnapshot) -> Vec<Observation> {
+    claude_account_observations(snap, None, "")
+}
+fn claude_account_observations(
+    snap: &claude::ClaudeSnapshot,
+    id: Option<&str>,
+    name: &str,
+) -> Vec<Observation> {
     snap.metrics
         .iter()
         .map(|metric| Observation {
-            key: format!("Claude:{}", metric.id),
-            provider: "Claude",
+            key: id
+                .map(|id| format!("Claude:{id}:{}", metric.id))
+                .unwrap_or_else(|| format!("Claude:{}", metric.id)),
+            provider: if name.is_empty() {
+                "Claude".into()
+            } else {
+                format!("Claude · {name}")
+            },
+            // v3.1.0 wording: the metric label ("Limite 5 heures", Fable…).
             window: metric.label,
             used: metric.used_percent,
             checked: snap.observed_at.as_deref().and_then(timestamp),
@@ -195,6 +231,24 @@ enum Counter {
 #[derive(Default, Serialize, Deserialize)]
 struct Ledger(BTreeMap<String, Counter>);
 impl Ledger {
+    /// Bind v3.1.0 unqualified Claude entries once to the startup primary
+    /// profile. Later primaries use their own identity and cannot inherit them.
+    fn migrate_primary(&mut self, id: &str) -> bool {
+        let mut changed = false;
+        for metric in [
+            "claude:five_hour",
+            "claude:seven_day",
+            "claude:weekly_fable",
+        ] {
+            if let Some(value) = self.0.remove(&format!("Claude:{metric}")) {
+                self.0
+                    .entry(format!("Claude:{id}:{metric}"))
+                    .or_insert(value);
+                changed = true;
+            }
+        }
+        changed
+    }
     fn observe(&mut self, enabled: bool, o: &Observation, now: i64) -> Option<String> {
         if !enabled
             || !o.valid
@@ -258,7 +312,8 @@ impl Ledger {
         self.observe_all_with_fable(observations, now, true)
     }
     fn mute_fable(&mut self) {
-        if let Some(counter) = self.0.get_mut("Claude:claude:weekly_fable") {
+        // Every profile's Fable counter (and a not-yet-migrated legacy key).
+        for (_, counter) in self.0.iter_mut().filter(|(key, _)| is_fable_key(key)) {
             let reset = match counter {
                 Counter::Refill { reset, .. }
                 | Counter::Observed { reset, .. }
@@ -292,7 +347,7 @@ impl Ledger {
             .iter()
             .filter_map(|o| {
                 let message = self.observe(true, o, now);
-                if !fable_enabled && o.key == "Claude:claude:weekly_fable" {
+                if !fable_enabled && is_fable_key(&o.key) {
                     None
                 } else {
                     message
@@ -340,6 +395,12 @@ pub fn start(app: tauri::AppHandle) {
                 return;
             }
         };
+        if let Some(primary) = claude::accounts(&app).into_iter().find(|a| a.primary) {
+            if ledger.migrate_primary(&primary.profile.id) && ledger.save(&path).is_err() {
+                eprintln!("Notifications ntfy suspendues : migration non enregistrable.");
+                return;
+            }
+        }
         while rx.recv().is_ok() {
             let p = prefs::current(&app);
             let before = ledger.0.clone();
@@ -387,7 +448,7 @@ mod tests {
     fn sample(used: f64) -> Observation {
         Observation {
             key: "Codex:primary".into(),
-            provider: "Codex",
+            provider: "Codex".into(),
             window: "5 heures",
             used: Some(used),
             checked: Some(1000),
@@ -419,6 +480,142 @@ mod tests {
         assert!(ledger.observe(true, &sample(99.0), 1000).is_none());
         assert!(ledger.observe(true, &sample(0.0), 1000).is_some());
     }
+    fn account(id: &str, name: &str, primary: bool, used: f64) -> claude::AccountSnapshot {
+        claude::AccountSnapshot {
+            profile: crate::claude_accounts::Profile {
+                id: id.into(),
+                path: format!("/fixture/{id}"),
+                name: name.into(),
+                visible: true,
+            },
+            primary,
+            available: true,
+            refreshing: false,
+            snapshot: claude::usage_snapshot(
+                &serde_json::json!({"rate_limits":{
+                    "five_hour":{"utilization":used},
+                    "seven_day":{"utilization":used},
+                    "model_scoped":[{"display_name":"Fable","utilization":used}]
+                }}),
+                1000,
+            ),
+        }
+    }
+    #[test]
+    fn refill_policy_applies_per_profile_with_stable_keys_and_account_labels() {
+        let rows = |a: f64, b: f64, name_a: &str| {
+            claude_profile_observations(&[
+                account("profile-a", name_a, true, a),
+                account("profile-b", "Travail", false, b),
+            ])
+        };
+        let first = rows(50.0, 50.0, "Personnel");
+        assert_eq!(first.len(), 6);
+        assert_eq!(first[0].key, "Claude:profile-a:claude:five_hour");
+        assert_eq!(first[5].key, "Claude:profile-b:claude:weekly_fable");
+        let mut ledger = Ledger::default();
+        assert!(ledger.observe_all(&first, 1000).is_none());
+        // Exhaustion (raw used 100 %) is never an alert under the v3.1.0 policy.
+        assert!(ledger
+            .observe_all(&rows(50.0, 100.0, "Personnel"), 1000)
+            .is_none());
+        // Only profile B returns to 100 % remaining: one line per B metric.
+        let message = ledger
+            .observe_all(&rows(50.0, 0.0, "Personnel"), 1000)
+            .unwrap();
+        assert_eq!(message.lines().count(), 3);
+        assert!(message
+            .contains("Claude · Travail · Limite 5 heures : quota reconstitué (100 % restant)."));
+        assert!(
+            message.contains("Claude · Travail · Limite Fable")
+                || message.contains("Claude · Travail · Limite hebdomadaire Fable")
+        );
+        assert!(!message.contains("Personnel"));
+        // Once per cycle, across restart, and a rename never replays.
+        let mut ledger: Ledger =
+            serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+        assert!(ledger
+            .observe_all(&rows(50.0, 0.0, "Renommé"), 1000)
+            .is_none());
+        let message = ledger
+            .observe_all(&rows(0.0, 0.0, "Renommé"), 1000)
+            .unwrap();
+        assert_eq!(message.lines().count(), 3);
+        assert!(message.contains("Claude · Renommé · Limite 5 heures"));
+    }
+    #[test]
+    fn single_profile_keeps_the_exact_v310_message() {
+        let rows =
+            |used| claude_profile_observations(&[account("profile-a", "Principal", true, used)]);
+        let mut ledger = Ledger::default();
+        assert!(ledger.observe_all(&rows(40.0), 1000).is_none());
+        let message = ledger.observe_all(&rows(0.0), 1000).unwrap();
+        assert!(message
+            .lines()
+            .any(|l| l == "Claude · Limite 5 heures : quota reconstitué (100 % restant)."));
+        assert!(!message.contains("Principal"));
+        assert!(ledger.0.contains_key("Claude:profile-a:claude:five_hour"));
+    }
+    #[test]
+    fn v310_legacy_keys_migrate_once_to_the_primary_without_replay() {
+        let mut ledger: Ledger = serde_json::from_value(serde_json::json!({
+            "Codex:primary": {"reset":null,"full":true,"attempted":true,"checked":900},
+            "Claude:claude:five_hour": {"reset":null,"full":true,"attempted":true,"checked":900},
+            "Claude:claude:seven_day": {"reset":null,"full":false,"attempted":false,"checked":900},
+            "Claude:claude:weekly_fable": {"reset":null,"full":true,"attempted":false,"checked":900,"muted":true}
+        }))
+        .unwrap();
+        assert!(ledger.migrate_primary("profile-a"));
+        assert!(!ledger.migrate_primary("profile-b"));
+        assert!(ledger.0.contains_key("Codex:primary"));
+        for metric in ["five_hour", "seven_day", "weekly_fable"] {
+            assert!(!ledger.0.contains_key(&format!("Claude:claude:{metric}")));
+            assert!(ledger
+                .0
+                .contains_key(&format!("Claude:profile-a:claude:{metric}")));
+            assert!(!ledger
+                .0
+                .contains_key(&format!("Claude:profile-b:claude:{metric}")));
+        }
+        // Already full and attempted before migration: no duplicate on restart.
+        let primary = claude_profile_observations(&[account("profile-a", "Principal", true, 0.0)]);
+        let message = ledger.observe_all(&primary, 1000).unwrap_or_default();
+        assert!(!message.contains("Limite 5 heures"), "{message}");
+        // The non-full weekly window still alerts on its own refill edge.
+        assert!(message.contains("Limite hebdomadaire"), "{message}");
+        assert!(
+            !message.contains("Fable"),
+            "muted Fable baseline never replays"
+        );
+    }
+    #[test]
+    fn fable_opt_out_mutes_every_profile_but_not_other_quotas() {
+        let rows = |used| {
+            claude_profile_observations(&[
+                account("profile-a", "Personnel", true, used),
+                account("profile-b", "Travail", false, used),
+            ])
+        };
+        let mut ledger = Ledger::default();
+        assert!(ledger
+            .observe_all_with_fable(&rows(50.0), 1000, true)
+            .is_none());
+        let message = ledger
+            .observe_all_with_fable(&rows(0.0), 1000, false)
+            .unwrap();
+        assert_eq!(message.lines().count(), 4);
+        assert!(!message.contains("Fable"));
+        for id in ["profile-a", "profile-b"] {
+            assert!(matches!(
+                ledger.0.get(&format!("Claude:{id}:claude:weekly_fable")),
+                Some(Counter::Refill { muted: true, .. })
+            ));
+        }
+        // Re-enabling does not replay the hidden crossing for either profile.
+        assert!(ledger
+            .observe_all_with_fable(&rows(0.0), 1000, true)
+            .is_none());
+    }
     #[test]
     fn exact_threshold_direction_duplicates_restart_and_rearm() {
         let mut l = Ledger::default();
@@ -435,7 +632,7 @@ mod tests {
         next.reset = Some(3000);
         assert!(l.observe(true, &next, 1000).is_none());
         next.key = "Claude:five_hour".into();
-        next.provider = "Claude";
+        next.provider = "Claude".into();
         assert!(l.observe(true, &next, 1000).is_none());
         next.used = Some(99.0);
         assert!(l.observe(true, &next, 1000).is_none());
@@ -695,7 +892,7 @@ mod tests {
     fn fable_disable_restart_missing_and_reenable_never_replay_hidden_crossings() {
         let mut fable = sample(90.0);
         fable.key = "Claude:claude:weekly_fable".into();
-        fable.provider = "Claude";
+        fable.provider = "Claude".into();
         fable.window = "Limite hebdomadaire Fable";
         let mut ledger = Ledger::default();
         assert!(ledger

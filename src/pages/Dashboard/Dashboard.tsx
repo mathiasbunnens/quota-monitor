@@ -5,7 +5,7 @@ import ProviderCard from "../../features/quota/ProviderCard";
 import { useCallback, useEffect, useState } from "react";
 import CodexConnection from "../../features/setup/CodexConnection";
 import { claudeRows, claudeStatusText, codexRows } from "../../features/quota/providers";
-import type { ClaudeSnapshot, CodexStatus, Preferences, QuotaSnapshot } from "../../features/quota/types";
+import type { ClaudeAccount, ClaudeSnapshot, CodexStatus, Preferences, QuotaSnapshot } from "../../features/quota/types";
 import "./dashboard.scss";
 
 export default function Dashboard() {
@@ -20,7 +20,15 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [revision, setRevision] = useState(0);
+  const [accounts, setAccounts] = useState<ClaudeAccount[]>([]);
+  const [now, setNow] = useState(Date.now);
   const reload = useCallback(() => setRevision((value) => value + 1), []);
+
+  useEffect(() => {
+    // Presentation only: never reload snapshots or ask a provider to collect.
+    const timer = window.setInterval(() => setNow(Date.now()), 60000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const quotas = listen("quota-updated", reload).catch(() => () => {});
@@ -41,19 +49,21 @@ export default function Dashboard() {
     let disposed = false;
     let timer: number;
     const poll = async () => {
-      const [p, s, c, k] = await Promise.allSettled([
+      const [p, s, c, k, a] = await Promise.allSettled([
         invoke<Preferences>("get_preferences"),
         invoke<QuotaSnapshot[]>("get_quota_snapshots"),
         invoke<CodexStatus>("get_codex_status"),
         invoke<ClaudeSnapshot>("get_claude_snapshot"),
+        invoke<ClaudeAccount[]>("get_claude_accounts"),
       ]);
       if (disposed) return;
       if (p.status === "fulfilled") setPrefs(p.value);
       if (s.status === "fulfilled" && c.status === "fulfilled") {
         setSnapshots(s.value); setStatus(c.value); setCodexError(null);
       } else setCodexError("Impossible de lire l’état de Codex.");
-      if (k.status === "fulfilled") { setClaude(k.value); setClaudeError(null); }
-      else setClaudeError("Impossible de lire l’état de Claude.");
+      if (k.status === "fulfilled") setClaude(k.value);
+      if (a.status === "fulfilled") setAccounts(a.value);
+      setClaudeError(a.status === "rejected" || k.status === "rejected" ? "Impossible de lire l’état de Claude." : null);
       timer = window.setTimeout(() => void poll(), 2000);
     };
     void poll();
@@ -61,7 +71,14 @@ export default function Dashboard() {
   }, [revision]);
 
   const codexOn = prefs?.codexEnabled ?? true;
-  const claudeOn = !!prefs?.claudeEnabled && !!claude && claude.enabled;
+  const claudeOn = !!prefs?.claudeEnabled;
+  const multiMode = prefs?.claudeAccounts?.mode === "multi";
+  const selected = accounts.find((account) => account.id === prefs?.claudeAccounts?.selectedId)
+    ?? accounts.find((account) => account.primary) ?? accounts[0];
+  const shownAccounts = multiMode ? accounts.filter((account) => account.visible) : selected ? [selected] : [];
+  const multi = shownAccounts.length > 1;
+  const singleSnapshot = multiMode ? shownAccounts[0]?.snapshot : selected?.snapshot ?? claude;
+  const fableEnabled = prefs?.fableEnabled ?? true;
 
   const refresh = async () => {
     setRefreshing(true); setError(null);
@@ -101,12 +118,20 @@ export default function Dashboard() {
     </header>
     {error && <p role="alert">{error}</p>}
     {none && <p className="dashboard__source" role="status">Aucun fournisseur actif. Active Codex ou Claude dans les Réglages.</p>}
-    <div className={"provider-grid" + (both ? " provider-grid--two" : "")}>
+    <div className={"provider-grid" + (both || (claudeOn && multi) ? " provider-grid--two" : "") + (claudeOn && multi ? " provider-grid--accounts" : "")}>
       {codexOn && <ProviderCard name="Codex" badge={status?.planType} rows={codexRows(snapshots)} compact={both}
         status={codexStatus} error={codexFailure}
         empty={status?.phase === "ready" ? "Aucun quota à afficher. La réserve peut ne pas être communiquée par Codex." : "Quotas indisponibles."} />}
-      {claudeOn && claude && <ProviderCard name="Claude" rows={claudeRows(claude, prefs?.fableEnabled ?? true)} compact={both}
-        status={claudeStatusText(claude)} error={claudeError} empty="Aucune limite communiquée par Claude Code." />}
+      {claudeOn && multi && shownAccounts.map((account) => <ProviderCard key={account.id} name={"Claude · " + account.name}
+        badge={account.snapshot.planType} rows={claudeRows(account.snapshot, fableEnabled)} compact accountCompact now={now}
+        status={!account.available ? "Dossier indisponible." : account.refreshing ? "Actualisation…" : claudeStatusText(account.snapshot)}
+        error={claudeError} empty="Aucune limite communiquée par Claude Code.">
+        {account.snapshot.extraUsage?.enabled && <p className="provider-card__note">{account.snapshot.extraUsage.limitReached ? "Extra · plafond atteint" : "Usage supplémentaire activé"}</p>}
+      </ProviderCard>)}
+      {claudeOn && multiMode && !shownAccounts.length && <p className="provider-card__note" role="status">Aucun compte Claude visible. Choisissez les comptes dans les Réglages.</p>}
+      {/* One visible account: the v3.1.0 Claude card, unchanged. */}
+      {claudeOn && !multi && (!multiMode || shownAccounts.length > 0) && <ProviderCard name="Claude" rows={singleSnapshot ? claudeRows(singleSnapshot, fableEnabled) : []} compact={both}
+        status={singleSnapshot ? claudeStatusText(singleSnapshot) : "Lecture…"} error={claudeError} empty="Aucune limite communiquée par Claude Code." />}
     </div>
     {codexOn && <ResetCredits status={status} onChange={reload} />}
     <footer className="dashboard__footer">
