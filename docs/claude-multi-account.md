@@ -9,7 +9,7 @@ Branche `feature/claude-multi-account-3.1`, base `1bcc2e5` (= `v3.1.0` = `origin
 - Collecte sérialisée `initialize` / `get_usage` ; `CLAUDE_CONFIG_DIR` défini uniquement sur le processus enfant. Cache, erreur, rafraîchissement et ticket par identité canonique ; anti-chevauchement et résultats périmés rejetés. Les changements d'affichage ne relancent pas la collecte.
 - `prefs.json` 3.1.0 (mode d'affichage, Fable, ntfy, actualisation) se charge sans perte ; `claudeAccounts` absent → Unique, principal (test `v310_preferences_file_loads_without_loss_and_defaults_to_single_primary`).
 - Réglages (onglet Fournisseurs) : Unique|Multi dès deux profils, renommage, visibilité (affichage seul), ajout manuel.
-- **Un seul compte visible = carte et lignes 3.1.0 exactes** (menu natif, fenêtre compacte, Dashboard, tray Windows/Linux) : pas de nom de compte, pas d'appariement.
+- Un seul compte visible : carte « Claude » sans nom de compte ni note ajoutée ; sa présentation suit le choix Compacte/Classique (voir plus bas). Classique = carte 3.1.0 exacte.
 - Multi : une carte « Claude · {profil} » par compte visible, dans `panel_model()` donc **identique dans le menu natif et la fenêtre compacte**. Bloc apparié de 40 pt : 5 h à l'épaisseur Unique mesurée sur 3.1.0 (menu AppKit 5 pt rayon 2,5 ; fenêtre compacte 5 px ; Dashboard React 7 px rayon 8), 7 j à 3 pt/px, écart 2. Entête « décompte · valeur » (3h30, 42 min, 3j 8h) calculé depuis `resetAt` et l'horloge locale, redessiné à la minute sans collecte. Aucune agrégation, couleurs et thèmes existants.
 - Fable : préférence 3.1.0 appliquée à chaque compte (vue d'affichage) ; libellé « Limite Fable » ; si la fenêtre hebdomadaire est coalescée dans Fable, la barre 7 j est préfixée « Fable · ». Rien n'est masqué pour faire tenir la carte (Fable et usage supplémentaire restent visibles).
 - Notifications : **politique 3.1.0 conservée** (alerte au retour à 100 % restant, une fois par cycle). Appliquée à tous les profils (visibles ou non), clé stable `Claude:{id profil}:{métrique}`, migration unique des anciennes clés du principal (Fable inclus), sans doublon ; nom du compte dans le message dès deux profils. Alertes Fable muettes si Fable désactivé.
@@ -19,10 +19,10 @@ Branche `feature/claude-multi-account-3.1`, base `1bcc2e5` (= `v3.1.0` = `origin
 | Périmètre | Fichiers |
 | --- | --- |
 | Profils, collecte, préférences, notifications | `src-tauri/src/{claude_accounts.rs,claude_cli.rs,claude.rs,prefs.rs,ntfy.rs}` |
-| `panel_model`, menu AppKit, compact, tray, fixtures natives | `src-tauri/src/lib.rs` |
+| `panel_model`, menu AppKit, compact, tray, fixtures natives | `src-tauri/src/lib.rs`, `src-tauri/src/menu_fixture.rs` |
 | Cartes et contrats React | `src/features/quota/{types.ts,providers.ts,ProviderCard.tsx}` |
 | Fenêtre compacte | `src/features/compact/{types.ts,CompactPanel.tsx,compact.scss}` |
-| Réglages | `src/features/settings/{Settings.tsx,ClaudeAccountsSettings.tsx,claude-accounts.scss}` |
+| Réglages | `src/features/settings/{Settings.tsx,ClaudeAccountsSettings.tsx,claude-accounts.scss,settings.scss}` |
 | Dashboard | `src/pages/Dashboard/{Dashboard.tsx,dashboard.scss}` |
 | Tests et fixtures | `src/features/quota/claudeProfiles.test.cjs`, `scripts/{compact-window,quota-providers}.test.mjs`, `scripts/claude-renderer-fixture.mjs`, `tests/renderer/compact.tsx` |
 
@@ -51,37 +51,51 @@ Le multi-comptes forçait `CLAUDE_CONFIG_DIR=~/.claude` même pour le principal.
 - Fixture navigateur du profil non connecté inspectée en clair/sombre : indication lisible, aucun débordement horizontal, compte voisin inchangé. Aucune modification de styles.
 - Les preuves (`evidence/`) ne sont pas commitées.
 
-## Comptes Claude plus clairs et présentation Compacte | Classique
+## Réglages simplifiés et présentation Compacte | Classique
+
+Contrat en vigueur depuis t_ad995d23 (remplace celui de 644cca6, où un seul compte gardait toujours la carte historique).
 
 Deux réglages indépendants :
 
 - **Fournisseurs → Claude** choisit *quels* comptes sont affichés (`Unique | Multi`, dès deux profils).
-- **Affichage → Présentation des comptes Claude** choisit *comment* plusieurs comptes visibles sont dessinés : `Compacte` (barres 5 h / 7 j jumelées, décomptes) ou `Classique` (une section par compte avec les lignes séparées historiques : 5 h, hebdomadaire, Fable, pourcentages, réinitialisations, nom et abonnement). Jamais d'agrégation. Ce choix n'est pas nommé « Multi ».
+- **Affichage → Présentation Claude** choisit *comment* : `Compacte` (barres 5 h / 7 j jumelées, décomptes) ou `Classique` (lignes séparées historiques : 5 h, hebdomadaire, Fable, pourcentages, réinitialisations). **S'applique à tous les cas** : Unique, Multi avec un seul visible, plusieurs visibles. Jamais d'agrégation.
 
-### Ajout d'un compte
+### Préférence `claudeLayout`
 
-- 0 ou 1 profil : bouton **« Suivre un autre compte Claude »** visible immédiatement (nom, abonnement, état du compte affichés ; gestion détaillée repliée).
-- Panneau d'ajout : aide « profil existant » (aucun compte créé, aucune connexion, session inchangée) ; **profils détectés** d'abord (ceux qui ne sont pas déjà affichés, donc sans doublon) ; **« Choisir un dossier… »** (macOS : `NSOpenPanel` natif, un seul dossier, fichiers cachés visibles, création de dossier interdite, retour du chemin seulement — aucune lecture de contenu, aucun nouveau droit Tauri) ; **chemin absolu** en option avancée (ouverte d'office là où aucun sélecteur n'existe, Windows/Linux).
-- Backend `claude_accounts::follow` (commandes `follow_claude_profile` et `add_claude_profile`) : déduplication par identité canonique (alias/symlink, dossier détecté choisi via le sélecteur), erreurs actionnables (« déjà affiché », « introuvable : vérifiez le chemin ou utilisez Choisir un dossier… », « indisponible »). Chemin brut conservé pour le lancement (correctif 72696ec intact).
-- Ajout volontaire : passage en **Multi**, ce qui était affiché (le principal quand on passe de 1 à 2) **et** le nouveau compte visibles ; en quittant Unique, les autres profils restent masqués explicitement. Sans aucun autre profil utilisable (pas de `~/.claude`), le compte ajouté devient le compte Unique affiché. La découverte au démarrage ne passe jamais par ce chemin et ne change pas le mode.
-- Multi : liste directement visible (nom modifiable, abonnement, état Connecté / Non connecté / Indisponible / Erreur, interrupteur Afficher), puis « Ajouter un compte Claude ». Unique : sélection du compte affiché, gestion repliée (« Gérer les comptes Claude (n) ») contenant l'ajout.
-- Clavier : CTA atteignable par Tab, Entrée ouvre le panneau, Échap/Annuler le ferme et rend le focus au bouton ; `aria-busy`, actions désactivées pendant une opération ; erreurs `role="alert"` dans le panneau.
+- Règle partagée : Rust `prefs::parse` / `claude_account_panels` (menu AppKit et fenêtre compacte/Dock via `panel_model()`) et React `claudeLayoutOf` / `claudePlan` (Dashboard). Plus aucune condition sur le nombre de comptes.
+- Choix enregistré explicite = prioritaire sur le mode et le nombre de comptes ; valeur inconnue → `compact`, autres préférences conservées.
+- Clé absente (ancien fichier) : on garde l'aspect que ce fichier avait déjà — `compact` pour un ancien Multi (barres jumelées), sinon `classic` (carte 3.1.0). Pas de fichier = `classic`. La valeur migrée est réécrite comme clé propre.
+- Une seule carte : nom « Claude », pas de note d'usage supplémentaire ; plusieurs : « Claude · {profil} ». Zéro compte visible : aucune carte inventée, message d'état vide ; le choix reste modifiable et enregistré.
+- Changer le style n'appelle que `set_preferences` : aucune collecte, ni mode, ni visibilité, ni cache/session modifiés.
 
-### Préférence de présentation
+### Affichage
 
-- `prefs.json` : clé `claudeLayout` (`compact` | `classic`). Absente → `compact` (comportement antérieur : multi jumelé, mono historique) ; valeur inconnue normalisée sans perdre les autres préférences (`parse` et `set_preferences`).
-- Un seul compte visible : rendu historique exact quel que soit le choix (tests d'égalité Rust, captures natives identiques au pixel, HTML React identique) ; Affichage conserve la valeur et l'explique.
-- Appliquée à `panel_model()` (menu AppKit et fenêtre compacte/Dock via `compact: !classic`) et au Dashboard React (Classique : sections pleine largeur empilées). Changer le style n'appelle que `set_preferences` : `collection_changed` reste faux, ni mode, ni visibilité, ni cache/session ne changent, aucune collecte.
+- Trois groupes, pictogrammes + libellés courts, aucun paragraphe : Mode d'affichage (mini barre des menus avec icône / petite fenêtre + Dock), Afficher dans la barre des menus (glyphes Codex / Claude / les deux, monochromes `currentColor`, masqué en mode Application), Présentation Claude (miniatures : double barre serrée / lignes espacées, sans chiffres).
+- Mêmes `prefs-segmented` (variante `prefs-choices`), couleurs et thèmes ; vrais boutons radio : Tab, flèches, focus visible, nom accessible explicite. Les radios restent actives pendant l'enregistrement (garde `mutation`), le focus n'est donc pas perdu.
 
-### Vérifications
+### Fournisseurs → Claude
 
-- RED observés : `claude_layout_migrates_normalises_and_persists_independently` (valeur inconnue non normalisée) avant correction ; 12 tests React nouveaux en échec sur les sources de 72696ec. Les tests `follow` ont été écrits avec la fonction (RED = absence de l'API).
-- `cargo test --offline` : 118 réussis, 4 ignorés ; Node : 68 réussis ; `npm run build` OK ; `cargo fmt --check` OK.
-- `--quota-ui-smoke` natif : nouveaux scénarios `*-classic` (clair/sombre) ; épaisseurs Classique multi = 8 × 5 pt, Compacte inchangée (5/5/3/3), mono Classique identique au pixel au mono Compacte.
-- Fixtures React (headless, IPC simulé) : 36 captures Réglages/Dashboard 480/360/640/420 px, clair/sombre, aucun débordement horizontal ; parcours clavier vérifié ; changement de style sans aucun appel de collecte.
+- Une seule liste (profils détectés inclus) : nom, crayon de renommage en ligne (Entrée enregistre, Échap annule, focus rendu au crayon), Principal, abonnement, pastille d'état ; interrupteur Afficher en Multi, sélection ronde en Unique. Détail d'erreur via le bouton ⓘ (et infobulle), pas de paragraphe permanent.
+- **« Ajouter un compte »** toujours présent (0, 1 ou n profils) : ouvre directement le sélecteur de dossier macOS (`NSOpenPanel`) ; sans sélecteur (Windows/Linux), ouvre la zone secondaire avec le champ de chemin.
+- Un seul accès secondaire (chevron « Chemins et options avancées ») : chemins des profils, ajout par chemin absolu, Actualiser, Retirer l'ancien relais. Plus de panneau d'ajout, de disclosure imbriquée ni de « Gérer le compte ».
+- Backend inchangé : `add_claude_profile` (déduplication canonique, erreurs concises « déjà affiché », « introuvable », « indisponible », chemin brut conservé), passage en Multi après un ajout volontaire. Codex inchangé.
+
+## Correctif : fausse barre bleue en haut du menu
+
+Symptôme : bande bleue au-dessus du panneau de quotas en restant sur « Réglages… » ou en passant à « Vérifier les mises à jour… ».
+
+- Cause reproduite : pendant le suivi du menu, chaque actualisation (ouverture, résultat de collecte, tic de décompte à la minute) remplaçait la vue du panneau par `setView`. AppKit reconstruit alors la ligne et replace le fond de sélection de l'action surlignée (`NSRootMenuWindowBackgroundView`) en haut du panneau ; la ligne « Réglages… » perd aussi son texte.
+- Correctif (`refresh_open_panel`) : on garde la vue du panneau et on y déplace le nouveau contenu. Si la hauteur change pendant qu'une action est surlignée (cas qui décalait aussi la sélection), ce redimensionnement attend : prochaine actualisation sans surlignage, fermeture du menu (`menuDidClose:` redessine) ou réouverture. Les valeurs à hauteur égale (décomptes, pourcentages) restent mises à jour en direct ; seul un changement de structure (ex. Claude « Lecture… » → quotas) peut rester affiché à l'ancienne hauteur tant qu'une action reste surlignée.
+- Fixture interactive `--menu-tracking-fixture <dir>` (`menu_fixture.rs`) : vrai menu de production ouvert en suivi AppKit, données synthétiques, flèches clavier envoyées au seul processus, actualisations même hauteur / autre hauteur / rafale, clair et sombre, variante `legacy` (`setView`) et `production`. Verdict calculé depuis la position du fond de sélection par rapport à la ligne surlignée.
+
+## Vérifications t_ad995d23
+
+- RED sur 644cca6 : `layout_choice_applies_to_a_single_visible_account` et `claude_layout_migrates_normalises_and_persists_independently` (Rust), 19 tests Node (présentation mono, migration, Réglages simplifiés). GREEN : `cargo test --offline` 118 réussis / 4 ignorés, Node 69 réussis, `npm run typecheck`, `npm run build`, `cargo fmt --check` OK.
+- `--quota-ui-smoke` : 82 PASS ; mono Compacte = 5/5/3/3 pt (jumelé), mono Classique = 4 × 5 pt ; le rafraîchissement en direct garde la même vue (assertion d'identité).
+- `--menu-tracking-fixture` : `legacy` → STRAY_BAND_OVER_PANEL sur toutes les actualisations avec action surlignée (clair et sombre) ; `production` → 0 bande, sélection toujours sur sa ligne, redimensionnements différés seulement sous surlignage.
+- Fixtures React headless (IPC simulé, captures avant/après 480 px clair et 360 px sombre) : Affichage 58 → 24 mots, Claude Multi 71 → 32 ; aucun débordement ; clavier réel (CDP) : flèches sur Présentation et Mode, renommage Entrée/Échap, interrupteur Espace, sélection Unique, ⓘ, Ajouter → sélecteur → `add_claude_profile`, chemin relatif refusé, erreur backend affichée ; Dashboard mono Compacte jumelé / Classique historique.
 
 ### Limites
 
-- Sélecteur natif uniquement sur macOS ; Windows/Linux : saisie de chemin, rendu React non exécuté nativement sur ces systèmes.
-- Fixtures ≠ test de l'application installée ; le sélecteur `NSOpenPanel` n'a pas été ouvert pendant les tests (interaction utilisateur requise).
-- Pas de suppression de profil (non demandé). La surbrillance bleue au survol du menu est un bug distinct, non traité ici.
+- Le survol à la souris n'a pas été reproduit par la fixture (les mouvements souris envoyés au processus ne surlignent pas) : la preuve utilise le surlignage clavier, même fond de sélection AppKit. Validation finale du symptôme exact par l'utilisateur sur l'app.
+- Fixtures ≠ application installée ; `NSOpenPanel` non ouvert en test. Windows/Linux non exécutés nativement. Pas de suppression de profil (non demandé).
