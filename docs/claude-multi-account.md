@@ -50,3 +50,38 @@ Le multi-comptes forçait `CLAUDE_CONFIG_DIR=~/.claude` même pour le principal.
 - Vérifications du correctif : `cargo test --offline` 109 réussis, 4 ignorés (deux intégrations historiques, un helper de sous-processus exécuté par son test parent, une sonde réelle opt-in) ; 45 tests Node affectés réussis ; `npm run build` OK. Une exécution explicite de `live_primary_collector_is_signed_in --ignored --nocapture` passe avec seulement `subtype=success subscription_type="max" rate_limits_available=true` imprimés.
 - Fixture navigateur du profil non connecté inspectée en clair/sombre : indication lisible, aucun débordement horizontal, compte voisin inchangé. Aucune modification de styles.
 - Les preuves (`evidence/`) ne sont pas commitées.
+
+## Comptes Claude plus clairs et présentation Compacte | Classique
+
+Deux réglages indépendants :
+
+- **Fournisseurs → Claude** choisit *quels* comptes sont affichés (`Unique | Multi`, dès deux profils).
+- **Affichage → Présentation des comptes Claude** choisit *comment* plusieurs comptes visibles sont dessinés : `Compacte` (barres 5 h / 7 j jumelées, décomptes) ou `Classique` (une section par compte avec les lignes séparées historiques : 5 h, hebdomadaire, Fable, pourcentages, réinitialisations, nom et abonnement). Jamais d'agrégation. Ce choix n'est pas nommé « Multi ».
+
+### Ajout d'un compte
+
+- 0 ou 1 profil : bouton **« Suivre un autre compte Claude »** visible immédiatement (nom, abonnement, état du compte affichés ; gestion détaillée repliée).
+- Panneau d'ajout : aide « profil existant » (aucun compte créé, aucune connexion, session inchangée) ; **profils détectés** d'abord (ceux qui ne sont pas déjà affichés, donc sans doublon) ; **« Choisir un dossier… »** (macOS : `NSOpenPanel` natif, un seul dossier, fichiers cachés visibles, création de dossier interdite, retour du chemin seulement — aucune lecture de contenu, aucun nouveau droit Tauri) ; **chemin absolu** en option avancée (ouverte d'office là où aucun sélecteur n'existe, Windows/Linux).
+- Backend `claude_accounts::follow` (commandes `follow_claude_profile` et `add_claude_profile`) : déduplication par identité canonique (alias/symlink, dossier détecté choisi via le sélecteur), erreurs actionnables (« déjà affiché », « introuvable : vérifiez le chemin ou utilisez Choisir un dossier… », « indisponible »). Chemin brut conservé pour le lancement (correctif 72696ec intact).
+- Ajout volontaire : passage en **Multi**, ce qui était affiché (le principal quand on passe de 1 à 2) **et** le nouveau compte visibles ; en quittant Unique, les autres profils restent masqués explicitement. Sans aucun autre profil utilisable (pas de `~/.claude`), le compte ajouté devient le compte Unique affiché. La découverte au démarrage ne passe jamais par ce chemin et ne change pas le mode.
+- Multi : liste directement visible (nom modifiable, abonnement, état Connecté / Non connecté / Indisponible / Erreur, interrupteur Afficher), puis « Ajouter un compte Claude ». Unique : sélection du compte affiché, gestion repliée (« Gérer les comptes Claude (n) ») contenant l'ajout.
+- Clavier : CTA atteignable par Tab, Entrée ouvre le panneau, Échap/Annuler le ferme et rend le focus au bouton ; `aria-busy`, actions désactivées pendant une opération ; erreurs `role="alert"` dans le panneau.
+
+### Préférence de présentation
+
+- `prefs.json` : clé `claudeLayout` (`compact` | `classic`). Absente → `compact` (comportement antérieur : multi jumelé, mono historique) ; valeur inconnue normalisée sans perdre les autres préférences (`parse` et `set_preferences`).
+- Un seul compte visible : rendu historique exact quel que soit le choix (tests d'égalité Rust, captures natives identiques au pixel, HTML React identique) ; Affichage conserve la valeur et l'explique.
+- Appliquée à `panel_model()` (menu AppKit et fenêtre compacte/Dock via `compact: !classic`) et au Dashboard React (Classique : sections pleine largeur empilées). Changer le style n'appelle que `set_preferences` : `collection_changed` reste faux, ni mode, ni visibilité, ni cache/session ne changent, aucune collecte.
+
+### Vérifications
+
+- RED observés : `claude_layout_migrates_normalises_and_persists_independently` (valeur inconnue non normalisée) avant correction ; 12 tests React nouveaux en échec sur les sources de 72696ec. Les tests `follow` ont été écrits avec la fonction (RED = absence de l'API).
+- `cargo test --offline` : 118 réussis, 4 ignorés ; Node : 68 réussis ; `npm run build` OK ; `cargo fmt --check` OK.
+- `--quota-ui-smoke` natif : nouveaux scénarios `*-classic` (clair/sombre) ; épaisseurs Classique multi = 8 × 5 pt, Compacte inchangée (5/5/3/3), mono Classique identique au pixel au mono Compacte.
+- Fixtures React (headless, IPC simulé) : 36 captures Réglages/Dashboard 480/360/640/420 px, clair/sombre, aucun débordement horizontal ; parcours clavier vérifié ; changement de style sans aucun appel de collecte.
+
+### Limites
+
+- Sélecteur natif uniquement sur macOS ; Windows/Linux : saisie de chemin, rendu React non exécuté nativement sur ces systèmes.
+- Fixtures ≠ test de l'application installée ; le sélecteur `NSOpenPanel` n'a pas été ouvert pendant les tests (interaction utilisateur requise).
+- Pas de suppression de profil (non demandé). La surbrillance bleue au survol du menu est un bug distinct, non traité ici.
