@@ -27,6 +27,8 @@ export type CodexStatus = {
 
 export type IndicatorChoice = "codex" | "claude" | "both";
 export type DisplayMode = "menubar" | "app";
+/** Presentation of several visible Claude accounts (Réglages → Affichage). */
+export type ClaudeLayout = "compact" | "classic";
 export type NtfyConfig = { enabled: boolean; serverUrl: string; topic: string };
 export type ClaudeProfile = { id: string; path: string; name: string; visible: boolean };
 export type ClaudeAccountsPreferences = {
@@ -48,6 +50,8 @@ export type Preferences = {
   indicator: IndicatorChoice;
   displayMode: DisplayMode;
   ntfy: NtfyConfig;
+  /** Absent in older files: treated as "compact". */
+  claudeLayout?: ClaudeLayout;
 };
 
 export type ClaudeMetric = {

@@ -28,7 +28,10 @@ const scenario = query.get('scenario') || 'multi';
 if (scenario === 'edge') {profiles[0].snapshot.metrics = [metric('five_hour',100,'Limite 5 heures'),metric('seven_day',null,'Limite hebdomadaire'),{...metric('seven_day',15,'Limite hebdomadaire Fable'),id:'claude:weekly_fable'}];profiles[0].snapshot.extraUsage={enabled:true,limitReached:true};profiles[1].snapshot.state='error';profiles[1].snapshot.metrics=[];profiles[1].snapshot.message='Lecture Claude impossible : vérifiez la connexion.';}
 if (scenario === 'signed-out') Object.assign(profiles[1].snapshot, {state:'error',metrics:[],planType:null,errorKind:'not_signed_in',message:'Profil Claude non connecté. Connectez-vous avec CLAUDE_CONFIG_DIR=/fixtures/.claude-work claude auth login.'});
 if (scenario === 'fable') for (const [i,p] of profiles.entries()) p.snapshot.metrics.push({...metric('seven_day',i?91:40,'Limite hebdomadaire Fable',4800+1200),id:'claude:weekly_fable'});
-let prefs = {codexEnabled:query.get('codex')==='yes',claudeEnabled:true,fableEnabled:query.get('fable')!=='off',indicator:'claude',displayMode:'menubar',ntfy:{enabled:false,serverUrl:'https://ntfy.sh',topic:''},claudeAccounts:{mode:scenario==='single'?'single':'multi',selectedId:null,profiles:profiles.map(({id,path,name,visible})=>({id,path,name,visible}))}};
+if (scenario === 'one') profiles.splice(1);
+if (scenario === 'zero') { profiles.splice(1); Object.assign(profiles[0], {available:false}); Object.assign(profiles[0].snapshot, {state:'error',metrics:[],planType:null,message:'Dossier de profil Claude indisponible.'}); }
+if (scenario === 'add-error') profiles[1].snapshot.planType = 'team';
+let prefs = {codexEnabled:query.get('codex')==='yes',claudeEnabled:true,fableEnabled:query.get('fable')!=='off',indicator:'claude',displayMode:'menubar',ntfy:{enabled:false,serverUrl:'https://ntfy.sh',topic:''},claudeAccounts:{mode:['single','one','zero','add-error'].includes(scenario)?'single':'multi',selectedId:null,profiles:profiles.map(({id,path,name,visible})=>({id,path,name,visible}))},...(query.get('layout')?{claudeLayout:query.get('layout')}:{})};
 if(scenario==='none') prefs.claudeAccounts.profiles.forEach(p=>p.visible=false);
 if(scenario==='one-visible') prefs.claudeAccounts.profiles[1].visible=false;
 const accounts = () => profiles.map(a=>{const saved=prefs.claudeAccounts.profiles.find(p=>p.id===a.id);return {...a,name:saved?.name||a.name,visible:prefs.claudeEnabled&&(prefs.claudeAccounts.mode==='multi'?(saved?.visible??a.primary):a.id===(prefs.claudeAccounts.selectedId||'personal'))};});
@@ -46,6 +49,8 @@ export async function invoke(command, payload) {
  case 'get_quota_snapshots':return prefs.codexEnabled?[{model:'codex',remaining:63,limit:100,period:'five-hour',resetAt:'2030-01-01T12:00:00Z',checkedAt:'2026-10-31T10:00:00Z',source:'codex',confidence:'high'}]:[];
  case 'get_codex_status':return {phase:'ready',message:'',planType:'plus',refreshSettings:{customSeconds:null},refreshSeconds:60,availableResets:null};
  case 'add_claude_profile':throw new Error('Fixture: dossier inexistant');
+ case 'follow_claude_profile':if(scenario==='add-error')throw new Error('« Travail » est déjà affiché. Choisissez un autre profil Claude Code.');prefs={...prefs,claudeAccounts:{...prefs.claudeAccounts,mode:'multi',profiles:profiles.map(({id,path,name})=>({id,path,name,visible:true}))}};emit();return structuredClone(prefs);
+ case 'choose_claude_profile_folder':return null;
  case 'fit_settings_window': case 'request_claude_refresh': case 'request_quota_refresh': return null;
  default: throw new Error('Blocked external action in fixture: '+command);
  }

@@ -1,12 +1,31 @@
 .claude-accounts {
   margin-top: 10px;
+  > label { display: block; }
   &__profile { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--desktop-border); }
   &__heading, &__rename { display: flex; align-items: center; gap: 8px; }
   &__heading { justify-content: space-between; }
-  &__heading strong { min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
-  &__heading small { color: var(--desktop-muted); font-weight: 400; }
+  &__heading strong, &__name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+  &__heading small, &__name small { color: var(--desktop-muted); font-weight: 400; }
   &__rename input { min-width: 0; }
   &__rename button { flex: none; }
-  &__add { margin-top: 12px; }
+  &__add { margin-top: 8px; }
   code { display: block; margin: 4px 0; color: var(--desktop-muted); }
+  p code { display: inline; margin: 0; white-space: nowrap; }
+  // Lists reuse the profile separators; no bullets or indentation.
+  &__list, &__candidates { list-style: none; margin: 0; padding: 0; }
+  &__list { margin-bottom: 10px; }
+  &__candidates li {
+    display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--desktop-border);
+    > div { flex: 1; min-width: 0; }
+    .claude-accounts__name { display: block; }
+    button { flex: none; }
+  }
+  &__cta { margin-top: 10px; }
+  &__more { margin-top: 10px; }
+  &__panel {
+    margin-top: 10px; padding: 10px 12px; border: 1px solid var(--desktop-border); border-radius: 8px;
+    background: var(--desktop-bg);
+    h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; }
+    h4 { margin: 10px 0 0; font-size: 11px; font-weight: 600; color: var(--desktop-muted); }
+  }
 }

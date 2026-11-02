@@ -7,6 +7,20 @@ use tauri::Manager;
 
 pub const INDICATORS: [&str; 3] = ["codex", "claude", "both"];
 
+/// Presentation of several visible Claude accounts (Réglages → Affichage).
+/// Independent of the account mode/visibility; one visible account always
+/// keeps the historical card. Absent/unknown = "compact" (paired bars).
+pub const CLAUDE_LAYOUT_COMPACT: &str = "compact";
+pub const CLAUDE_LAYOUT_CLASSIC: &str = "classic";
+
+pub fn normalize_claude_layout(value: &str) -> &'static str {
+    if value == CLAUDE_LAYOUT_CLASSIC {
+        CLAUDE_LAYOUT_CLASSIC
+    } else {
+        CLAUDE_LAYOUT_COMPACT
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Prefs {
@@ -19,6 +33,9 @@ pub struct Prefs {
     pub display_mode: String,
     pub ntfy: crate::ntfy::Config,
     pub claude_accounts: crate::claude_accounts::AccountPrefs,
+    /// "compact" (default: paired 5 h/7 j bars) or "classic" (one section per
+    /// account with the historical separated rows). Display only.
+    pub claude_layout: String,
 }
 
 impl Default for Prefs {
@@ -31,11 +48,16 @@ impl Default for Prefs {
             display_mode: crate::display_mode::MENUBAR.into(),
             ntfy: crate::ntfy::Config::default(),
             claude_accounts: crate::claude_accounts::AccountPrefs::default(),
+            claude_layout: CLAUDE_LAYOUT_COMPACT.into(),
         }
     }
 }
 
 impl Prefs {
+    pub fn classic_claude_layout(&self) -> bool {
+        self.claude_layout == CLAUDE_LAYOUT_CLASSIC
+    }
+
     pub fn valid(&self) -> bool {
         INDICATORS.contains(&self.indicator.as_str())
     }
@@ -60,6 +82,7 @@ pub fn parse(bytes: &[u8]) -> Prefs {
             // Unknown/absent mode (older file) keeps the menu-bar behaviour
             // without discarding the rest of the preferences.
             prefs.display_mode = crate::display_mode::normalize(&prefs.display_mode).into();
+            prefs.claude_layout = normalize_claude_layout(&prefs.claude_layout).into();
             prefs
         })
         .unwrap_or_default()
@@ -91,6 +114,8 @@ pub fn set_preferences(app: tauri::AppHandle, mut prefs: Prefs) -> Result<Prefs,
     } else {
         crate::display_mode::MENUBAR.into()
     };
+    // Presentation only: never a collection, session or cache change.
+    prefs.claude_layout = normalize_claude_layout(&prefs.claude_layout).into();
     // Validation (indicator, ntfy, Claude profiles) happens in save_to before
     // the file or the in-memory state is replaced.
     let file = path(&app)?;
@@ -232,6 +257,60 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn claude_layout_migrates_normalises_and_persists_independently() {
+        // Absent (v3.1.0 / previous multi build): compact, everything else kept.
+        let old = parse(br#"{"claudeEnabled":true,"indicator":"both","displayMode":"app","claudeAccounts":{"mode":"multi","selectedId":null,"profiles":[]}}"#);
+        assert_eq!(old.claude_layout, "compact");
+        assert!(!old.classic_claude_layout());
+        assert!(old.claude_enabled && old.indicator == "both" && old.display_mode == "app");
+        assert_eq!(old.claude_accounts.mode, "multi");
+        // Unknown value is normalised without resetting other preferences.
+        let odd = parse(br#"{"claudeLayout":"multi","claudeEnabled":true,"fableEnabled":false,"claudeAccounts":{"mode":"multi","selectedId":null,"profiles":[]}}"#);
+        assert_eq!(odd.claude_layout, "compact");
+        assert!(odd.claude_enabled && !odd.fable_enabled);
+        assert_eq!(odd.claude_accounts.mode, "multi");
+        // Classic survives a round trip and is written as its own key.
+        let classic = parse(br#"{"claudeLayout":"classic","claudeAccounts":{"mode":"single","selectedId":null,"profiles":[]}}"#);
+        assert!(classic.classic_claude_layout());
+        assert_eq!(classic.claude_accounts.mode, "single");
+        let v = serde_json::to_value(&classic).unwrap();
+        assert_eq!(v["claudeLayout"], "classic");
+        assert_eq!(parse(&serde_json::to_vec(&classic).unwrap()), classic);
+    }
+    #[test]
+    fn claude_layout_change_does_not_restart_collection_or_touch_accounts() {
+        let mut before = Prefs::default();
+        before.claude_enabled = true;
+        before.claude_accounts.mode = "multi".into();
+        before
+            .claude_accounts
+            .profiles
+            .push(crate::claude_accounts::Profile {
+                id: "profile:a".into(),
+                path: "/fixture/a".into(),
+                name: "A".into(),
+                visible: false,
+            });
+        let mut after = before.clone();
+        after.claude_layout = "classic".into();
+        assert!(!collection_changed(&before, &after));
+        assert_eq!(before.claude_accounts, after.claude_accounts);
+    }
+    #[test]
+    fn layout_preference_is_saved_to_disk_with_other_preferences() {
+        let root = std::env::temp_dir().join(format!("qm-prefs-layout-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("prefs.json");
+        let mut p = parse(br#"{"claudeEnabled":true,"indicator":"both"}"#);
+        p.claude_layout = "classic".into();
+        save_to(&file, &p).unwrap();
+        let back = parse(&fs::read(&file).unwrap());
+        assert_eq!(back, p);
+        assert!(back.classic_claude_layout() && back.indicator == "both");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn defaults_keep_codex_only_behaviour() {
         let p = Prefs::default();
         assert!(p.codex_enabled && !p.claude_enabled);
@@ -273,6 +352,7 @@ mod tests {
             display_mode: "app".into(),
             ntfy: crate::ntfy::Config::default(),
             claude_accounts: crate::claude_accounts::AccountPrefs::default(),
+            claude_layout: "classic".into(),
         };
         let bytes = serde_json::to_vec(&saved).unwrap();
         assert_eq!(

@@ -1019,19 +1019,26 @@ fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
     }
 }
 
+/// `classic`: Réglages → Affichage « Classique ». Several visible accounts then
+/// get one section each with the historical separated rows (5 h, hebdo, Fable,
+/// resets, percentages) instead of paired bars. Never an aggregate. One
+/// visible account keeps the exact v3.1.0 card whatever the preference.
 #[cfg(target_os = "macos")]
-fn claude_account_panels(accounts: &[claude::AccountSnapshot]) -> Vec<PanelProvider> {
+fn claude_account_panels(
+    accounts: &[claude::AccountSnapshot],
+    classic: bool,
+) -> Vec<PanelProvider> {
     let visible: Vec<_> = accounts.iter().filter(|a| a.profile.visible).collect();
-    let compact = visible.len() > 1;
+    let several = visible.len() > 1;
     visible
         .into_iter()
         .map(|a| {
             let mut panel = claude_panel(&a.snapshot);
-            if !compact {
+            if !several {
                 // One visible account: the exact v3.1.0 Claude card.
                 return panel;
             }
-            panel.compact = true;
+            panel.compact = !classic;
             panel.name = format!("Claude · {}", a.profile.name);
             if let Some(extra) = &a.snapshot.extra_usage {
                 if extra.enabled {
@@ -1366,7 +1373,10 @@ fn panel_model(app: &tauri::AppHandle) -> PanelModel {
             codex_status.as_ref().and_then(|s| s.plan_type.clone()),
         ));
     }
-    providers.extend(claude_account_panels(&accounts));
+    providers.extend(claude_account_panels(
+        &accounts,
+        prefs.classic_claude_layout(),
+    ));
     let claude_snaps: Vec<_> = accounts.iter().map(|a| &a.snapshot).collect();
     let header = panel_header(&providers, latest_refresh(&snapshots, &claude_snaps));
     PanelModel {
@@ -1397,6 +1407,59 @@ fn get_compact_panel(app: tauri::AppHandle) -> CompactPanel {
 #[tauri::command]
 fn get_compact_panel() -> Result<(), String> {
     Err("La fenêtre compacte n’existe que sur macOS.".into())
+}
+
+/// Native folder chooser for « Suivre un autre compte Claude ». Bounded to the
+/// one folder the user picks: returns its path only (no content read, no
+/// login, no folder created). The add itself goes through add_claude_profile.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn choose_claude_profile_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let mtm = MainThreadMarker::new().expect("folder picker runs on main thread");
+        let _ = tx.send(pick_profile_folder(mtm));
+    })
+    .map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || rx.recv())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|_| "Sélecteur de dossier interrompu.".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn pick_profile_folder(mtm: MainThreadMarker) -> Option<String> {
+    use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseDirectories(true);
+    panel.setCanChooseFiles(false);
+    panel.setAllowsMultipleSelection(false);
+    panel.setCanCreateDirectories(false);
+    // Claude Code profiles are usually hidden folders (~/.claude-travail).
+    panel.setShowsHiddenFiles(true);
+    panel.setMessage(Some(&NSString::from_str(
+        "Choisissez le dossier d’un profil Claude Code déjà connecté (par exemple .claude-travail). Aucun compte n’est créé.",
+    )));
+    panel.setPrompt(Some(&NSString::from_str("Suivre ce profil")));
+    if let Some(home) = std::env::var_os("HOME") {
+        let url =
+            objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&home.to_string_lossy()));
+        panel.setDirectoryURL(Some(&url));
+    }
+    NSApplication::sharedApplication(mtm).activate();
+    if panel.runModal() != NSModalResponseOK {
+        return None;
+    }
+    panel
+        .URL()
+        .and_then(|url| url.path())
+        .map(|p| p.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn choose_claude_profile_folder() -> Result<Option<String>, String> {
+    Err("Sélecteur de dossier indisponible : indiquez le chemin absolu du profil.".into())
 }
 
 /// Same action as the menu's "Se connecter à Codex…" item.
@@ -2215,17 +2278,31 @@ pub fn quota_ui_smoke(directory: &str) {
     };
     let personal = fixture("Personnel", "pro", Some(27.0), Some(14.0), None);
     let work = fixture("Travail", "max", Some(65.0), Some(80.0), None);
-    scenarios.push(("single-account", claude_account_panels(&[personal.clone()])));
     scenarios.push((
-        "multi-accounts",
-        claude_account_panels(&[personal.clone(), work.clone()]),
+        "single-account",
+        claude_account_panels(&[personal.clone()], false),
+    ));
+    // Classique saved but one visible account: still the exact historical card.
+    scenarios.push((
+        "single-account-classic",
+        claude_account_panels(&[personal.clone()], true),
     ));
     scenarios.push((
-        "multi-fable",
-        claude_account_panels(&[
-            fixture("Personnel", "pro", Some(27.0), Some(14.0), Some(40.0)),
-            fixture("Travail", "max", Some(65.0), Some(80.0), Some(91.0)),
-        ]),
+        "multi-accounts",
+        claude_account_panels(&[personal.clone(), work.clone()], false),
+    ));
+    scenarios.push((
+        "multi-accounts-classic",
+        claude_account_panels(&[personal.clone(), work.clone()], true),
+    ));
+    let fable_pair = [
+        fixture("Personnel", "pro", Some(27.0), Some(14.0), Some(40.0)),
+        fixture("Travail", "max", Some(65.0), Some(80.0), Some(91.0)),
+    ];
+    scenarios.push(("multi-fable", claude_account_panels(&fable_pair, false)));
+    scenarios.push((
+        "multi-fable-classic",
+        claude_account_panels(&fable_pair, true),
     ));
     let mut exhausted = fixture("Épuisé", "max", Some(100.0), None, Some(15.0));
     exhausted.snapshot.extra_usage = Some(claude::ExtraUsage {
@@ -2240,15 +2317,21 @@ pub fn quota_ui_smoke(directory: &str) {
     missing.snapshot.state = "error";
     missing.snapshot.message = "Dossier de profil Claude indisponible.".into();
     missing.snapshot.metrics.clear();
+    let edge = [exhausted, failed, missing];
+    scenarios.push(("multi-edge-cases", claude_account_panels(&edge, false)));
     scenarios.push((
-        "multi-edge-cases",
-        claude_account_panels(&[exhausted, failed, missing]),
+        "multi-edge-cases-classic",
+        claude_account_panels(&edge, true),
     ));
     let mut hidden = work.clone();
     hidden.profile.visible = false;
     scenarios.push((
         "multi-one-visible",
-        claude_account_panels(&[personal, hidden]),
+        claude_account_panels(&[personal.clone(), hidden.clone()], false),
+    ));
+    scenarios.push((
+        "multi-one-visible-classic",
+        claude_account_panels(&[personal, hidden], true),
     ));
     let target = QuotaMenuTarget::new(mtm);
     // Main-thread AppKit regression checks use the production builder without
@@ -2315,7 +2398,14 @@ pub fn quota_ui_smoke(directory: &str) {
         ] {
             let panel = make_panel_view(mtm, &header, &providers);
             let bounds = panel.bounds();
-            if matches!(name, "single-account" | "multi-accounts" | "two-providers") {
+            if matches!(
+                name,
+                "single-account"
+                    | "single-account-classic"
+                    | "multi-accounts"
+                    | "multi-accounts-classic"
+                    | "two-providers"
+            ) {
                 // Measure the real AppKit frames (rows are composited in group
                 // views since v3.1.0): every track/fill at x = 22, in root space.
                 fn bars(root: &NSView, view: &NSView, out: &mut Vec<NSRect>) {
@@ -2338,7 +2428,13 @@ pub fn quota_ui_smoke(directory: &str) {
                 let heights: Vec<f64> = found.iter().map(|r| r.size.height).collect();
                 let unique_claude = vec![PANEL_TRACK_HEIGHT; 4];
                 match name {
-                    "single-account" => assert_eq!(heights, unique_claude),
+                    "single-account" | "single-account-classic" => {
+                        assert_eq!(heights, unique_claude)
+                    }
+                    // Classique: two separated Unique rows per account, no 3 pt track.
+                    "multi-accounts-classic" => {
+                        assert_eq!(heights, vec![PANEL_TRACK_HEIGHT; 8])
+                    }
                     "multi-accounts" => {
                         let pair = [PANEL_TRACK_HEIGHT, PANEL_TRACK_HEIGHT, 3.0, 3.0];
                         assert_eq!(heights, [pair, pair].concat());
@@ -2773,6 +2869,8 @@ pub fn run() {
             claude::get_claude_snapshot,
             claude::get_claude_accounts,
             claude::add_claude_profile,
+            claude::follow_claude_profile,
+            choose_claude_profile_folder,
             claude::request_claude_refresh,
             claude::install_claude_relay,
             claude::uninstall_claude_relay,
@@ -3226,20 +3324,70 @@ mod tests {
     fn one_visible_account_keeps_the_exact_v310_claude_card() {
         let personal = fixture_account("Personnel", true, fixture_limits(27.0, 14.0, 210, 80));
         let hidden = fixture_account("Travail", false, fixture_limits(65.0, 80.0, 42, 49));
-        let panels = claude_account_panels(&[personal.clone(), hidden]);
+        let panels = claude_account_panels(&[personal.clone(), hidden.clone()], false);
         assert_eq!(panels.len(), 1);
+        // Classique saved: still the exact historical card.
+        assert_eq!(
+            claude_account_panels(&[personal.clone(), hidden], true),
+            panels
+        );
         // Historic presentation: same provider as v3.1.0 claude_panel, no
         // account name, no compact pairing, no extra-usage note added.
         assert_eq!(panels[0], claude_panel(&personal.snapshot));
         assert_eq!(panels[0].name, "Claude");
         assert!(!panels[0].compact);
         assert_eq!(panels[0].note, None);
-        assert!(claude_account_panels(&[fixture_account(
-            "Personnel",
-            false,
-            fixture_limits(1.0, 1.0, 5, 5)
-        )])
+        assert!(claude_account_panels(
+            &[fixture_account(
+                "Personnel",
+                false,
+                fixture_limits(1.0, 1.0, 5, 5)
+            )],
+            false
+        )
         .is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn classic_layout_keeps_one_separated_section_per_account_without_aggregation() {
+        let personal = fixture_account("Personnel", true, fixture_limits(27.0, 14.0, 210, 80));
+        let work = fixture_account("Travail", true, fixture_limits(65.0, 80.0, 42, 49));
+        let compact = claude_account_panels(&[personal.clone(), work.clone()], false);
+        let classic = claude_account_panels(&[personal.clone(), work.clone()], true);
+        assert_eq!(classic.len(), 2);
+        for (account, (c, k)) in [&personal, &work].iter().zip(compact.iter().zip(&classic)) {
+            assert!(!k.compact, "classic never pairs bars");
+            assert_eq!(k.name, format!("Claude · {}", account.profile.name));
+            assert_eq!(k.badge, account.snapshot.plan_type);
+            // Same per-account rows as the historical card: 5 h, hebdo, Fable,
+            // each with its own percentage and reset phrase.
+            assert_eq!(k.rows, claude_panel(&account.snapshot).rows);
+            assert_eq!(k.rows, c.rows);
+            assert_eq!(k.note, c.note);
+            assert!(k.rows[0].reset.starts_with("Réinitialisation"));
+            // Separated rows: taller than the paired block by exactly 2 rows - 40 pt.
+            assert_eq!(
+                card_height(k) - card_height(c),
+                2.0 * PANEL_ROW_HEIGHT - 40.0
+            );
+        }
+        assert_eq!(classic[0].rows[0].value, "73 %");
+        assert_eq!(classic[1].rows[0].value, "35 %");
+        // Compact window serialises the same choice as the menu.
+        let model = PanelModel {
+            header: panel_header(&classic, None),
+            providers: classic.clone(),
+            connection: None,
+        };
+        let json = serde_json::to_value(compact_panel(&model, "3.1.0", None)).unwrap();
+        assert_eq!(json["providers"][0]["compact"], false);
+        assert_eq!(json["providers"][1]["section"], "CLAUDE · TRAVAIL");
+        assert_eq!(json["providers"][1]["rows"].as_array().unwrap().len(), 3);
+        // Nothing visible: nothing rendered, whatever the layout.
+        let mut hidden = personal.clone();
+        hidden.profile.visible = false;
+        assert!(claude_account_panels(&[hidden], true).is_empty());
     }
 
     #[cfg(target_os = "macos")]
@@ -3247,7 +3395,7 @@ mod tests {
     fn multi_account_cards_keep_fable_extra_and_countdowns_per_account() {
         let personal = fixture_account("Personnel", true, fixture_limits(27.0, 14.0, 210, 80));
         let work = fixture_account("Travail", true, fixture_limits(65.0, 80.0, 42, 49));
-        let multi = claude_account_panels(&[personal, work]);
+        let multi = claude_account_panels(&[personal, work], false);
         assert_eq!(multi.len(), 2);
         assert!(multi.iter().all(|p| p.compact));
         assert_eq!(multi[0].name, "Claude · Personnel");
@@ -3282,7 +3430,7 @@ mod tests {
     fn compact_window_serialises_the_same_multi_cards_as_the_menu() {
         let personal = fixture_account("Personnel", true, fixture_limits(27.0, 14.0, 210, 80));
         let work = fixture_account("Travail", true, fixture_limits(65.0, 80.0, 42, 49));
-        let providers = claude_account_panels(&[personal, work]);
+        let providers = claude_account_panels(&[personal, work], false);
         let model = PanelModel {
             header: panel_header(&providers, None),
             providers: providers.clone(),

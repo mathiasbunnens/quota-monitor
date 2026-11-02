@@ -7,7 +7,8 @@ import RefreshSettings from "../setup/RefreshSettings";
 import NtfySettings from "./NtfySettings";
 import ClaudeAccountsSettings from "./ClaudeAccountsSettings";
 import ResetCredits from "../quota/ResetCredits";
-import type { ClaudeAccount, ClaudeSnapshot, CodexStatus, DisplayMode, IndicatorChoice, Preferences } from "../quota/types";
+import type { ClaudeAccount, ClaudeLayout, ClaudeSnapshot, CodexStatus, DisplayMode, IndicatorChoice, Preferences } from "../quota/types";
+import { claudeLayoutOf } from "../quota/providers";
 import "../../pages/Dashboard/dashboard.scss";
 import "./settings.scss";
 
@@ -37,6 +38,12 @@ const indicatorOptions: { value: IndicatorChoice; label: string }[] = [
 const displayModeOptions: { value: DisplayMode; label: string }[] = [
   { value: "menubar", label: "Barre des menus" },
   { value: "app", label: "Application" },
+];
+
+// Deliberately not "Multi": the number of accounts is chosen in Fournisseurs.
+const claudeLayoutOptions: { value: ClaudeLayout; label: string }[] = [
+  { value: "compact", label: "Compacte" },
+  { value: "classic", label: "Classique" },
 ];
 
 const claudeStates: Record<ClaudeSnapshot["state"], [string, Tone, string]> = {
@@ -136,6 +143,7 @@ export default function Settings() {
   const [accountsError, setAccountsError] = useState<string | null>(null);
   const mutation = useRef(false);
   const [canChooseMode, setCanChooseMode] = useState(false);
+  const [accountActionError, setAccountActionError] = useState<string | null>(null);
   useFitWindow(root, [tab, prefs !== null].join());
   const reload = useCallback(() => setRevision((value) => value + 1), []);
 
@@ -182,12 +190,23 @@ export default function Settings() {
     catch (cause) { setError(String(cause)); return false; }
     finally { mutation.current = false; setBusy(false); }
   };
-  const addProfile = async (path: string) => {
+  // Explicit « Suivre un autre compte Claude »: the backend validates and
+  // deduplicates, then switches to Multi. Errors stay next to the action.
+  const accountAction = async (command: "add_claude_profile" | "follow_claude_profile", payload: Record<string, string>) => {
     if (mutation.current) return false;
-    mutation.current = true; setError(null); setBusy(true);
-    try { setPrefs(await invoke<Preferences>("add_claude_profile", { path })); reload(); return true; }
-    catch (cause) { setError(String(cause)); return false; }
+    mutation.current = true; setAccountActionError(null); setBusy(true);
+    try { setPrefs(await invoke<Preferences>(command, payload)); reload(); return true; }
+    catch (cause) { setAccountActionError(String(cause).replace(/^Error: /, "")); return false; }
     finally { mutation.current = false; setBusy(false); }
+  };
+  const addProfile = (path: string) => accountAction("add_claude_profile", { path });
+  const followProfile = (id: string) => accountAction("follow_claude_profile", { id });
+  const chooseFolder = async () => {
+    if (mutation.current) return null;
+    setAccountActionError(null); setBusy(true);
+    try { return await invoke<string | null>("choose_claude_profile_folder"); }
+    catch (cause) { setAccountActionError(String(cause).replace(/^Error: /, "")); return null; }
+    finally { setBusy(false); }
   };
   const relay = async (command: "install_claude_relay" | "uninstall_claude_relay") => {
     setError(null); setBusy(true);
@@ -212,6 +231,8 @@ export default function Settings() {
   const codexReady = status?.phase === "ready";
   const claudeReady = claude?.state === "ready";
   const extra = claude?.extraUsage;
+  const layout = claudeLayoutOf(prefs);
+  const visibleClaude = accounts.filter((account) => account.visible).length;
 
   return <main className="prefs" ref={root}>
     <nav role="tablist" aria-label="Catégories de réglages" className="prefs-toolbar">
@@ -270,7 +291,8 @@ export default function Settings() {
             <UsageLink label="Usage détaillé sur claude.ai" command="open_claude_usage" />
             <More label="Avancé" open={claudeMore} onToggle={() => setClaudeMore((v) => !v)} />
           </div>}
-          <ClaudeAccountsSettings prefs={prefs} accounts={accounts} busy={busy} onUpdate={update} onAdd={addProfile} />
+          <ClaudeAccountsSettings prefs={prefs} accounts={accounts} busy={busy} onUpdate={update} onAdd={addProfile}
+            onFollow={followProfile} onChooseFolder={canChooseMode ? chooseFolder : undefined} actionError={accountActionError} />
           {accountsError && <p className="prefs-state prefs-state--error" role="alert">{accountsError}</p>}
           {prefs.claudeEnabled && claudeMore && <div className="prefs-advanced">
               <p className="prefs-footnote">Lu via Claude Code (<code>claude auth login</code>), sans jeton ni requête de modèle.</p>
@@ -303,6 +325,21 @@ export default function Settings() {
           </div>
           <p>Quota restant sur la limite 5 heures.</p>
         </fieldset>}
+        {/* Presentation only: independent of Fournisseurs → Claude (Unique/Multi,
+            visibility). Saving it never triggers a quota read. */}
+        <fieldset className="prefs-group" disabled={busy}>
+          <legend className="prefs-group__legend">Présentation des comptes Claude</legend>
+          <div className="prefs-segmented" role="radiogroup" aria-label="Présentation de plusieurs comptes Claude">
+            {claudeLayoutOptions.map((option) => <label key={option.value} className={layout === option.value ? "is-selected" : ""}>
+              <input type="radio" name="claudeLayout" value={option.value} checked={layout === option.value}
+                onChange={() => void update({ claudeLayout: option.value })} />{option.label}
+            </label>)}
+          </div>
+          <p>{layout === "classic"
+            ? "Une section par compte, avec chaque limite, son pourcentage et sa réinitialisation."
+            : "Barres 5 heures et 7 jours jumelées pour chaque compte, avec le temps restant."}</p>
+          {visibleClaude <= 1 && <p className="prefs-footnote">Un seul compte Claude affiché : présentation habituelle. Ce choix s’appliquera dès que plusieurs comptes seront affichés (Fournisseurs → Claude).</p>}
+        </fieldset>
       </div>}
 
       {tab === "refresh" && <div role="tabpanel" id="panel-refresh" aria-labelledby="tab-refresh">

@@ -518,19 +518,25 @@ pub fn get_claude_accounts(app: tauri::AppHandle) -> Vec<AccountSnapshot> {
 }
 #[tauri::command]
 pub fn add_claude_profile(app: tauri::AppHandle, path: String) -> Result<prefs::Prefs, String> {
+    follow_profile(app, crate::claude_accounts::FollowTarget::Path(&path))
+}
+/// « Suivre un autre compte Claude » with a profile already detected.
+#[tauri::command]
+pub fn follow_claude_profile(app: tauri::AppHandle, id: String) -> Result<prefs::Prefs, String> {
+    follow_profile(app, crate::claude_accounts::FollowTarget::Detected(&id))
+}
+fn follow_profile(
+    app: tauri::AppHandle,
+    target: crate::claude_accounts::FollowTarget,
+) -> Result<prefs::Prefs, String> {
     let mut p = prefs::current(&app);
     let home = app
         .path()
         .home_dir()
         .map_err(|_| "Dossier utilisateur introuvable.")?;
     let config = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
-    let profile = crate::claude_accounts::manual_profile(
-        &home,
-        config.as_deref(),
-        &p.claude_accounts,
-        &path,
-    )?;
-    p.claude_accounts.profiles.push(profile);
+    p.claude_accounts =
+        crate::claude_accounts::follow(&home, config.as_deref(), &p.claude_accounts, target)?;
     prefs::set_preferences(app, p)
 }
 /// Legacy consumers and the tray indicator show one real account, never an

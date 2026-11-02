@@ -95,7 +95,7 @@ pub fn profile_path(raw: &str) -> Result<PathBuf, String> {
     }
     let p = p
         .canonicalize()
-        .map_err(|_| "Dossier de profil introuvable ou inaccessible.")?;
+        .map_err(|_| "Dossier de profil introuvable ou inaccessible : vérifiez le chemin ou utilisez « Choisir un dossier… ».")?;
     if !p.is_dir() {
         return Err("Le profil doit être un dossier.".into());
     }
@@ -118,18 +118,122 @@ pub fn manual_profile(
     {
         return Err("Ce profil Claude est déjà détecté ou configuré.".into());
     }
+    let base = path.file_name().unwrap_or_default().to_string_lossy();
+    let trimmed = base.trim_start_matches(".claude-");
     Ok(Profile {
         id,
         path: raw.to_string(),
-        name: path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
+        name: if trimmed.is_empty() { &base } else { trimmed }
             .chars()
             .take(64)
             .collect(),
         visible: true,
     })
+}
+
+/// What the user explicitly chose in « Suivre un autre compte Claude ».
+pub enum FollowTarget<'a> {
+    /// A profile already discovered (`~/.claude-*` or saved).
+    Detected(&'a str),
+    /// An existing folder chosen with the folder picker or typed (absolute).
+    Path(&'a str),
+}
+
+/// Explicit add flow: link an *existing* Claude Code profile folder (no login,
+/// no session or account created, no content read). Detected and chosen
+/// folders are deduplicated by canonical identity. The result switches to
+/// Multi with what was displayed before plus the followed profile visible.
+/// Background discovery never goes through here, so it never changes mode.
+pub fn follow(
+    home: &Path,
+    config: Option<&Path>,
+    prefs: &AccountPrefs,
+    target: FollowTarget,
+) -> Result<AccountPrefs, String> {
+    let found = discover(home, config, prefs);
+    let (id, added) = match target {
+        FollowTarget::Detected(id) => {
+            if !found.iter().any(|a| a.profile.id == id) {
+                return Err(
+                    "Ce profil Claude n’est plus détecté : actualisez la liste ou choisissez son dossier."
+                        .into(),
+                );
+            }
+            (id.to_string(), None)
+        }
+        FollowTarget::Path(raw) => {
+            let id = identity(&profile_path(raw)?);
+            if found.iter().any(|a| a.profile.id == id) {
+                (id, None)
+            } else {
+                let p = manual_profile(home, config, prefs, raw)?;
+                (p.id.clone(), Some(p))
+            }
+        }
+    };
+    if let Some(existing) = found.iter().find(|a| a.profile.id == id) {
+        if !existing.available {
+            return Err(format!(
+                "Le dossier de « {} » est indisponible : vérifiez qu’il existe encore.",
+                existing.profile.name
+            ));
+        }
+        if existing.visible {
+            return Err(format!(
+                "« {} » est déjà affiché. Choisissez un autre profil Claude Code.",
+                existing.profile.name
+            ));
+        }
+    }
+    let mut next = prefs.clone();
+    if !found.iter().any(|a| a.profile.id != id && a.available) {
+        // No other usable profile (e.g. no ~/.claude yet): this becomes the
+        // single displayed account instead of a Multi view with a ghost.
+        if let Some(profile) = added {
+            next.profiles.push(profile);
+        }
+        next.mode = "single".into();
+        next.selected_id = Some(id);
+        next.validate()?;
+        return Ok(next);
+    }
+    let was_single = next.mode != "multi";
+    next.mode = "multi".into();
+    let mut upsert = |profile: Profile| match next.profiles.iter_mut().find(|p| p.id == profile.id)
+    {
+        Some(saved) => saved.visible = profile.visible,
+        None => next.profiles.push(profile),
+    };
+    for a in &found {
+        if a.profile.id == id {
+            continue;
+        }
+        if a.visible {
+            // What was displayed stays displayed (the principal when going 1 → 2).
+            upsert(Profile {
+                visible: true,
+                ..a.profile.clone()
+            });
+        } else if was_single {
+            // Leaving Unique: other profiles stay hidden instead of defaulting.
+            upsert(Profile {
+                visible: false,
+                ..a.profile.clone()
+            });
+        }
+    }
+    match added {
+        Some(profile) => upsert(profile),
+        None => {
+            let a = found.iter().find(|a| a.profile.id == id).unwrap();
+            upsert(Profile {
+                visible: true,
+                ..a.profile.clone()
+            });
+        }
+    }
+    next.validate()?;
+    Ok(next)
 }
 
 pub fn discover(home: &Path, config: Option<&Path>, prefs: &AccountPrefs) -> Vec<Discovered> {
@@ -394,6 +498,163 @@ mod tests {
         assert!(!hidden[0].visible);
         p.claude_accounts.mode = "single".into();
         assert!(discover(&home, None, &p.claude_accounts)[0].visible);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+    fn visible_ids(home: &Path, prefs: &AccountPrefs) -> Vec<String> {
+        discover(home, None, prefs)
+            .into_iter()
+            .filter(|a| a.visible)
+            .map(|a| a.profile.id)
+            .collect()
+    }
+    #[test]
+    fn startup_discovery_never_changes_the_historical_mode() {
+        let home = root("startup");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        let prefs = AccountPrefs::default();
+        std::fs::create_dir_all(home.join(".claude-new")).unwrap();
+        let found = discover(&home, None, &prefs);
+        assert_eq!(found.len(), 2);
+        assert_eq!(prefs.mode, "single");
+        assert_eq!(
+            visible_ids(&home, &prefs),
+            vec![found[0].profile.id.clone()]
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+    #[test]
+    fn following_a_detected_second_profile_switches_to_multi_with_principal_and_new_visible() {
+        let home = root("follow-detected");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::create_dir_all(home.join(".claude-work")).unwrap();
+        let prefs = AccountPrefs::default();
+        let found = discover(&home, None, &prefs);
+        let (primary, work) = (found[0].profile.id.clone(), found[1].profile.id.clone());
+        let next = follow(&home, None, &prefs, FollowTarget::Detected(&work)).unwrap();
+        assert_eq!(next.mode, "multi");
+        assert_eq!(
+            visible_ids(&home, &next),
+            vec![primary.clone(), work.clone()]
+        );
+        // No artificial duplicate: one saved entry per identity.
+        assert_eq!(next.profiles.len(), 2);
+        assert_eq!(discover(&home, None, &next).len(), 2);
+        // Following it again is an actionable error, not a duplicate.
+        let again = follow(&home, None, &next, FollowTarget::Detected(&work)).unwrap_err();
+        assert!(again.contains("déjà affiché"), "{again}");
+        // Choosing the detected folder via the picker resolves to the same profile.
+        let via_path = follow(
+            &home,
+            None,
+            &prefs,
+            FollowTarget::Path(home.join(".claude-work").to_str().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(via_path, next);
+        assert!(follow(&home, None, &prefs, FollowTarget::Detected("profile:gone")).is_err());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+    #[test]
+    fn following_a_chosen_folder_keeps_its_raw_launch_path_and_rejects_aliases() {
+        let home = root("follow-path");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        let elsewhere = home.join("Elsewhere").join("claude-pro");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let raw = format!("{}/", elsewhere.to_str().unwrap());
+        let prefs = AccountPrefs::default();
+        let next = follow(&home, None, &prefs, FollowTarget::Path(&raw)).unwrap();
+        assert_eq!(next.mode, "multi");
+        let added = next.profiles.iter().find(|p| p.path == raw).unwrap();
+        assert_eq!(added.name, "claude-pro");
+        let found = discover(&home, None, &next);
+        assert!(found.iter().all(|a| a.visible));
+        let extra = found.iter().find(|a| !a.primary).unwrap();
+        assert_eq!(extra.launch.as_deref(), Some(Path::new(&raw)));
+        assert!(found.iter().find(|a| a.primary).unwrap().launch.is_none());
+        #[cfg(unix)]
+        {
+            let alias = home.join("alias");
+            std::os::unix::fs::symlink(&elsewhere, &alias).unwrap();
+            let err = follow(
+                &home,
+                None,
+                &next,
+                FollowTarget::Path(alias.to_str().unwrap()),
+            )
+            .unwrap_err();
+            assert!(err.contains("déjà affiché"), "{err}");
+        }
+        let missing = follow(
+            &home,
+            None,
+            &prefs,
+            FollowTarget::Path(home.join("missing").to_str().unwrap()),
+        )
+        .unwrap_err();
+        assert!(missing.contains("introuvable"), "{missing}");
+        assert!(follow(&home, None, &prefs, FollowTarget::Path("relative/dir")).is_err());
+        let primary = home.join(".claude");
+        let dup = follow(
+            &home,
+            None,
+            &prefs,
+            FollowTarget::Path(primary.to_str().unwrap()),
+        )
+        .unwrap_err();
+        assert!(dup.contains("déjà affiché"), "{dup}");
+        std::fs::remove_dir_all(home).unwrap();
+    }
+    #[test]
+    fn following_without_any_usable_profile_selects_it_in_unique() {
+        let home = root("follow-zero");
+        let extra = home.join("work");
+        std::fs::create_dir_all(&extra).unwrap();
+        let prefs = AccountPrefs::default();
+        let next = follow(
+            &home,
+            None,
+            &prefs,
+            FollowTarget::Path(extra.to_str().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(next.mode, "single");
+        let found = discover(&home, None, &next);
+        assert!(!found[0].available && !found[0].visible);
+        assert_eq!(
+            visible_ids(&home, &next),
+            vec![next.selected_id.clone().unwrap()]
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+    #[test]
+    fn following_from_unique_keeps_the_displayed_account_and_hides_the_others() {
+        let home = root("follow-unique");
+        for d in [".claude", ".claude-a", ".claude-b"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        let found = discover(&home, None, &AccountPrefs::default());
+        let ids: Vec<_> = found.iter().map(|a| a.profile.id.clone()).collect();
+        let prefs = AccountPrefs {
+            selected_id: Some(ids[1].clone()),
+            ..AccountPrefs::default()
+        };
+        let next = follow(&home, None, &prefs, FollowTarget::Detected(&ids[2])).unwrap();
+        assert_eq!(
+            visible_ids(&home, &next),
+            vec![ids[1].clone(), ids[2].clone()]
+        );
+        assert_eq!(next.selected_id, prefs.selected_id);
+        // Already Multi: other choices are left untouched.
+        let mut multi = next.clone();
+        multi
+            .profiles
+            .iter_mut()
+            .for_each(|p| p.visible = p.id == ids[1]);
+        let after = follow(&home, None, &multi, FollowTarget::Detected(&ids[0])).unwrap();
+        assert_eq!(
+            visible_ids(&home, &after),
+            vec![ids[0].clone(), ids[1].clone()]
+        );
         std::fs::remove_dir_all(home).unwrap();
     }
 }

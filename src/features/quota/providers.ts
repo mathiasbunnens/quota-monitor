@@ -1,4 +1,9 @@
-import type { ClaudeSnapshot, QuotaSnapshot } from "./types";
+import type { ClaudeLayout, ClaudeSnapshot, QuotaSnapshot } from "./types";
+
+/** Absent/unknown = compact (paired bars), matching the Rust normalisation. */
+export function claudeLayoutOf(prefs: { claudeLayout?: string } | null | undefined): ClaudeLayout {
+  return prefs?.claudeLayout === "classic" ? "classic" : "compact";
+}
 
 export function quotaPercentage(snapshot: QuotaSnapshot) {
   if (snapshot.limit <= 0) return 0;

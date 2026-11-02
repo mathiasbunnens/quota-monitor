@@ -108,7 +108,9 @@ test('settings discovers profiles, offers Unique/Multi and selects principal wit
   assert.match(html, /Multi/);
   assert.match(html, /Compte Claude affiché/);
   assert.match(html, /Travail/);
-  assert.match(html, /Chemin absolu/);
+  // Unique: detailed management folded, add action inside it.
+  assert.match(html, /<details class="prefs-disclosure"><summary>Gérer les comptes Claude \(2\)/);
+  assert.match(html, /Ajouter un compte Claude/);
 });
 test('dashboard multi mode shows every visible profile, independent of selected account', () => {
   const tree = component('../../pages/Dashboard/Dashboard.tsx', {}, [[], null, snapshot, { ...prefs, claudeAccounts: { ...prefs.claudeAccounts, mode: 'multi', selectedId: 'Travail' } }, false, null, null, null, false, 0, accounts]);
@@ -189,7 +191,7 @@ test('renaming a discovered profile does not copy single-view visibility into mu
 test('manual add rejects relative paths and forwards absolute paths literally', async () => {
   const added = [];
   for (const value of ['relative/profile', '/fixtures/Profile with spaces']) {
-    const tree = component('../settings/ClaudeAccountsSettings.tsx', settingsProps({ onAdd: async value => { added.push(value); return true; } }), [value, null]);
+    const tree = component('../settings/ClaudeAccountsSettings.tsx', settingsProps({ onAdd: async value => { added.push(value); return true; } }), [value, null, true]);
     await find(tree, node => node.props?.className === 'claude-accounts__add').props.onSubmit({ preventDefault() {} });
   }
   assert.deepEqual(added, ['/fixtures/Profile with spaces']);
@@ -295,4 +297,155 @@ test('settings discovery remains available with provider off and reports discove
   assert.ok(invokeCalls.some(call => call.command === 'get_claude_accounts'));
   assert.ok(stateChanges.some(change => String(change.value).includes('découvrir les comptes Claude')));
   delete global.window;
+});
+
+// ---- Comptes Claude plus clairs (Fournisseurs → Claude) -------------------
+const accountsUx = (props, states = []) => component('../settings/ClaudeAccountsSettings.tsx', settingsProps(props), states);
+const signedOut = { ...snapshot, state: 'error', errorKind: 'not_signed_in', planType: null, message: 'Profil non connecté : CLAUDE_CONFIG_DIR=/fixtures/x claude auth login.' };
+test('zero or one profile offers « Suivre un autre compte Claude » without waiting for a second one', () => {
+  for (const list of [[], [accounts[0]]]) {
+    const html = renderToStaticMarkup(accountsUx({ accounts: list }));
+    assert.match(html, /<button type="button" class="claude-accounts__cta" aria-expanded="false">Suivre un autre compte Claude<\/button>/);
+    assert.doesNotMatch(html, /claude-mode|Chemin absolu/);
+  }
+  // One profile: name, plan and state stay visible; management is folded.
+  const one = renderToStaticMarkup(accountsUx({ accounts: [accounts[0]] }));
+  assert.match(one, /<strong>Principal<\/strong><small> · Principal<\/small><span class="prefs-plan"> Pro<\/span>/);
+  assert.match(one, /prefs-pill--good">Connecté/);
+  assert.match(one, /<summary>Gérer le compte Claude<\/summary>/);
+});
+test('add flow explains an existing profile, lists detected profiles first, then folder chooser and advanced path', () => {
+  let followed = null;
+  const tree = accountsUx({ onFollow: async (id) => { followed = id; return true; }, onChooseFolder: async () => null }, ['', null, true]);
+  const html = renderToStaticMarkup(tree);
+  assert.match(html, /profil existant/);
+  assert.match(html, /aucun compte créé, aucune connexion/);
+  // Unique shows Principal: only Travail is a candidate (no artificial duplicate).
+  const list = html.slice(html.indexOf('Profils Claude détectés'), html.indexOf('</ul>', html.indexOf('Profils Claude détectés')));
+  assert.match(list, /aria-label="Suivre Travail"/);
+  assert.doesNotMatch(list, /Suivre Principal/);
+  const order = ['Profils détectés', 'Choisir un dossier…', 'Option avancée : chemin absolu'].map(text => html.indexOf(text));
+  assert.ok(order.every(i => i > 0) && order[0] < order[1] && order[1] < order[2], String(order));
+  find(tree, node => node.props?.['aria-label'] === 'Suivre Travail').props.onClick();
+  assert.equal(followed, 'Travail');
+});
+test('without a native chooser the absolute path stays reachable (advanced section open)', () => {
+  const html = renderToStaticMarkup(accountsUx({}, ['', null, true]));
+  assert.doesNotMatch(html, /Choisir un dossier/);
+  assert.match(html, /<details class="prefs-disclosure" open="">/);
+});
+test('chosen folder is forwarded literally; a cancelled chooser adds nothing', async () => {
+  for (const [picked, expected] of [['/Users/fixture/.claude-pro/', ['/Users/fixture/.claude-pro/']], [null, []]]) {
+    const added = [];
+    const tree = accountsUx({ onChooseFolder: async () => picked, onAdd: async value => { added.push(value); return true; } }, ['', null, true]);
+    await find(tree, node => node.type === 'button' && node.props?.children === 'Choisir un dossier…').props.onClick();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(added, expected);
+  }
+});
+test('add errors are actionable and shown inside the add panel; busy disables every action', () => {
+  const html = renderToStaticMarkup(accountsUx({ actionError: '« Travail » est déjà affiché. Choisissez un autre profil Claude Code.', onChooseFolder: async () => null }, ['', null, true]));
+  const panel = html.slice(html.indexOf('id="claude-accounts-add"'));
+  assert.match(panel, /role="alert"[^>]*>« Travail » est déjà affiché/);
+  const busy = renderToStaticMarkup(accountsUx({ busy: true, onFollow: async () => true, onChooseFolder: async () => null }, ['/x', null, true]));
+  assert.match(busy, /aria-busy="true"/);
+  for (const label of ['Suivre Travail']) assert.match(busy, new RegExp(`disabled=""[^>]*aria-label="${label}"`));
+  assert.match(busy, /<button type="button" disabled="">Choisir un dossier…/);
+  assert.match(busy, /<button type="submit" disabled="">Suivre ce dossier/);
+});
+test('Multi shows the list directly: editable name, plan, state and visibility switch, then « Ajouter un compte Claude »', () => {
+  const current = { ...prefs, claudeAccounts: { mode: 'multi', selectedId: null, profiles: [] } };
+  const list = [accounts[0], { ...accounts[1], snapshot: signedOut }, { ...account('Absent'), available: false }];
+  const html = renderToStaticMarkup(accountsUx({ prefs: current, accounts: list }));
+  assert.doesNotMatch(html, /<details/);
+  assert.equal((html.match(/role="switch"/g) || []).length, 3);
+  assert.match(html, /prefs-pill--good">Connecté/);
+  assert.match(html, /prefs-pill--warning">Non connecté/);
+  assert.match(html, /prefs-pill--neutral">Indisponible/);
+  assert.match(html, /claude auth login/);
+  assert.equal((html.match(/aria-label="Nom du compte /g) || []).length, 3);
+  assert.ok(html.indexOf('Ajouter un compte Claude') > html.lastIndexOf('role="switch"'));
+});
+test('settings follow/choose commands are explicit and their failures stay next to the add action', async () => {
+  invokeCalls = []; stateChanges = []; invokeFailure = null; invokeResult = prefs;
+  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, false, accounts, null, true]);
+  const controls = find(tree, node => node.type?.name === 'ClaudeAccountsSettings');
+  assert.equal(await controls.props.onFollow('Travail'), true);
+  assert.deepEqual(invokeCalls[0], { command: 'follow_claude_profile', payload: { id: 'Travail' } });
+  invokeResult = '/picked';
+  assert.equal(await controls.props.onChooseFolder(), '/picked');
+  assert.deepEqual(invokeCalls[1], { command: 'choose_claude_profile_folder', payload: undefined });
+  invokeFailure = new Error('« Travail » est déjà affiché.');
+  assert.equal(await controls.props.onFollow('Travail'), false);
+  assert.ok(stateChanges.some(change => change.index === 12 && String(change.value).includes('déjà affiché')));
+  // No chooser offered where the platform has none (path entry remains).
+  const linux = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, false, accounts, null, false]);
+  assert.equal(find(linux, node => node.type?.name === 'ClaudeAccountsSettings').props.onChooseFolder, undefined);
+  invokeFailure = null; invokeCalls = [];
+  assert.ok(!invokeCalls.some(call => /refresh|login/.test(call.command)));
+});
+
+// ---- Réglages → Affichage : Compacte | Classique --------------------------
+const display = (p, list = accounts) => component('../settings/Settings.tsx', {}, ['menubar', p, null, snapshot, null, false, 0, false, false, list, null, true]);
+test('Affichage offers Compacte | Classique (never named Multi); absent value = Compacte', () => {
+  const html = renderToStaticMarkup(display(prefs));
+  const group = html.slice(html.indexOf('Présentation des comptes Claude'));
+  assert.match(group, /aria-label="Présentation de plusieurs comptes Claude"/);
+  assert.match(group, /<label class="is-selected"><input type="radio" name="claudeLayout" checked="" value="compact"\/>Compacte<\/label>/);
+  assert.match(group, />Classique<\/label>/);
+  assert.doesNotMatch(group.slice(0, group.indexOf('</fieldset>')), /Multi/);
+  const classic = renderToStaticMarkup(display({ ...prefs, claudeLayout: 'classic' }));
+  assert.match(classic, /checked="" value="classic"\/>Classique/);
+  // Unknown value normalised like Rust.
+  assert.match(renderToStaticMarkup(display({ ...prefs, claudeLayout: 'multi' })), /checked="" value="compact"/);
+});
+test('with one visible account the preference is kept and its effect explained', () => {
+  const one = [accounts[0], { ...accounts[1], visible: false }];
+  const html = renderToStaticMarkup(display({ ...prefs, claudeLayout: 'classic' }, one));
+  assert.match(html, /checked="" value="classic"/);
+  assert.match(html, /Un seul compte Claude affiché : présentation habituelle/);
+  assert.doesNotMatch(renderToStaticMarkup(display(prefs, accounts)), /Un seul compte Claude affiché/);
+});
+test('changing the style saves only claudeLayout: no refresh, mode or visibility change', async () => {
+  invokeCalls = []; stateChanges = []; invokeFailure = null;
+  const current = { ...prefs, claudeAccounts: { mode: 'multi', selectedId: 'Travail', profiles: [{ id: 'Travail', path: '/fixtures/Travail', name: 'Travail', visible: false }] } };
+  invokeResult = { ...current, claudeLayout: 'classic' };
+  const tree = display(current);
+  find(tree, node => node.type === 'input' && node.props?.value === 'classic').props.onChange();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(invokeCalls.length, 1);
+  assert.deepEqual(invokeCalls[0], { command: 'set_preferences', payload: { prefs: { ...current, claudeLayout: 'classic' } } });
+  assert.deepEqual(invokeCalls[0].payload.prefs.claudeAccounts, current.claudeAccounts);
+});
+const dashState = (p, list) => [[], null, snapshot, p, false, null, null, null, false, 0, list];
+const metric = (id, used, label, resetAt) => ({ id: 'claude:' + id, label, usedPercent: used, resetAt, availability: 'available', periodDurationSeconds: id === 'five_hour' ? 18000 : 604800, exhausted: false });
+const withRows = (a, u5, u7) => ({ ...a, snapshot: { ...snapshot, metrics: [metric('five_hour', u5, 'Limite 5 heures', '2030-01-01T12:00:00Z'), metric('seven_day', u7, 'Limite hebdomadaire', '2030-01-04T12:00:00Z')] } });
+const pair = [withRows(accounts[0], 27, 14), withRows(accounts[1], 65, 80)];
+const multiPrefs = (layout) => ({ ...prefs, ...(layout ? { claudeLayout: layout } : {}), claudeAccounts: { ...prefs.claudeAccounts, mode: 'multi' } });
+test('Classique + several accounts: one section per account with separated rows, resets and plans, never aggregated', () => {
+  const html = renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, dashState(multiPrefs('classic'), pair)));
+  assert.doesNotMatch(html, /paired-bars|provider-card--compact|provider-grid--two/);
+  assert.match(html, /aria-label="Quotas Claude · Principal"/);
+  assert.match(html, /aria-label="Quotas Claude · Travail"/);
+  assert.equal((html.match(/role="progressbar"/g) || []).length, 4);
+  assert.equal((html.match(/provider-row__reset/g) || []).length, 4);
+  for (const value of ['73 %', '86 %', '35 %', '20 %']) assert.match(html, new RegExp(value));
+  assert.equal((html.match(/plan-badge">Pro/g) || []).length, 2);
+  assert.match(html, /Limite 5 heures[\s\S]*Limite hebdomadaire[\s\S]*Limite 5 heures[\s\S]*Limite hebdomadaire/);
+});
+test('Compacte (and absent value) keeps the paired multi cards', () => {
+  for (const layout of ['compact', undefined]) {
+    const html = renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, dashState(multiPrefs(layout), pair)));
+    assert.equal((html.match(/provider-card__paired-bars/g) || []).length, 2);
+    assert.equal((html.match(/provider-card__window--week/g) || []).length, 2);
+  }
+});
+test('one visible account renders exactly the historical card whatever the style; none visible keeps the empty message', () => {
+  const one = [pair[0], { ...pair[1], visible: false }];
+  const render = (layout, list, mode = 'multi') => renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, dashState({ ...multiPrefs(layout), claudeAccounts: { ...prefs.claudeAccounts, mode } }, list)));
+  assert.equal(render('classic', one), render('compact', one));
+  assert.equal(render('classic', one, 'single'), render('compact', one, 'single'));
+  assert.doesNotMatch(render('classic', one), /Claude · Principal|paired-bars/);
+  const none = pair.map(a => ({ ...a, visible: false }));
+  for (const layout of ['classic', 'compact']) assert.match(render(layout, none), /Aucun compte Claude visible/);
 });
