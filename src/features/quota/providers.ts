@@ -1,8 +1,32 @@
-import type { ClaudeLayout, ClaudeSnapshot, QuotaSnapshot } from "./types";
+import type { ClaudeAccount, ClaudeLayout, ClaudeSnapshot, Preferences, QuotaSnapshot } from "./types";
 
-/** Absent/unknown = compact (paired bars), matching the Rust normalisation. */
-export function claudeLayoutOf(prefs: { claudeLayout?: string } | null | undefined): ClaudeLayout {
-  return prefs?.claudeLayout === "classic" ? "classic" : "compact";
+/** Same rule as Rust `prefs::parse`: an explicit value wins (unknown =
+ *  compact); absent (older file) keeps that file's look — paired bars for a
+ *  previous Multi build, otherwise the historical card. */
+export function claudeLayoutOf(prefs: { claudeLayout?: string; claudeAccounts?: { mode?: string } } | null | undefined): ClaudeLayout {
+  if (prefs?.claudeLayout === undefined) return prefs?.claudeAccounts?.mode === "multi" ? "compact" : "classic";
+  return prefs.claudeLayout === "classic" ? "classic" : "compact";
+}
+
+export type ClaudeCard = { key: string; name: string; snapshot: ClaudeSnapshot | null; account: ClaudeAccount | null };
+/** Cards to draw and how, shared by every React view (mirrors the native
+ *  `claude_account_panels`). The layout applies to one or several cards;
+ *  only names/notes depend on the count. */
+export type ClaudePlan = { cards: ClaudeCard[]; paired: boolean; named: boolean; emptyMulti: boolean };
+
+export function claudePlan(prefs: Preferences | null, accounts: ClaudeAccount[], fallback: ClaudeSnapshot | null): ClaudePlan {
+  const paired = claudeLayoutOf(prefs) === "compact";
+  if (!prefs?.claudeEnabled) return { cards: [], paired, named: false, emptyMulti: false };
+  const multiMode = prefs.claudeAccounts?.mode === "multi";
+  const selected = accounts.find((account) => account.id === prefs.claudeAccounts?.selectedId)
+    ?? accounts.find((account) => account.primary) ?? accounts[0];
+  const shown = multiMode ? accounts.filter((account) => account.visible) : selected ? [selected] : [];
+  const named = shown.length > 1;
+  if (multiMode && !shown.length) return { cards: [], paired, named, emptyMulti: true };
+  const cards: ClaudeCard[] = shown.length
+    ? shown.map((account) => ({ key: account.id, name: named ? "Claude · " + account.name : "Claude", snapshot: account.snapshot, account }))
+    : [{ key: "claude", name: "Claude", snapshot: fallback, account: null }];
+  return { cards, paired, named, emptyMulti: false };
 }
 
 export function quotaPercentage(snapshot: QuotaSnapshot) {

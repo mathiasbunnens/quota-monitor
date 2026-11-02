@@ -30,7 +30,7 @@ for (const ext of ['.ts', '.tsx']) require.extensions[ext] = (module, filename) 
   }).outputText, filename);
 };
 require.extensions['.scss'] = () => {};
-function component(file, props, states = []) {
+function component(file, props, states = [], exportName = 'default') {
   let cursor = 0;
   effects = [];
   hooks = {
@@ -45,7 +45,7 @@ function component(file, props, states = []) {
   for (const cached of Object.keys(require.cache)) {
     if (cached.startsWith(path.resolve(__dirname, '../..') + path.sep) && !cached.endsWith('.test.cjs')) delete require.cache[cached];
   }
-  try { return require(file).default(props); } finally { hooks = null; }
+  try { return require(file)[exportName](props); } finally { hooks = null; }
 }
 const rows = ['five_hour', 'seven_day', 'seven_day_fable', 'extra_usage'].map((id, i) => ({ id, label: ['5 heures', '7 jours', 'Fable', 'Extra'][i], remaining: 80 - i * 10, exhausted: false, missing: '', resetText: 'lun. 2 nov. 12:00' }));
 test('multi-account compact card shows adjacent 5h and 7d bars with remaining text and reset tooltips', () => {
@@ -102,15 +102,17 @@ test('dashboard owns one local minute tick, cleans it up and never fetches on th
   delete global.window;
 });
 test('settings discovers profiles, offers Unique/Multi and selects principal without switching sessions', () => {
-  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, false, accounts]);
+  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, accounts]);
   const html = renderToStaticMarkup(tree);
-  assert.match(html, /Unique/);
+  assert.match(html, /name="claude-mode"[^>]*\/>Unique/);
   assert.match(html, /Multi/);
-  assert.match(html, /Compte Claude affiché/);
-  assert.match(html, /Travail/);
-  // Unique: detailed management folded, add action inside it.
-  assert.match(html, /<details class="prefs-disclosure"><summary>Gérer les comptes Claude \(2\)/);
-  assert.match(html, /Ajouter un compte Claude/);
+  // Unique: one flat list, the displayed account chosen inline (radio), no
+  // duplicated summary, select or nested disclosure.
+  assert.match(html, /<input(?=[^>]*name="claude-selected")(?=[^>]*aria-label="Afficher Principal")(?=[^>]*checked="")/);
+  assert.match(html, /aria-label="Afficher Travail"/);
+  assert.doesNotMatch(html, /<details|<select|Compte Claude affiché|Gérer les comptes/);
+  assert.equal((html.match(/class="claude-accounts__label">Travail</g) || []).length, 1);
+  assert.match(html, />Ajouter un compte<\/button>/);
 });
 test('dashboard multi mode shows every visible profile, independent of selected account', () => {
   const tree = component('../../pages/Dashboard/Dashboard.tsx', {}, [[], null, snapshot, { ...prefs, claudeAccounts: { ...prefs.claudeAccounts, mode: 'multi', selectedId: 'Travail' } }, false, null, null, null, false, 0, accounts]);
@@ -160,7 +162,7 @@ test('a sole remaining profile can be unhidden without showing the segmented con
 test('single selection only changes selectedId and preserves visibility and provider preferences', () => {
   let patch;
   const tree = component('../settings/ClaudeAccountsSettings.tsx', settingsProps({ onUpdate: async value => { patch = value; return true; } }));
-  find(tree, node => node.type === 'select').props.onChange({ target: { value: 'Travail' } });
+  find(tree, node => node.props?.['aria-label'] === 'Afficher Travail').props.onChange();
   assert.deepEqual(patch, { claudeAccounts: { ...prefs.claudeAccounts, selectedId: 'Travail' } });
 });
 test('multi visibility edit merges discovered metadata and preserves other profiles', () => {
@@ -177,14 +179,14 @@ test('renaming while provider is disabled preserves stored visibility', async ()
   const profile = { id: 'Travail', path: '/fixtures/Travail', name: 'Travail', visible: false };
   const current = { ...prefs, claudeEnabled: false, claudeAccounts: { ...prefs.claudeAccounts, profiles: [profile] } };
   const tree = component('../settings/ClaudeAccountsSettings.tsx', settingsProps({ prefs: current, accounts: [{ ...accounts[1], visible: false }], onUpdate: async value => { patch = value; return true; } }));
-  const rename = find(tree, node => node.type?.name === 'ProfileName');
+  const rename = find(tree, node => node.type?.name === 'AccountName');
   await rename.props.onSave('Professionnel');
   assert.deepEqual(patch.claudeAccounts.profiles, [{ ...profile, name: 'Professionnel' }]);
 });
 test('renaming a discovered profile does not copy single-view visibility into multi preferences', async () => {
   let patch;
   const tree = component('../settings/ClaudeAccountsSettings.tsx', settingsProps({ accounts: [accounts[1]], onUpdate: async value => { patch = value; return true; } }));
-  const rename = find(tree, node => node.type?.name === 'ProfileName');
+  const rename = find(tree, node => node.type?.name === 'AccountName');
   await rename.props.onSave('Secondaire');
   assert.equal(patch.claudeAccounts.profiles[0].visible, false);
 });
@@ -192,7 +194,8 @@ test('manual add rejects relative paths and forwards absolute paths literally', 
   const added = [];
   for (const value of ['relative/profile', '/fixtures/Profile with spaces']) {
     const tree = component('../settings/ClaudeAccountsSettings.tsx', settingsProps({ onAdd: async value => { added.push(value); return true; } }), [value, null, true]);
-    await find(tree, node => node.props?.className === 'claude-accounts__add').props.onSubmit({ preventDefault() {} });
+    await find(tree, node => node.props?.className === 'claude-accounts__manual').props.onSubmit({ preventDefault() {} });
+    await new Promise(resolve => setImmediate(resolve));
   }
   assert.deepEqual(added, ['/fixtures/Profile with spaces']);
 });
@@ -200,7 +203,7 @@ test('settings saves full preferences and accepts canonical add result without r
   invokeCalls = []; stateChanges = []; invokeFailure = null;
   const canonical = { ...prefs, claudeAccounts: { ...prefs.claudeAccounts, profiles: [{ id: 'canonical', path: '/canonical/path', name: 'Added', visible: true }] } };
   invokeResult = canonical;
-  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, false, accounts]);
+  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, accounts]);
   const controls = find(tree, node => node.type?.name === 'ClaudeAccountsSettings');
   assert.equal(await controls.props.onUpdate({ claudeAccounts: { ...prefs.claudeAccounts, selectedId: 'Travail' } }), true);
   assert.deepEqual(invokeCalls[0], { command: 'set_preferences', payload: { prefs: { ...prefs, claudeAccounts: { ...prefs.claudeAccounts, selectedId: 'Travail' } } } });
@@ -210,7 +213,7 @@ test('settings saves full preferences and accepts canonical add result without r
 });
 test('settings exposes failed manual add and does not report success', async () => {
   invokeCalls = []; stateChanges = []; invokeFailure = new Error('Dossier introuvable');
-  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, false, accounts]);
+  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, accounts]);
   const controls = find(tree, node => node.type?.name === 'ClaudeAccountsSettings');
   assert.equal(await controls.props.onAdd('/missing'), false);
   assert.ok(stateChanges.some(change => String(change.value).includes('Dossier introuvable')));
@@ -224,11 +227,13 @@ test('dashboard single mode uses selected profile even if hidden in multi mode',
   assert.match(html, /81 %/);
   assert.doesNotMatch(html, /Claude · Travail|paired-bars/);
 });
-test('one visible account keeps the exact v3.1.0 card, without an added extra-usage note', () => {
+test('a sole Compacte card pairs its bars without an added name or extra-usage note', () => {
   const extra = { ...accounts[0], snapshot: { ...snapshot, extraUsage: { enabled: true, limitReached: true } } };
-  const html = renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, [[], null, snapshot, prefs, false, null, null, null, false, 0, [extra]]));
-  assert.doesNotMatch(html, /Extra · plafond atteint|Usage supplémentaire/);
-  assert.doesNotMatch(html, /paired-bars/);
+  for (const layout of ['compact', 'classic']) {
+    const html = renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, [[], null, snapshot, { ...prefs, claudeLayout: layout }, false, null, null, null, false, 0, [extra]]));
+    assert.doesNotMatch(html, /Extra · plafond atteint|Usage supplémentaire|Claude · Principal/);
+    assert.equal(/paired-bars/.test(html), layout === 'compact');
+  }
 });
 test('multi account card still reports paid extra usage per account', () => {
   const extra = { ...accounts[1], snapshot: { ...snapshot, extraUsage: { enabled: true, limitReached: true } } };
@@ -260,12 +265,14 @@ test('Fable preference applies to every multi account card', () => {
   assert.equal((render(true).match(/Fable/g) || []).length >= 2, true);
   assert.doesNotMatch(render(false), /Fable/);
 });
-test('multi mode with one visible account keeps expanded legacy layout', () => {
+test('multi mode with one visible account follows the saved layout (Classique = expanded rows)', () => {
   const metric = { id: 'claude:five_hour', label: '5 h', usedPercent: 19, resetAt: null, availability: 'available', periodDurationSeconds: 18000, exhausted: false };
   const current = [{ ...accounts[0], snapshot: { ...snapshot, metrics: [metric] } }, { ...accounts[1], visible: false }];
-  const html = renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, [[], null, snapshot, { ...prefs, claudeAccounts: { ...prefs.claudeAccounts, mode: 'multi' } }, false, null, null, null, false, 0, current]));
-  assert.doesNotMatch(html, /paired-bars|Claude · Principal/);
-  assert.match(html, /81 %/);
+  const render = (claudeLayout) => renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, [[], null, snapshot, { ...prefs, claudeLayout, claudeAccounts: { ...prefs.claudeAccounts, mode: 'multi' } }, false, null, null, null, false, 0, current]));
+  assert.doesNotMatch(render('classic'), /paired-bars|Claude · Principal/);
+  assert.match(render('classic'), /81 %/);
+  assert.match(render('compact'), /paired-bars/);
+  assert.doesNotMatch(render('compact'), /Claude · Principal/);
 });
 test('dashboard hides only invisible multi profiles and never shows disabled Claude', () => {
   for (const enabled of [true, false]) {
@@ -289,7 +296,7 @@ test('multi accounts stack on narrow windows without changing legacy two-provide
 test('settings discovery remains available with provider off and reports discovery failure', async () => {
   invokeCalls = []; stateChanges = []; invokeFailure = new Error('Discovery fixture error');
   global.window = { setTimeout: () => 1, clearTimeout() {} };
-  component('../settings/Settings.tsx', {}, ['providers', { ...prefs, claudeEnabled: false }, null, null, null, false, 0, false, false, []]);
+  component('../settings/Settings.tsx', {}, ['providers', { ...prefs, claudeEnabled: false }, null, null, null, false, 0, false, []]);
   const cleanup = effects.find(effect => String(effect).includes('get_claude_accounts'))();
   await new Promise(resolve => setImmediate(resolve));
   cleanup();
@@ -299,119 +306,170 @@ test('settings discovery remains available with provider off and reports discove
   delete global.window;
 });
 
-// ---- Comptes Claude plus clairs (Fournisseurs → Claude) -------------------
+// ---- Fournisseurs → Claude : liste plate, ajout direct ---------------------
 const accountsUx = (props, states = []) => component('../settings/ClaudeAccountsSettings.tsx', settingsProps(props), states);
 const signedOut = { ...snapshot, state: 'error', errorKind: 'not_signed_in', planType: null, message: 'Profil non connecté : CLAUDE_CONFIG_DIR=/fixtures/x claude auth login.' };
-test('zero or one profile offers « Suivre un autre compte Claude » without waiting for a second one', () => {
+const addButton = (tree) => find(tree, node => node.props?.className === 'claude-accounts__add');
+test('zero or one profile: the Add action is there at once, no panel, prose or disclosure', () => {
   for (const list of [[], [accounts[0]]]) {
     const html = renderToStaticMarkup(accountsUx({ accounts: list }));
-    assert.match(html, /<button type="button" class="claude-accounts__cta" aria-expanded="false">Suivre un autre compte Claude<\/button>/);
-    assert.doesNotMatch(html, /claude-mode|Chemin absolu/);
+    assert.match(html, /class="claude-accounts__add"[^>]*>.*Ajouter un compte<\/button>/);
+    assert.doesNotMatch(html, /claude-mode|<details|Suivre un autre|profil existant|Chemin absolu|role="switch"/);
+    assert.doesNotMatch(html, /<p[ >]/);
   }
-  // One profile: name, plan and state stay visible; management is folded.
+  // One profile: name, plan and state in one compact row, rename by pencil.
   const one = renderToStaticMarkup(accountsUx({ accounts: [accounts[0]] }));
-  assert.match(one, /<strong>Principal<\/strong><small> · Principal<\/small><span class="prefs-plan"> Pro<\/span>/);
+  assert.match(one, /class="claude-accounts__label">Principal<\/strong><button[^>]*aria-label="Renommer Principal"/);
+  assert.match(one, /<small>Principal<\/small><span class="prefs-plan">Pro<\/span>/);
   assert.match(one, /prefs-pill--good">Connecté/);
-  assert.match(one, /<summary>Gérer le compte Claude<\/summary>/);
+  assert.doesNotMatch(one, /aria-label="Nom du compte/);
 });
-test('add flow explains an existing profile, lists detected profiles first, then folder chooser and advanced path', () => {
-  let followed = null;
-  const tree = accountsUx({ onFollow: async (id) => { followed = id; return true; }, onChooseFolder: async () => null }, ['', null, true]);
-  const html = renderToStaticMarkup(tree);
-  assert.match(html, /profil existant/);
-  assert.match(html, /aucun compte créé, aucune connexion/);
-  // Unique shows Principal: only Travail is a candidate (no artificial duplicate).
-  const list = html.slice(html.indexOf('Profils Claude détectés'), html.indexOf('</ul>', html.indexOf('Profils Claude détectés')));
-  assert.match(list, /aria-label="Suivre Travail"/);
-  assert.doesNotMatch(list, /Suivre Principal/);
-  const order = ['Profils détectés', 'Choisir un dossier…', 'Option avancée : chemin absolu'].map(text => html.indexOf(text));
-  assert.ok(order.every(i => i > 0) && order[0] < order[1] && order[1] < order[2], String(order));
-  find(tree, node => node.props?.['aria-label'] === 'Suivre Travail').props.onClick();
-  assert.equal(followed, 'Travail');
-});
-test('without a native chooser the absolute path stays reachable (advanced section open)', () => {
-  const html = renderToStaticMarkup(accountsUx({}, ['', null, true]));
-  assert.doesNotMatch(html, /Choisir un dossier/);
-  assert.match(html, /<details class="prefs-disclosure" open="">/);
-});
-test('chosen folder is forwarded literally; a cancelled chooser adds nothing', async () => {
+test('« Ajouter » opens the folder chooser directly and forwards the chosen path literally', async () => {
   for (const [picked, expected] of [['/Users/fixture/.claude-pro/', ['/Users/fixture/.claude-pro/']], [null, []]]) {
     const added = [];
-    const tree = accountsUx({ onChooseFolder: async () => picked, onAdd: async value => { added.push(value); return true; } }, ['', null, true]);
-    await find(tree, node => node.type === 'button' && node.props?.children === 'Choisir un dossier…').props.onClick();
+    const tree = accountsUx({ onChooseFolder: async () => picked, onAdd: async value => { added.push(value); return true; } });
+    await addButton(tree).props.onClick();
     await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(added, expected);
   }
 });
-test('add errors are actionable and shown inside the add panel; busy disables every action', () => {
-  const html = renderToStaticMarkup(accountsUx({ actionError: '« Travail » est déjà affiché. Choisissez un autre profil Claude Code.', onChooseFolder: async () => null }, ['', null, true]));
-  const panel = html.slice(html.indexOf('id="claude-accounts-add"'));
-  assert.match(panel, /role="alert"[^>]*>« Travail » est déjà affiché/);
-  const busy = renderToStaticMarkup(accountsUx({ busy: true, onFollow: async () => true, onChooseFolder: async () => null }, ['/x', null, true]));
-  assert.match(busy, /aria-busy="true"/);
-  for (const label of ['Suivre Travail']) assert.match(busy, new RegExp(`disabled=""[^>]*aria-label="${label}"`));
-  assert.match(busy, /<button type="button" disabled="">Choisir un dossier…/);
-  assert.match(busy, /<button type="submit" disabled="">Suivre ce dossier/);
+test('without a native chooser « Ajouter » opens the single secondary area with the path field', async () => {
+  stateChanges = [];
+  global.window = { requestAnimationFrame: () => 0 };
+  const tree = accountsUx({});
+  await addButton(tree).props.onClick();
+  assert.ok(stateChanges.some(change => change.index === 2 && change.value === true));
+  delete global.window;
+  const open = renderToStaticMarkup(accountsUx({}, ['', null, true]));
+  assert.match(open, /aria-label="Chemin absolu d’un profil Claude Code"/);
+  assert.match(open, /<code>\/fixtures\/Travail<\/code>/);
+  assert.doesNotMatch(open, /<details/);
 });
-test('Multi shows the list directly: editable name, plan, state and visibility switch, then « Ajouter un compte Claude »', () => {
+test('add errors stay concise next to the action; busy disables add/rename, switches keep focus', () => {
+  const html = renderToStaticMarkup(accountsUx({ actionError: '« Travail » est déjà affiché. Choisissez un autre profil Claude Code.', onChooseFolder: async () => null }));
+  assert.match(html, /role="alert"[^>]*>« Travail » est déjà affiché/);
+  const current = { ...prefs, claudeAccounts: { mode: 'multi', selectedId: null, profiles: [] } };
+  const busy = renderToStaticMarkup(accountsUx({ prefs: current, busy: true, onChooseFolder: async () => null }, ['/x', null, true]));
+  assert.match(busy, /aria-busy="true"/);
+  assert.match(busy, /class="claude-accounts__add" disabled=""/);
+  assert.match(busy, /disabled=""[^>]*aria-label="Renommer Travail"/);
+  // Switches/radios stay enabled so keyboard focus survives a save; the
+  // Settings `mutation` guard serialises writes instead.
+  assert.doesNotMatch(busy, /disabled=""[^>]*aria-label="Afficher Travail"|aria-label="Afficher Travail"[^>]*disabled=""/);
+  assert.match(busy, /<button type="submit" disabled="">Ajouter/);
+});
+test('Multi: one flat list (name, plan, state, info, visibility switch), then the Add action', () => {
   const current = { ...prefs, claudeAccounts: { mode: 'multi', selectedId: null, profiles: [] } };
   const list = [accounts[0], { ...accounts[1], snapshot: signedOut }, { ...account('Absent'), available: false }];
   const html = renderToStaticMarkup(accountsUx({ prefs: current, accounts: list }));
-  assert.doesNotMatch(html, /<details/);
+  assert.doesNotMatch(html, /<details|<form|<p[ >]/);
   assert.equal((html.match(/role="switch"/g) || []).length, 3);
   assert.match(html, /prefs-pill--good">Connecté/);
-  assert.match(html, /prefs-pill--warning">Non connecté/);
-  assert.match(html, /prefs-pill--neutral">Indisponible/);
-  assert.match(html, /claude auth login/);
-  assert.equal((html.match(/aria-label="Nom du compte /g) || []).length, 3);
-  assert.ok(html.indexOf('Ajouter un compte Claude') > html.lastIndexOf('role="switch"'));
+  assert.match(html, /prefs-pill--warning" title="[^"]*claude auth login[^"]*">Non connecté/);
+  assert.match(html, /prefs-pill--neutral" title="[^"]*">Indisponible/);
+  assert.equal((html.match(/aria-label="Renommer /g) || []).length, 3);
+  assert.equal((html.match(/aria-label="Détail /g) || []).length, 2);
+  assert.ok(html.indexOf('Ajouter un compte') > html.lastIndexOf('role="switch"'));
+  // Info opens the actionable detail inline (one level, no sub-panel).
+  const open = renderToStaticMarkup(accountsUx({ prefs: current, accounts: list }, ['', null, false, 'Travail']));
+  assert.match(open, /aria-expanded="true"[^>]*><svg[\s\S]*<p id="claude-detail-Travail" class="claude-accounts__detail">Profil non connecté : CLAUDE_CONFIG_DIR=\/fixtures\/x claude auth login\.<\/p>/);
 });
-test('settings follow/choose commands are explicit and their failures stay next to the add action', async () => {
+test('inline rename: pencil swaps in a field, Enter saves the trimmed name, Escape cancels', async () => {
+  global.window = { requestAnimationFrame: () => 0 };
+  const saved = [];
+  const props = { account: accounts[1], disabled: false, onSave: async name => { saved.push(name); return true; } };
+  const render = (states) => component('../settings/ClaudeAccountsSettings.tsx', props, states, 'AccountName');
+  stateChanges = [];
+  find(render([]), node => node.props?.['aria-label'] === 'Renommer Travail').props.onClick();
+  assert.deepEqual(stateChanges.at(-1), { index: 0, value: 'Travail' });
+  const field = find(render(['  Professionnel  ']), node => node.type === 'input');
+  assert.equal(field.props.autoFocus, true);
+  assert.equal(field.props['aria-label'], 'Nom du compte Travail');
+  field.props.onKeyDown({ key: 'Enter', preventDefault() {}, stopPropagation() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(saved, ['Professionnel']);
+  assert.deepEqual(stateChanges.at(-1), { index: 0, value: null });
+  stateChanges = [];
+  find(render(['Autre']), node => node.type === 'input').props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(saved, ['Professionnel']);
+  assert.deepEqual(stateChanges, [{ index: 0, value: null }]);
+  delete global.window;
+});
+test('settings add/choose commands are explicit and their failures stay next to the Add action', async () => {
   invokeCalls = []; stateChanges = []; invokeFailure = null; invokeResult = prefs;
-  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, false, accounts, null, true]);
+  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, accounts, null, true]);
   const controls = find(tree, node => node.type?.name === 'ClaudeAccountsSettings');
-  assert.equal(await controls.props.onFollow('Travail'), true);
-  assert.deepEqual(invokeCalls[0], { command: 'follow_claude_profile', payload: { id: 'Travail' } });
+  assert.equal(controls.props.onFollow, undefined);
   invokeResult = '/picked';
   assert.equal(await controls.props.onChooseFolder(), '/picked');
-  assert.deepEqual(invokeCalls[1], { command: 'choose_claude_profile_folder', payload: undefined });
+  assert.deepEqual(invokeCalls[0], { command: 'choose_claude_profile_folder', payload: undefined });
   invokeFailure = new Error('« Travail » est déjà affiché.');
-  assert.equal(await controls.props.onFollow('Travail'), false);
-  assert.ok(stateChanges.some(change => change.index === 12 && String(change.value).includes('déjà affiché')));
+  assert.equal(await controls.props.onAdd('/picked'), false);
+  assert.deepEqual(invokeCalls[1], { command: 'add_claude_profile', payload: { path: '/picked' } });
+  assert.ok(stateChanges.some(change => change.index === 11 && String(change.value).includes('déjà affiché')));
   // No chooser offered where the platform has none (path entry remains).
-  const linux = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, false, accounts, null, false]);
+  const linux = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, accounts, null, false]);
   assert.equal(find(linux, node => node.type?.name === 'ClaudeAccountsSettings').props.onChooseFolder, undefined);
-  invokeFailure = null; invokeCalls = [];
-  assert.ok(!invokeCalls.some(call => /refresh|login/.test(call.command)));
+  // Fable, usage link and the technical actions stay reachable.
+  const html = renderToStaticMarkup(tree);
+  assert.match(html, /Quota Fable/);
+  assert.match(html, /Usage détaillé sur claude\.ai/);
+  assert.ok(controls.props.advanced, 'refresh/relay actions live in the single secondary area');
+  invokeFailure = null;
+  assert.ok(!invokeCalls.some(call => /refresh|login|follow/.test(call.command)));
 });
 
-// ---- Réglages → Affichage : Compacte | Classique --------------------------
-const display = (p, list = accounts) => component('../settings/Settings.tsx', {}, ['menubar', p, null, snapshot, null, false, 0, false, false, list, null, true]);
-test('Affichage offers Compacte | Classique (never named Multi); absent value = Compacte', () => {
-  const html = renderToStaticMarkup(display(prefs));
-  const group = html.slice(html.indexOf('Présentation des comptes Claude'));
-  assert.match(group, /aria-label="Présentation de plusieurs comptes Claude"/);
-  assert.match(group, /<label class="is-selected"><input type="radio" name="claudeLayout" checked="" value="compact"\/>Compacte<\/label>/);
-  assert.match(group, />Classique<\/label>/);
-  assert.doesNotMatch(group.slice(0, group.indexOf('</fieldset>')), /Multi/);
-  const classic = renderToStaticMarkup(display({ ...prefs, claudeLayout: 'classic' }));
-  assert.match(classic, /checked="" value="classic"\/>Classique/);
-  // Unknown value normalised like Rust.
-  assert.match(renderToStaticMarkup(display({ ...prefs, claudeLayout: 'multi' })), /checked="" value="compact"/);
+// ---- Réglages → Affichage : choix visuels -----------------------------------
+const display = (p, list = accounts) => component('../settings/Settings.tsx', {}, ['menubar', p, null, snapshot, null, false, 0, false, list, null, true]);
+const group = (html, label) => { const start = html.lastIndexOf("<div", html.indexOf(`aria-label="${label}"`)); return html.slice(start, html.indexOf('</fieldset>', start)); };
+test('Affichage: every choice is a labelled radio with a pictogram, and no explanatory paragraph', () => {
+  const html = renderToStaticMarkup(display({ ...prefs, claudeLayout: 'compact' }));
+  const panel = html.slice(html.indexOf('id="panel-menubar"'));
+  assert.doesNotMatch(panel, /<p[ >]|Un seul compte|habituel|plusieurs comptes seront/);
+  for (const [label, names] of [['Mode d’affichage', ['Barre des menus', 'Application']], ['Indicateur de la barre des menus (quota 5 heures)', ['Codex', 'Claude', 'Les deux']], ['Présentation des comptes Claude', ['Compacte', 'Classique']]]) {
+    const part = group(html, label);
+    assert.match(part, /role="radiogroup"/, label);
+    for (const name of names) assert.match(part, new RegExp(`<input type="radio"[^>]*/><span class="prefs-choices__icon" aria-hidden="true"><svg[^>]*>[\\s\\S]*?</svg></span><span>${name}</span>`), name);
+  }
+  // Presentation: two different schematics, without any figure.
+  const presentation = group(html, 'Présentation des comptes Claude');
+  const svgs = presentation.match(/<svg[\s\S]*?<\/svg>/g);
+  assert.equal(svgs.length, 2);
+  assert.notEqual(svgs[0], svgs[1]);
+  assert.doesNotMatch(presentation, /%|\d+ ?h\b|<text/);
+  assert.match(presentation, /<label class="is-selected"><input type="radio" name="claudeLayout" checked="" value="compact"/);
+  assert.doesNotMatch(presentation, /Multi/);
+  // Application mode: the menu-bar indicator has no effect and is not shown.
+  assert.doesNotMatch(renderToStaticMarkup(display({ ...prefs, displayMode: 'app' })), /Indicateur de la barre des menus/);
 });
-test('with one visible account the preference is kept and its effect explained', () => {
+test('Classique/Compacte selection reflects the saved choice for one or several accounts, absent = migrated value', () => {
   const one = [accounts[0], { ...accounts[1], visible: false }];
-  const html = renderToStaticMarkup(display({ ...prefs, claudeLayout: 'classic' }, one));
-  assert.match(html, /checked="" value="classic"/);
-  assert.match(html, /Un seul compte Claude affiché : présentation habituelle/);
-  assert.doesNotMatch(renderToStaticMarkup(display(prefs, accounts)), /Un seul compte Claude affiché/);
+  for (const list of [accounts, one, [accounts[0]], []]) {
+    for (const layout of ['compact', 'classic']) {
+      assert.match(group(renderToStaticMarkup(display({ ...prefs, claudeLayout: layout }, list)), 'Présentation des comptes Claude'), new RegExp(`checked="" value="${layout}"`));
+    }
+  }
+  // Unknown value normalised like Rust; absent follows the same migration.
+  assert.match(renderToStaticMarkup(display({ ...prefs, claudeLayout: 'multi' })), /checked="" value="compact"/);
+  assert.match(renderToStaticMarkup(display(prefs)), /checked="" value="classic"/);
+  assert.match(renderToStaticMarkup(display({ ...prefs, claudeAccounts: { ...prefs.claudeAccounts, mode: 'multi' } })), /checked="" value="compact"/);
+});
+test('claudeLayoutOf mirrors the Rust migration: explicit choice wins over the account mode', () => {
+  const { claudeLayoutOf } = require('./providers.ts');
+  assert.equal(claudeLayoutOf(null), 'classic');
+  assert.equal(claudeLayoutOf({ claudeAccounts: { mode: 'single' } }), 'classic');
+  assert.equal(claudeLayoutOf({ claudeAccounts: { mode: 'multi' } }), 'compact');
+  assert.equal(claudeLayoutOf({ claudeLayout: 'compact', claudeAccounts: { mode: 'single' } }), 'compact');
+  assert.equal(claudeLayoutOf({ claudeLayout: 'classic', claudeAccounts: { mode: 'multi' } }), 'classic');
+  assert.equal(claudeLayoutOf({ claudeLayout: 'other' }), 'compact');
 });
 test('changing the style saves only claudeLayout: no refresh, mode or visibility change', async () => {
   invokeCalls = []; stateChanges = []; invokeFailure = null;
   const current = { ...prefs, claudeAccounts: { mode: 'multi', selectedId: 'Travail', profiles: [{ id: 'Travail', path: '/fixtures/Travail', name: 'Travail', visible: false }] } };
   invokeResult = { ...current, claudeLayout: 'classic' };
   const tree = display(current);
-  find(tree, node => node.type === 'input' && node.props?.value === 'classic').props.onChange();
+  find(tree, node => node.type?.name === 'Choices' && node.props?.name === 'claudeLayout').props.onChange('classic');
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(invokeCalls.length, 1);
   assert.deepEqual(invokeCalls[0], { command: 'set_preferences', payload: { prefs: { ...current, claudeLayout: 'classic' } } });
@@ -433,19 +491,35 @@ test('Classique + several accounts: one section per account with separated rows,
   assert.equal((html.match(/plan-badge">Pro/g) || []).length, 2);
   assert.match(html, /Limite 5 heures[\s\S]*Limite hebdomadaire[\s\S]*Limite 5 heures[\s\S]*Limite hebdomadaire/);
 });
-test('Compacte (and absent value) keeps the paired multi cards', () => {
+test('Compacte keeps the paired multi cards (absent value from a previous Multi build too)', () => {
   for (const layout of ['compact', undefined]) {
     const html = renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, dashState(multiPrefs(layout), pair)));
     assert.equal((html.match(/provider-card__paired-bars/g) || []).length, 2);
     assert.equal((html.match(/provider-card__window--week/g) || []).length, 2);
   }
 });
-test('one visible account renders exactly the historical card whatever the style; none visible keeps the empty message', () => {
+test('the saved layout changes a sole card too (Unique, Multi with one visible); none visible keeps the empty message', () => {
   const one = [pair[0], { ...pair[1], visible: false }];
   const render = (layout, list, mode = 'multi') => renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, dashState({ ...multiPrefs(layout), claudeAccounts: { ...prefs.claudeAccounts, mode } }, list)));
-  assert.equal(render('classic', one), render('compact', one));
-  assert.equal(render('classic', one, 'single'), render('compact', one, 'single'));
-  assert.doesNotMatch(render('classic', one), /Claude · Principal|paired-bars/);
+  for (const [list, mode] of [[one, 'multi'], [one, 'single'], [[pair[0]], 'single']]) {
+    const compact = render('compact', list, mode);
+    const classic = render('classic', list, mode);
+    assert.notEqual(compact, classic, mode);
+    assert.equal((compact.match(/provider-card__paired-bars/g) || []).length, 1);
+    assert.match(compact, /provider-card__window--week/);
+    assert.doesNotMatch(classic, /paired-bars/);
+    assert.equal((classic.match(/provider-row__reset/g) || []).length, 2);
+    for (const html of [compact, classic]) {
+      assert.doesNotMatch(html, /Claude · Principal/);
+      assert.match(html, /aria-label="Quotas Claude"/);
+      assert.match(html, /73 %/);
+      assert.match(html, /86 %/);
+    }
+  }
   const none = pair.map(a => ({ ...a, visible: false }));
-  for (const layout of ['classic', 'compact']) assert.match(render(layout, none), /Aucun compte Claude visible/);
+  for (const layout of ['classic', 'compact']) {
+    const html = render(layout, none);
+    assert.match(html, /Aucun compte Claude visible/);
+    assert.doesNotMatch(html, /role="progressbar"|%/);
+  }
 });

@@ -1019,10 +1019,11 @@ fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
     }
 }
 
-/// `classic`: Réglages → Affichage « Classique ». Several visible accounts then
-/// get one section each with the historical separated rows (5 h, hebdo, Fable,
-/// resets, percentages) instead of paired bars. Never an aggregate. One
-/// visible account keeps the exact v3.1.0 card whatever the preference.
+/// `classic`: Réglages → Affichage « Classique » = the historical separated
+/// rows (5 h, hebdo, Fable, resets, percentages); otherwise « Compacte » pairs
+/// the 5 h / 7 j bars. The choice applies to one or several visible accounts
+/// (Unique, Multi, one visible or more). Never an aggregate. A sole card keeps
+/// the plain "Claude" name and no added note.
 #[cfg(target_os = "macos")]
 fn claude_account_panels(
     accounts: &[claude::AccountSnapshot],
@@ -1034,11 +1035,10 @@ fn claude_account_panels(
         .into_iter()
         .map(|a| {
             let mut panel = claude_panel(&a.snapshot);
+            panel.compact = !classic;
             if !several {
-                // One visible account: the exact v3.1.0 Claude card.
                 return panel;
             }
-            panel.compact = !classic;
             panel.name = format!("Claude · {}", a.profile.name);
             if let Some(extra) = &a.snapshot.extra_usage {
                 if extra.enabled {
@@ -1349,7 +1349,7 @@ struct PanelModel {
 fn panel_model(app: &tauri::AppHandle) -> PanelModel {
     let snapshots = get_quota_snapshots(app.clone());
     let prefs = prefs::current(app);
-    // Every visible Claude profile; one visible = the historic v3.1.0 card.
+    // Every visible Claude profile, drawn with the saved Compacte/Classique choice.
     let accounts: Vec<_> = claude::accounts(app)
         .into_iter()
         .filter(|a| a.profile.visible && claude_is_visible(&a.snapshot))
@@ -2282,7 +2282,7 @@ pub fn quota_ui_smoke(directory: &str) {
         "single-account",
         claude_account_panels(&[personal.clone()], false),
     ));
-    // Classique saved but one visible account: still the exact historical card.
+    // Classique, one account: the exact historical card.
     scenarios.push((
         "single-account-classic",
         claude_account_panels(&[personal.clone()], true),
@@ -2428,9 +2428,12 @@ pub fn quota_ui_smoke(directory: &str) {
                 let heights: Vec<f64> = found.iter().map(|r| r.size.height).collect();
                 let unique_claude = vec![PANEL_TRACK_HEIGHT; 4];
                 match name {
-                    "single-account" | "single-account-classic" => {
-                        assert_eq!(heights, unique_claude)
-                    }
+                    "single-account-classic" => assert_eq!(heights, unique_claude),
+                    // Compacte, one account: one paired 5 h / 7 j block.
+                    "single-account" => assert_eq!(
+                        heights,
+                        vec![PANEL_TRACK_HEIGHT, PANEL_TRACK_HEIGHT, 3.0, 3.0]
+                    ),
                     // Classique: two separated Unique rows per account, no 3 pt track.
                     "multi-accounts-classic" => {
                         assert_eq!(heights, vec![PANEL_TRACK_HEIGHT; 8])
@@ -3321,31 +3324,37 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn one_visible_account_keeps_the_exact_v310_claude_card() {
+    fn layout_choice_applies_to_a_single_visible_account() {
+        // Unique (one profile) and Multi with one visible: the saved
+        // Compacte/Classique choice always wins over the account count.
         let personal = fixture_account("Personnel", true, fixture_limits(27.0, 14.0, 210, 80));
         let hidden = fixture_account("Travail", false, fixture_limits(65.0, 80.0, 42, 49));
-        let panels = claude_account_panels(&[personal.clone(), hidden.clone()], false);
-        assert_eq!(panels.len(), 1);
-        // Classique saved: still the exact historical card.
-        assert_eq!(
-            claude_account_panels(&[personal.clone(), hidden], true),
-            panels
-        );
-        // Historic presentation: same provider as v3.1.0 claude_panel, no
-        // account name, no compact pairing, no extra-usage note added.
-        assert_eq!(panels[0], claude_panel(&personal.snapshot));
-        assert_eq!(panels[0].name, "Claude");
-        assert!(!panels[0].compact);
-        assert_eq!(panels[0].note, None);
-        assert!(claude_account_panels(
-            &[fixture_account(
-                "Personnel",
-                false,
-                fixture_limits(1.0, 1.0, 5, 5)
-            )],
-            false
-        )
-        .is_empty());
+        for accounts in [
+            vec![personal.clone()],
+            vec![personal.clone(), hidden.clone()],
+        ] {
+            let compact = claude_account_panels(&accounts, false);
+            let classic = claude_account_panels(&accounts, true);
+            assert_eq!((compact.len(), classic.len()), (1, 1));
+            // Classique: exactly the historical v3.1.0 card.
+            assert_eq!(classic[0], claude_panel(&personal.snapshot));
+            assert!(!classic[0].compact);
+            // Compacte: paired 5 h / 7 j bars, same rows and values; a sole
+            // card gets no account name and no added note.
+            assert!(
+                compact[0].compact,
+                "Compacte must pair a sole account's bars"
+            );
+            assert_eq!(compact[0].name, "Claude");
+            assert_eq!(compact[0].rows, classic[0].rows);
+            assert_eq!(compact[0].note, None);
+            assert!(card_height(&compact[0]) < card_height(&classic[0]));
+        }
+        // Nothing visible: nothing rendered and nothing invented.
+        for classic in [false, true] {
+            assert!(claude_account_panels(&[hidden.clone()], classic).is_empty());
+            assert!(claude_account_panels(&[], classic).is_empty());
+        }
     }
 
     #[cfg(target_os = "macos")]

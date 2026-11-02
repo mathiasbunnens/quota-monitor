@@ -27,7 +27,7 @@ export type CodexStatus = {
 
 export type IndicatorChoice = "codex" | "claude" | "both";
 export type DisplayMode = "menubar" | "app";
-/** Presentation of several visible Claude accounts (Réglages → Affichage). */
+/** Presentation of the visible Claude account(s), one or several (Réglages → Affichage). */
 export type ClaudeLayout = "compact" | "classic";
 export type NtfyConfig = { enabled: boolean; serverUrl: string; topic: string };
 export type ClaudeProfile = { id: string; path: string; name: string; visible: boolean };
@@ -50,7 +50,7 @@ export type Preferences = {
   indicator: IndicatorChoice;
   displayMode: DisplayMode;
   ntfy: NtfyConfig;
-  /** Absent in older files: treated as "compact". */
+  /** Absent in older files: see `claudeLayoutOf` (same migration as Rust). */
   claudeLayout?: ClaudeLayout;
 };
 

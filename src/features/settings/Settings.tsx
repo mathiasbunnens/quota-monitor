@@ -29,22 +29,66 @@ const tabs = [
 ] as const;
 type TabId = (typeof tabs)[number]["id"];
 
-const indicatorOptions: { value: IndicatorChoice; label: string }[] = [
-  { value: "codex", label: "Codex" },
-  { value: "claude", label: "Claude" },
-  { value: "both", label: "Les deux" },
+const glyph = { fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round", strokeLinejoin: "round" } as const;
+const soft = { fill: "currentColor", opacity: 0.22 } as const;
+const solid = { fill: "currentColor" } as const;
+// Provider glyphs (monochrome, currentColor): Codex is a terminal agent,
+// Claude a radiating mark. No new colour, no emoji.
+const codexGlyph = <g {...glyph}><rect x="1.5" y="2.5" width="13" height="11" rx="2.5" /><path d="m4.5 6 2 2-2 2M8.5 10.5H11" /></g>;
+const claudeGlyph = <g {...glyph}><path d="M8 2v12M2 8h12M3.8 3.8l8.4 8.4M12.2 3.8l-8.4 8.4" /></g>;
+
+type Choice<T> = { value: T; label: string; icon: ReactNode; title?: string };
+
+const indicatorOptions: Choice<IndicatorChoice>[] = [
+  { value: "codex", label: "Codex", icon: <svg viewBox="0 0 16 16">{codexGlyph}</svg> },
+  { value: "claude", label: "Claude", icon: <svg viewBox="0 0 16 16">{claudeGlyph}</svg> },
+  { value: "both", label: "Les deux", icon: <svg viewBox="0 0 34 16">{codexGlyph}<g transform="translate(18 0)">{claudeGlyph}</g></svg> },
 ];
 
-const displayModeOptions: { value: DisplayMode; label: string }[] = [
-  { value: "menubar", label: "Barre des menus" },
-  { value: "app", label: "Application" },
+// Schematic pictograms (48 × 32): what the option puts on screen, no figures.
+const displayModeOptions: Choice<DisplayMode>[] = [
+  { value: "menubar", label: "Barre des menus", icon: <svg viewBox="0 0 48 32">
+    <rect x="2" y="3" width="44" height="6" rx="1.5" {...soft} /><circle cx="38" cy="6" r="1.8" {...solid} />
+    <g {...glyph}><rect x="27" y="11.5" width="17" height="17" rx="2.5" /><path d="M30.5 16.5h10M30.5 20.5h7M30.5 24.5h9" /></g>
+  </svg> },
+  { value: "app", label: "Application", icon: <svg viewBox="0 0 48 32">
+    <g {...glyph}><rect x="9" y="2.5" width="30" height="19" rx="2.5" /><path d="M9 7.5h30M14 12.5h16M14 16.5h11" /></g>
+    <rect x="8" y="25" width="32" height="5" rx="2.5" {...soft} /><rect x="21.5" y="26" width="5" height="3" rx="1" {...solid} />
+  </svg> },
 ];
 
-// Deliberately not "Multi": the number of accounts is chosen in Fournisseurs.
-const claudeLayoutOptions: { value: ClaudeLayout; label: string }[] = [
-  { value: "compact", label: "Compacte" },
-  { value: "classic", label: "Classique" },
+// Compacte: 5 h and 7 j bars stacked tight. Classique: separated rows, each
+// with its label, value and reset line.
+const claudeLayoutOptions: Choice<ClaudeLayout>[] = [
+  { value: "compact", label: "Compacte", icon: <svg viewBox="0 0 48 32">
+    <path d="M6 9h14M34 9h8" {...glyph} />
+    <rect x="6" y="14" width="36" height="4" rx="2" {...soft} /><rect x="6" y="14" width="25" height="4" rx="2" {...solid} />
+    <rect x="6" y="19.5" width="36" height="2" rx="1" {...soft} /><rect x="6" y="19.5" width="31" height="2" rx="1" {...solid} />
+  </svg> },
+  { value: "classic", label: "Classique", icon: <svg viewBox="0 0 48 32">
+    <path d="M6 3.5h12M36 3.5h6M6 22.5h12M36 22.5h6" {...glyph} />
+    <rect x="6" y="7" width="36" height="3" rx="1.5" {...soft} /><rect x="6" y="7" width="25" height="3" rx="1.5" {...solid} />
+    <path d="M6 14h20" {...glyph} opacity="0.45" />
+    <rect x="6" y="26" width="36" height="3" rx="1.5" {...soft} /><rect x="6" y="26" width="31" height="3" rx="1.5" {...solid} />
+  </svg> },
 ];
+
+/** Radio group drawn as the existing segmented control, with an icon per
+ *  option (`tiles`: pictogram above the label). Native radios keep arrow keys. */
+function Choices<T extends string>({ legend, label, name, options, value, tiles = false, onChange }: {
+  legend: string; label: string; name: string; options: Choice<T>[]; value: T; tiles?: boolean; onChange: (value: T) => void;
+}) {
+  return <>
+    <legend className="prefs-group__legend">{legend}</legend>
+    <div className={"prefs-segmented prefs-choices" + (tiles ? " prefs-choices--tiles" : "")} role="radiogroup" aria-label={label}>
+      {options.map((option) => <label key={option.value} className={value === option.value ? "is-selected" : ""} title={option.title}>
+        <input type="radio" name={name} value={option.value} checked={value === option.value} onChange={() => onChange(option.value)} />
+        <span className="prefs-choices__icon" aria-hidden="true">{option.icon}</span>
+        <span>{option.label}</span>
+      </label>)}
+    </div>
+  </>;
+}
 
 const claudeStates: Record<ClaudeSnapshot["state"], [string, Tone, string]> = {
   disabled: ["Désactivé", "neutral", "Désactivé : aucune lecture."],
@@ -138,7 +182,6 @@ export default function Settings() {
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const root = useRef<HTMLElement>(null);
   const [codexMore, setCodexMore] = useState(false);
-  const [claudeMore, setClaudeMore] = useState(false);
   const [accounts, setAccounts] = useState<ClaudeAccount[]>([]);
   const [accountsError, setAccountsError] = useState<string | null>(null);
   const mutation = useRef(false);
@@ -190,17 +233,15 @@ export default function Settings() {
     catch (cause) { setError(String(cause)); return false; }
     finally { mutation.current = false; setBusy(false); }
   };
-  // Explicit « Suivre un autre compte Claude »: the backend validates and
+  // Explicit add (folder chooser or absolute path): the backend validates and
   // deduplicates, then switches to Multi. Errors stay next to the action.
-  const accountAction = async (command: "add_claude_profile" | "follow_claude_profile", payload: Record<string, string>) => {
+  const addProfile = async (path: string) => {
     if (mutation.current) return false;
     mutation.current = true; setAccountActionError(null); setBusy(true);
-    try { setPrefs(await invoke<Preferences>(command, payload)); reload(); return true; }
+    try { setPrefs(await invoke<Preferences>("add_claude_profile", { path })); reload(); return true; }
     catch (cause) { setAccountActionError(String(cause).replace(/^Error: /, "")); return false; }
     finally { mutation.current = false; setBusy(false); }
   };
-  const addProfile = (path: string) => accountAction("add_claude_profile", { path });
-  const followProfile = (id: string) => accountAction("follow_claude_profile", { id });
   const chooseFolder = async () => {
     if (mutation.current) return null;
     setAccountActionError(null); setBusy(true);
@@ -232,7 +273,6 @@ export default function Settings() {
   const claudeReady = claude?.state === "ready";
   const extra = claude?.extraUsage;
   const layout = claudeLayoutOf(prefs);
-  const visibleClaude = accounts.filter((account) => account.visible).length;
 
   return <main className="prefs" ref={root}>
     <nav role="tablist" aria-label="Catégories de réglages" className="prefs-toolbar">
@@ -271,7 +311,7 @@ export default function Settings() {
 
         <section className="prefs-group" aria-labelledby="claude-heading">
           <header className="prefs-group__head">
-            <div><h2 id="claude-heading">Claude</h2>{claude?.planType && prefs.claudeEnabled && <span className="prefs-plan">{claude.planType}</span>}</div>
+            <div><h2 id="claude-heading">Claude</h2>{claude?.planType && prefs.claudeEnabled && !accounts.length && <span className="prefs-plan">{claude.planType}</span>}</div>
             {prefs.claudeEnabled && extra?.enabled && <button type="button" className="reset-chip"
               onClick={() => void invoke("open_claude_usage").catch(() => undefined)}
               title="Usage supplémentaire payant activé" aria-label="Usage supplémentaire Claude">
@@ -289,56 +329,34 @@ export default function Settings() {
           </div>
           {prefs.claudeEnabled && <div className="prefs-links">
             <UsageLink label="Usage détaillé sur claude.ai" command="open_claude_usage" />
-            <More label="Avancé" open={claudeMore} onToggle={() => setClaudeMore((v) => !v)} />
           </div>}
           <ClaudeAccountsSettings prefs={prefs} accounts={accounts} busy={busy} onUpdate={update} onAdd={addProfile}
-            onFollow={followProfile} onChooseFolder={canChooseMode ? chooseFolder : undefined} actionError={accountActionError} />
-          {accountsError && <p className="prefs-state prefs-state--error" role="alert">{accountsError}</p>}
-          {prefs.claudeEnabled && claudeMore && <div className="prefs-advanced">
+            onChooseFolder={canChooseMode ? chooseFolder : undefined} actionError={accountActionError}
+            advanced={<>
               <p className="prefs-footnote">Lu via Claude Code (<code>claude auth login</code>), sans jeton ni requête de modèle.</p>
               <div className="prefs-actions">
-                <button type="button" disabled={busy} onClick={() => void invoke("request_claude_refresh").then(reload)}>Actualiser</button>
+                {prefs.claudeEnabled && <button type="button" disabled={busy} onClick={() => void invoke("request_claude_refresh").then(reload)}>Actualiser</button>}
                 <button type="button" className="prefs-link" disabled={busy} onClick={() => void relay("uninstall_claude_relay")}>Retirer l’ancien relais</button>
               </div>
-          </div>}
+            </>} />
+          {accountsError && <p className="prefs-state prefs-state--error" role="alert">{accountsError}</p>}
         </section>
       </div>}
 
       {tab === "menubar" && <div role="tabpanel" id="panel-menubar" aria-labelledby="tab-menubar">
-        {canChooseMode && <fieldset className="prefs-group" disabled={busy}>
-          <legend className="prefs-group__legend">Mode d’affichage</legend>
-          <div className="prefs-segmented" role="radiogroup" aria-label="Mode d’affichage">
-            {displayModeOptions.map((option) => <label key={option.value} className={prefs.displayMode === option.value ? "is-selected" : ""}>
-              <input type="radio" name="displayMode" value={option.value} checked={prefs.displayMode === option.value}
-                onChange={() => void update({ displayMode: option.value })} />{option.label}
-            </label>)}
-          </div>
-          <p>{prefs.displayMode === "app" ? "Icône dans le Dock, sans icône dans la barre des menus." : "Icône dans la barre des menus, sans icône dans le Dock."}</p>
+        {canChooseMode && <fieldset className="prefs-group" aria-busy={busy || undefined}>
+          <Choices legend="Mode d’affichage" label="Mode d’affichage" name="displayMode" tiles options={displayModeOptions}
+            value={prefs.displayMode} onChange={(displayMode) => void update({ displayMode })} />
         </fieldset>}
-        {(!canChooseMode || prefs.displayMode !== "app") && <fieldset className="prefs-group" disabled={busy}>
-          <legend className="prefs-group__legend">Afficher dans la barre des menus</legend>
-          <div className="prefs-segmented" role="radiogroup" aria-label="Indicateur de la barre des menus">
-            {indicatorOptions.map((option) => <label key={option.value} className={prefs.indicator === option.value ? "is-selected" : ""}>
-              <input type="radio" name="indicator" value={option.value} checked={prefs.indicator === option.value}
-                onChange={() => void update({ indicator: option.value })} />{option.label}
-            </label>)}
-          </div>
-          <p>Quota restant sur la limite 5 heures.</p>
+        {(!canChooseMode || prefs.displayMode !== "app") && <fieldset className="prefs-group" aria-busy={busy || undefined}>
+          <Choices legend="Afficher dans la barre des menus" label="Indicateur de la barre des menus (quota 5 heures)" name="indicator"
+            options={indicatorOptions} value={prefs.indicator} onChange={(indicator) => void update({ indicator })} />
         </fieldset>}
-        {/* Presentation only: independent of Fournisseurs → Claude (Unique/Multi,
-            visibility). Saving it never triggers a quota read. */}
-        <fieldset className="prefs-group" disabled={busy}>
-          <legend className="prefs-group__legend">Présentation des comptes Claude</legend>
-          <div className="prefs-segmented" role="radiogroup" aria-label="Présentation de plusieurs comptes Claude">
-            {claudeLayoutOptions.map((option) => <label key={option.value} className={layout === option.value ? "is-selected" : ""}>
-              <input type="radio" name="claudeLayout" value={option.value} checked={layout === option.value}
-                onChange={() => void update({ claudeLayout: option.value })} />{option.label}
-            </label>)}
-          </div>
-          <p>{layout === "classic"
-            ? "Une section par compte, avec chaque limite, son pourcentage et sa réinitialisation."
-            : "Barres 5 heures et 7 jours jumelées pour chaque compte, avec le temps restant."}</p>
-          {visibleClaude <= 1 && <p className="prefs-footnote">Un seul compte Claude affiché : présentation habituelle. Ce choix s’appliquera dès que plusieurs comptes seront affichés (Fournisseurs → Claude).</p>}
+        {/* Presentation only, for one or several Claude accounts: independent of
+            Fournisseurs → Claude (Unique/Multi, visibility). Never a quota read. */}
+        <fieldset className="prefs-group" aria-busy={busy || undefined}>
+          <Choices legend="Présentation Claude" label="Présentation des comptes Claude" name="claudeLayout" tiles
+            options={claudeLayoutOptions} value={layout} onChange={(claudeLayout) => void update({ claudeLayout })} />
         </fieldset>
       </div>}
 

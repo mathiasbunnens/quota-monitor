@@ -48,9 +48,9 @@ export async function invoke(command, payload) {
  case 'get_claude_snapshot':return accounts().find(a=>a.visible)?.snapshot||profiles[0].snapshot;
  case 'get_quota_snapshots':return prefs.codexEnabled?[{model:'codex',remaining:63,limit:100,period:'five-hour',resetAt:'2030-01-01T12:00:00Z',checkedAt:'2026-10-31T10:00:00Z',source:'codex',confidence:'high'}]:[];
  case 'get_codex_status':return {phase:'ready',message:'',planType:'plus',refreshSettings:{customSeconds:null},refreshSeconds:60,availableResets:null};
- case 'add_claude_profile':throw new Error('Fixture: dossier inexistant');
+ case 'add_claude_profile':if(payload.path!=='/fixtures/.claude-work')throw new Error('Fixture: dossier inexistant');prefs={...prefs,claudeAccounts:{...prefs.claudeAccounts,mode:'multi',profiles:profiles.map(({id,path,name})=>({id,path,name,visible:true}))}};emit();return structuredClone(prefs);
  case 'follow_claude_profile':if(scenario==='add-error')throw new Error('« Travail » est déjà affiché. Choisissez un autre profil Claude Code.');prefs={...prefs,claudeAccounts:{...prefs.claudeAccounts,mode:'multi',profiles:profiles.map(({id,path,name})=>({id,path,name,visible:true}))}};emit();return structuredClone(prefs);
- case 'choose_claude_profile_folder':return null;
+ case 'choose_claude_profile_folder':return query.get('pick')||null;
  case 'fit_settings_window': case 'request_claude_refresh': case 'request_quota_refresh': return null;
  default: throw new Error('Blocked external action in fixture: '+command);
  }

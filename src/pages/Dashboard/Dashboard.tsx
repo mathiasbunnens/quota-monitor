@@ -4,7 +4,7 @@ import ResetCredits from "../../features/quota/ResetCredits";
 import ProviderCard from "../../features/quota/ProviderCard";
 import { useCallback, useEffect, useState } from "react";
 import CodexConnection from "../../features/setup/CodexConnection";
-import { claudeLayoutOf, claudeRows, claudeStatusText, codexRows } from "../../features/quota/providers";
+import { claudePlan, claudeRows, claudeStatusText, codexRows } from "../../features/quota/providers";
 import type { ClaudeAccount, ClaudeSnapshot, CodexStatus, Preferences, QuotaSnapshot } from "../../features/quota/types";
 import "./dashboard.scss";
 
@@ -72,15 +72,9 @@ export default function Dashboard() {
 
   const codexOn = prefs?.codexEnabled ?? true;
   const claudeOn = !!prefs?.claudeEnabled;
-  const multiMode = prefs?.claudeAccounts?.mode === "multi";
-  const selected = accounts.find((account) => account.id === prefs?.claudeAccounts?.selectedId)
-    ?? accounts.find((account) => account.primary) ?? accounts[0];
-  const shownAccounts = multiMode ? accounts.filter((account) => account.visible) : selected ? [selected] : [];
-  const multi = shownAccounts.length > 1;
-  // Réglages → Affichage: style of several visible accounts only. One visible
-  // account keeps the v3.1.0 card whatever is saved.
-  const classic = claudeLayoutOf(prefs) === "classic";
-  const singleSnapshot = multiMode ? shownAccounts[0]?.snapshot : selected?.snapshot ?? claude;
+  // Shared with the native menu/compact window: the saved Compacte/Classique
+  // choice applies to one or several cards; only names/notes follow the count.
+  const plan = claudePlan(prefs, accounts, claude);
   const fableEnabled = prefs?.fableEnabled ?? true;
 
   const refresh = async () => {
@@ -121,23 +115,21 @@ export default function Dashboard() {
     </header>
     {error && <p role="alert">{error}</p>}
     {none && <p className="dashboard__source" role="status">Aucun fournisseur actif. Active Codex ou Claude dans les Réglages.</p>}
-    {/* Classique: full-width stacked sections, one per account, like the menu. */}
-    <div className={"provider-grid" + (classic && claudeOn && multi ? ""
-      : (both || (claudeOn && multi) ? " provider-grid--two" : "") + (claudeOn && multi ? " provider-grid--accounts" : ""))}>
+    {/* Classique with several accounts: full-width stacked sections, like the menu. */}
+    <div className={"provider-grid" + (plan.named && !plan.paired ? ""
+      : (both || plan.named ? " provider-grid--two" : "") + (plan.named ? " provider-grid--accounts" : ""))}>
       {codexOn && <ProviderCard name="Codex" badge={status?.planType} rows={codexRows(snapshots)} compact={both}
         status={codexStatus} error={codexFailure}
         empty={status?.phase === "ready" ? "Aucun quota à afficher. La réserve peut ne pas être communiquée par Codex." : "Quotas indisponibles."} />}
-      {claudeOn && multi && shownAccounts.map((account) => <ProviderCard key={account.id} name={"Claude · " + account.name}
-        badge={account.snapshot.planType} rows={claudeRows(account.snapshot, fableEnabled)}
-        compact={!classic} accountCompact={!classic} now={now}
-        status={!account.available ? "Dossier indisponible." : account.refreshing ? "Actualisation…" : claudeStatusText(account.snapshot)}
+      {plan.cards.map(({ key, name, snapshot, account }) => <ProviderCard key={key} name={name}
+        badge={plan.named ? snapshot?.planType : undefined} rows={snapshot ? claudeRows(snapshot, fableEnabled) : []}
+        compact={plan.paired || (!plan.named && both)} accountCompact={plan.paired} now={now}
+        status={plan.named && account ? (!account.available ? "Dossier indisponible." : account.refreshing ? "Actualisation…" : claudeStatusText(account.snapshot))
+          : snapshot ? claudeStatusText(snapshot) : "Lecture…"}
         error={claudeError} empty="Aucune limite communiquée par Claude Code.">
-        {account.snapshot.extraUsage?.enabled && <p className="provider-card__note">{account.snapshot.extraUsage.limitReached ? "Extra · plafond atteint" : "Usage supplémentaire activé"}</p>}
+        {plan.named && snapshot?.extraUsage?.enabled && <p className="provider-card__note">{snapshot.extraUsage.limitReached ? "Extra · plafond atteint" : "Usage supplémentaire activé"}</p>}
       </ProviderCard>)}
-      {claudeOn && multiMode && !shownAccounts.length && <p className="provider-card__note" role="status">Aucun compte Claude visible. Choisissez les comptes dans les Réglages.</p>}
-      {/* One visible account: the v3.1.0 Claude card, unchanged. */}
-      {claudeOn && !multi && (!multiMode || shownAccounts.length > 0) && <ProviderCard name="Claude" rows={singleSnapshot ? claudeRows(singleSnapshot, fableEnabled) : []} compact={both}
-        status={singleSnapshot ? claudeStatusText(singleSnapshot) : "Lecture…"} error={claudeError} empty="Aucune limite communiquée par Claude Code." />}
+      {plan.emptyMulti && <p className="provider-card__note" role="status">Aucun compte Claude visible. Choisissez les comptes dans les Réglages.</p>}
     </div>
     {codexOn && <ResetCredits status={status} onChange={reload} />}
     <footer className="dashboard__footer">

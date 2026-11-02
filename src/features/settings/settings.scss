@@ -92,6 +92,21 @@ html:has(.prefs), html:has(.prefs) body { background: var(--desktop-bg); }
   label:has(input:focus-visible) { outline: 2px solid var(--desktop-accent); outline-offset: 1px; }
 }
 
+// Segmented choices with an icon; `--tiles` puts a schematic pictogram above
+// the label. Same track, selected card and focus ring as .prefs-segmented.
+.prefs-choices {
+  label { display: inline-flex; align-items: center; gap: 6px; }
+  label.is-selected .prefs-choices__icon { color: var(--desktop-accent); }
+  &__icon { display: inline-flex; color: var(--desktop-muted); transition: color 120ms ease;
+    svg { display: block; height: 14px; width: auto; }
+  }
+  &--tiles {
+    gap: 2px;
+    label { flex-direction: column; gap: 4px; min-width: 104px; padding: 8px 12px 6px; }
+    .prefs-choices__icon svg { width: 48px; height: 32px; }
+  }
+}
+
 .prefs-disclosure {
   margin-top: 8px;
   summary { cursor: pointer; font-size: 12px; color: var(--desktop-accent); }
@@ -118,7 +133,7 @@ html:has(.prefs), html:has(.prefs) body { background: var(--desktop-bg); }
 .prefs .settings-row { display: flex; justify-content: space-between; gap: 12px; strong { text-transform: capitalize; color: var(--desktop-ink); } }
 
 @media (prefers-reduced-motion: reduce) {
-  .prefs-toolbar button[role="tab"], .prefs-switch span, .prefs-switch span::after, .prefs-segmented label { transition: none; }
+  .prefs-toolbar button[role="tab"], .prefs-switch span, .prefs-switch span::after, .prefs-segmented label, .prefs-choices__icon { transition: none; }
 }
 
 // Reset credits as a compact chip in the provider header: icon + remaining count.

@@ -7,11 +7,21 @@ use tauri::Manager;
 
 pub const INDICATORS: [&str; 3] = ["codex", "claude", "both"];
 
-/// Presentation of several visible Claude accounts (Réglages → Affichage).
-/// Independent of the account mode/visibility; one visible account always
-/// keeps the historical card. Absent/unknown = "compact" (paired bars).
+/// Presentation of the visible Claude account(s) (Réglages → Affichage),
+/// applied whatever the number of accounts and independent of their mode or
+/// visibility. Unknown = "compact". Absent (older file): the look that file
+/// already had — paired bars for a previous Multi build, otherwise the
+/// historical v3.1.0 card ("classic").
 pub const CLAUDE_LAYOUT_COMPACT: &str = "compact";
 pub const CLAUDE_LAYOUT_CLASSIC: &str = "classic";
+
+fn legacy_claude_layout(accounts: &crate::claude_accounts::AccountPrefs) -> &'static str {
+    if accounts.mode == "multi" {
+        CLAUDE_LAYOUT_COMPACT
+    } else {
+        CLAUDE_LAYOUT_CLASSIC
+    }
+}
 
 pub fn normalize_claude_layout(value: &str) -> &'static str {
     if value == CLAUDE_LAYOUT_CLASSIC {
@@ -33,8 +43,8 @@ pub struct Prefs {
     pub display_mode: String,
     pub ntfy: crate::ntfy::Config,
     pub claude_accounts: crate::claude_accounts::AccountPrefs,
-    /// "compact" (default: paired 5 h/7 j bars) or "classic" (one section per
-    /// account with the historical separated rows). Display only.
+    /// "compact" (paired 5 h/7 j bars) or "classic" (historical separated
+    /// rows), for one or several accounts. Display only.
     pub claude_layout: String,
 }
 
@@ -48,7 +58,7 @@ impl Default for Prefs {
             display_mode: crate::display_mode::MENUBAR.into(),
             ntfy: crate::ntfy::Config::default(),
             claude_accounts: crate::claude_accounts::AccountPrefs::default(),
-            claude_layout: CLAUDE_LAYOUT_COMPACT.into(),
+            claude_layout: CLAUDE_LAYOUT_CLASSIC.into(),
         }
     }
 }
@@ -75,14 +85,23 @@ fn path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 pub fn parse(bytes: &[u8]) -> Prefs {
-    serde_json::from_slice::<Prefs>(bytes)
+    let Ok(raw) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Prefs::default();
+    };
+    serde_json::from_value::<Prefs>(raw.clone())
         .ok()
         .filter(Prefs::valid)
         .map(|mut prefs| {
             // Unknown/absent mode (older file) keeps the menu-bar behaviour
             // without discarding the rest of the preferences.
             prefs.display_mode = crate::display_mode::normalize(&prefs.display_mode).into();
-            prefs.claude_layout = normalize_claude_layout(&prefs.claude_layout).into();
+            // Explicit migration: an older file keeps its look; once saved,
+            // the explicit choice wins over the account mode/count.
+            prefs.claude_layout = if raw.get("claudeLayout").is_some() {
+                normalize_claude_layout(&prefs.claude_layout).into()
+            } else {
+                legacy_claude_layout(&prefs.claude_accounts).into()
+            };
             prefs
         })
         .unwrap_or_default()
@@ -258,7 +277,31 @@ mod tests {
     }
     #[test]
     fn claude_layout_migrates_normalises_and_persists_independently() {
-        // Absent (v3.1.0 / previous multi build): compact, everything else kept.
+        // v3.1.0 file (no key, no accounts) or no file: historical look = Classique.
+        let v310 = parse(br#"{"codexEnabled":true,"claudeEnabled":true,"fableEnabled":false,"indicator":"both","displayMode":"app"}"#);
+        assert_eq!(v310.claude_layout, "classic");
+        assert!(
+            v310.claude_enabled
+                && !v310.fable_enabled
+                && v310.indicator == "both"
+                && v310.display_mode == "app"
+        );
+        assert_eq!(Prefs::default().claude_layout, "classic");
+        let single = parse(br#"{"claudeEnabled":true,"claudeAccounts":{"mode":"single","selectedId":null,"profiles":[]}}"#);
+        assert_eq!(single.claude_layout, "classic");
+        // Migrated value is written as its own key and survives a round trip.
+        assert_eq!(
+            serde_json::to_value(&v310).unwrap()["claudeLayout"],
+            "classic"
+        );
+        assert_eq!(parse(&serde_json::to_vec(&v310).unwrap()), v310);
+        // An explicit choice wins over the account mode, both ways.
+        let explicit = parse(br#"{"claudeLayout":"compact","claudeAccounts":{"mode":"single","selectedId":null,"profiles":[]}}"#);
+        assert_eq!(explicit.claude_layout, "compact");
+        assert_eq!(parse(&serde_json::to_vec(&explicit).unwrap()), explicit);
+        let explicit = parse(br#"{"claudeLayout":"classic","claudeAccounts":{"mode":"multi","selectedId":null,"profiles":[]}}"#);
+        assert!(explicit.classic_claude_layout());
+        // Previous multi build without the key: its paired bars = Compacte.
         let old = parse(br#"{"claudeEnabled":true,"indicator":"both","displayMode":"app","claudeAccounts":{"mode":"multi","selectedId":null,"profiles":[]}}"#);
         assert_eq!(old.claude_layout, "compact");
         assert!(!old.classic_claude_layout());

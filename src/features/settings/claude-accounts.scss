@@ -1,31 +1,47 @@
+// Fournisseurs → Claude: one flat account list (inline rename, state,
+// visibility), one Add action and one secondary area for paths.
 .claude-accounts {
-  margin-top: 10px;
-  > label { display: block; }
-  &__profile { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--desktop-border); }
-  &__heading, &__rename { display: flex; align-items: center; gap: 8px; }
-  &__heading { justify-content: space-between; }
-  &__heading strong, &__name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
-  &__heading small, &__name small { color: var(--desktop-muted); font-weight: 400; }
-  &__rename input { min-width: 0; }
-  &__rename button { flex: none; }
-  &__add { margin-top: 8px; }
-  code { display: block; margin: 4px 0; color: var(--desktop-muted); }
-  p code { display: inline; margin: 0; white-space: nowrap; }
-  // Lists reuse the profile separators; no bullets or indentation.
-  &__list, &__candidates { list-style: none; margin: 0; padding: 0; }
-  &__list { margin-bottom: 10px; }
-  &__candidates li {
-    display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--desktop-border);
-    > div { flex: 1; min-width: 0; }
-    .claude-accounts__name { display: block; }
-    button { flex: none; }
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--desktop-border);
+  &__list { list-style: none; margin: 4px 0 0; padding: 0; }
+  &__row {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 30px; padding: 4px 0;
+    & + & { border-top: 1px solid var(--desktop-border); }
   }
-  &__cta { margin-top: 10px; }
-  &__more { margin-top: 10px; }
-  &__panel {
-    margin-top: 10px; padding: 10px 12px; border: 1px solid var(--desktop-border); border-radius: 8px;
-    background: var(--desktop-bg);
-    h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; }
-    h4 { margin: 10px 0 0; font-size: 11px; font-weight: 600; color: var(--desktop-muted); }
+  &__who {
+    flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px;
+    small { color: var(--desktop-muted); font-size: 11px; }
+  }
+  &__label { min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
+  .prefs &__rename { flex: 1; width: auto; min-width: 0; margin: 0; padding: 2px 6px; }
+  &__detail { flex-basis: 100%; margin: 0 0 2px !important; font-size: 11px !important; overflow-wrap: anywhere; }
+  &__glyph { flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  .prefs &__icon {
+    display: inline-grid; place-items: center; flex: none; width: 22px; height: 22px; padding: 0;
+    border: 0; border-radius: 6px; background: transparent; box-shadow: none; color: var(--desktop-muted);
+    &:hover:not(:disabled) { background: color-mix(in srgb, var(--desktop-ink) 7%, transparent); color: var(--desktop-ink); }
+    &[aria-expanded="true"] { color: var(--desktop-accent); }
+  }
+  // Unique: single choice drawn as a round check, the real radio stays focusable.
+  &__pick {
+    position: relative; flex: none; width: 18px; height: 18px; cursor: pointer;
+    input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: inherit; }
+    span { position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid color-mix(in srgb, var(--desktop-ink) 30%, transparent); pointer-events: none; }
+    input:checked + span { border: 5px solid var(--desktop-accent); }
+    input:focus-visible + span { outline: 2px solid var(--desktop-accent); outline-offset: 2px; }
+    input:disabled + span { opacity: 0.5; }
+  }
+  &__actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .prefs &__add { display: inline-flex; align-items: center; gap: 5px; }
+  &__advanced { .prefs-actions { margin-bottom: 0; } }
+  &__paths {
+    margin: 0 0 6px; font-size: 11px;
+    div { display: flex; gap: 8px; align-items: baseline; padding: 1px 0; }
+    dt { flex: none; font-weight: 600; }
+    dd { margin: 0; min-width: 0; color: var(--desktop-muted); }
+  }
+  &__manual {
+    display: flex; gap: 8px; align-items: center;
+    .prefs & input { flex: 1; min-width: 0; margin: 0; }
+    button { flex: none; }
   }
 }
