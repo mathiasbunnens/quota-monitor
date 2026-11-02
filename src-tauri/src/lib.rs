@@ -5,6 +5,10 @@ mod claude_cli;
 mod codex;
 mod display_mode;
 mod indicator;
+#[cfg(target_os = "macos")]
+mod menu_fixture;
+#[cfg(target_os = "macos")]
+pub use menu_fixture::menu_tracking_fixture;
 mod ntfy;
 mod prefs;
 #[cfg(target_os = "macos")]
@@ -449,6 +453,12 @@ define_class!(
         #[unsafe(method(menuDidClose:))]
         fn menu_did_close(&self, _menu: &NSMenu) {
             MENU_OPEN.store(false, Ordering::Release);
+            // Catch up on a panel resize deferred while an action was highlighted.
+            if PANEL_DEFERRED.swap(false, Ordering::AcqRel) {
+                if let Some(app) = APP_HANDLE.get() {
+                    render_native_menu(app);
+                }
+            }
         }
     }
 
@@ -1841,6 +1851,9 @@ static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 /// Panel item of the menu currently attached to the status item (main thread only).
 #[cfg(target_os = "macos")]
 static PANEL_ITEM: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// A live panel update was deferred during tracking (see `refresh_open_panel`).
+#[cfg(target_os = "macos")]
+static PANEL_DEFERRED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "macos")]
 fn update_status_button(
@@ -1884,7 +1897,7 @@ fn render_native_menu(app: &tauri::AppHandle) {
         let open_item = PANEL_ITEM.load(Ordering::Acquire);
         if MENU_OPEN.load(Ordering::Acquire) && open_item != 0 {
             // Live update while the user keeps the menu open.
-            unsafe { (&*(open_item as *const NSMenuItem)).setView(Some(&panel_view)) };
+            refresh_open_panel(unsafe { &*(open_item as *const NSMenuItem) }, &panel_view);
             update_status_button(&native, mtm, &indicator);
             return;
         }
@@ -1904,6 +1917,44 @@ fn render_native_menu(app: &tauri::AppHandle) {
         PANEL_ITEM.store(Retained::as_ptr(&panel) as usize, Ordering::Release);
         update_status_button(&native, mtm, &indicator);
     });
+}
+
+/// Live update of the panel of the menu being tracked (main thread).
+/// Returns `false` when the update is deferred.
+///
+/// Keeps the item's view object and moves the freshly built contents into
+/// it. `setView` during tracking makes AppKit rebuild the item's row and
+/// re-place the selection background of the highlighted action (« Réglages… »,
+/// « Vérifier les mises à jour… ») over the top of the quota panel: the stray
+/// blue band. Resizing the panel while an action is highlighted also shifts
+/// that background off its row, so a height change waits until nothing is
+/// highlighted, the menu closes (`menuDidClose:` re-renders) or reopens.
+/// Reproduced by `--menu-tracking-fixture` (menu_fixture.rs).
+#[cfg(target_os = "macos")]
+fn refresh_open_panel(item: &NSMenuItem, next: &NSView) -> bool {
+    let Some(current) = item.view() else {
+        item.setView(Some(next));
+        return true;
+    };
+    let size = next.frame().size;
+    if current.frame().size != size {
+        let highlighted =
+            unsafe { item.menu() }.is_some_and(|menu| menu.highlightedItem().is_some());
+        if highlighted {
+            PANEL_DEFERRED.store(true, Ordering::Release);
+            return false;
+        }
+        current.setFrameSize(size);
+    }
+    for old in current.subviews().iter() {
+        old.removeFromSuperview();
+    }
+    // Subviews are laid out top-down for `next`'s height (= current's now).
+    for sub in next.subviews().iter() {
+        current.addSubview(&sub);
+    }
+    current.setNeedsDisplay(true);
+    true
 }
 
 #[cfg(target_os = "macos")]
@@ -2374,18 +2425,28 @@ pub fn quota_ui_smoke(directory: &str) {
             if let Some(logging_in) = connection {
                 assert_eq!(actions[0].1, !logging_in);
             }
-            // Live refresh replaces only the custom view, never its item or
-            // action siblings. Exercise height/state changes in both directions.
+            // Live refresh keeps the item and its view object, never touching
+            // the action siblings; exercise height/state changes both ways
+            // (nothing highlighted here, so resizes apply at once).
+            let host = panel.view().unwrap();
             for (_, next) in &scenarios {
                 let next_header = panel_header(next, None);
                 let next_view = make_panel_view(mtm, &next_header, next);
-                panel.setView(Some(&next_view));
+                let next_frame = next_view.frame();
+                let next_count = next_view.subviews().count();
+                assert!(refresh_open_panel(&panel, &next_view));
                 assert!(!panel.isEnabled());
                 assert_eq!(
                     menu.numberOfItems(),
                     if connection.is_some() { 8 } else { 7 }
                 );
-                assert_eq!(panel.view().unwrap().frame(), next_view.frame());
+                let shown = panel.view().unwrap();
+                assert!(
+                    std::ptr::eq(Retained::as_ptr(&shown), Retained::as_ptr(&host)),
+                    "panel view replaced"
+                );
+                assert_eq!(shown.frame(), next_frame);
+                assert_eq!(shown.subviews().count(), next_count);
             }
             println!("NATIVE_MENU_STRUCTURE_PASS {name} connection={connection:?}");
         }
