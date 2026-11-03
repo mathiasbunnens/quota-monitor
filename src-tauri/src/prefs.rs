@@ -43,6 +43,9 @@ pub struct Prefs {
     pub display_mode: String,
     pub ntfy: crate::ntfy::Config,
     pub claude_accounts: crate::claude_accounts::AccountPrefs,
+    /// Codex environments (CODEX_HOME folders) followed besides the primary.
+    /// Absent in older files: Unique, primary only (historical behaviour).
+    pub codex_accounts: crate::claude_accounts::AccountPrefs,
     /// The single presentation for Claude AND Codex: "compact" (paired
     /// bars) or "classic" (historical separated rows), whatever the number
     /// of accounts. Display only. Sole effective key.
@@ -64,6 +67,7 @@ impl Default for Prefs {
             display_mode: crate::display_mode::MENUBAR.into(),
             ntfy: crate::ntfy::Config::default(),
             claude_accounts: crate::claude_accounts::AccountPrefs::default(),
+            codex_accounts: crate::claude_accounts::AccountPrefs::default(),
             layout: CLAUDE_LAYOUT_CLASSIC.into(),
             claude_layout: CLAUDE_LAYOUT_CLASSIC.into(),
             codex_layout: CLAUDE_LAYOUT_CLASSIC.into(),
@@ -183,6 +187,13 @@ pub fn set_preferences(app: tauri::AppHandle, mut prefs: Prefs) -> Result<Prefs,
     if collection_changed(&previous, &prefs) {
         claude::on_enabled_changed();
     }
+    if codex_collection_changed(&previous, &prefs) {
+        // Starts/stops only the additional CODEX_HOME children; the primary
+        // collector keeps its own enable/disable path above.
+        if let Some(provider) = app.try_state::<codex::Provider>() {
+            provider.reconcile(&app);
+        }
+    }
     if previous.display_mode != prefs.display_mode {
         crate::apply_display_mode(&app);
     }
@@ -201,12 +212,26 @@ fn collection_changed(previous: &Prefs, next: &Prefs) -> bool {
     previous.claude_enabled != next.claude_enabled || sources(previous) != sources(next)
 }
 
+/// Codex: enabling or the set of followed homes (id + raw launch path).
+/// Names, visibility, Unique/Multi and the layout are display only.
+fn codex_collection_changed(previous: &Prefs, next: &Prefs) -> bool {
+    let sources = |p: &Prefs| {
+        p.codex_accounts
+            .profiles
+            .iter()
+            .map(|a| (a.id.clone(), a.path.clone()))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    previous.codex_enabled != next.codex_enabled || sources(previous) != sources(next)
+}
+
 fn save_to(file: &std::path::Path, prefs: &Prefs) -> Result<(), String> {
     if !prefs.valid() {
         return Err("Indicateur de barre des menus non pris en charge.".into());
     }
     prefs.ntfy.validate()?;
     prefs.claude_accounts.validate()?;
+    crate::codex_accounts::validate(&prefs.codex_accounts)?;
     if let Some(dir) = file.parent() {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -485,6 +510,78 @@ mod tests {
     }
 
     #[test]
+    fn codex_accounts_absent_load_as_unique_primary_and_survive_round_trip() {
+        // Files of 3.1.0 and of the Claude multi-account builds: no key.
+        for bytes in [
+            &br#"{"codexEnabled":true,"claudeEnabled":true,"fableEnabled":false,"indicator":"both","displayMode":"app"}"#[..],
+            &br#"{"claudeAccounts":{"mode":"multi","selectedId":null,"profiles":[]},"layout":"compact","claudeLayout":"compact","codexLayout":"compact"}"#[..],
+        ] {
+            let p = parse(bytes);
+            assert_eq!(p.codex_accounts, crate::claude_accounts::AccountPrefs::default());
+            assert_eq!(p.codex_accounts.mode, "single");
+            let v = serde_json::to_value(&p).unwrap();
+            assert!(v.get("codexAccounts").is_some());
+            assert_eq!(parse(&serde_json::to_vec(&p).unwrap()), p);
+        }
+        // Other preferences untouched.
+        let p = parse(br#"{"codexEnabled":false,"claudeEnabled":true,"indicator":"both"}"#);
+        assert!(!p.codex_enabled && p.claude_enabled && p.indicator == "both");
+        // Saved Codex accounts persist on disk; an invalid edit is refused
+        // before the file is replaced.
+        let root = std::env::temp_dir().join(format!("qm-prefs-codex-{}", std::process::id()));
+        let home = root.join("codex-work");
+        fs::create_dir_all(&home).unwrap();
+        let home = home.canonicalize().unwrap();
+        let file = root.join("prefs.json");
+        let mut p = Prefs::default();
+        p.codex_accounts.mode = "multi".into();
+        p.codex_accounts.profiles.push(crate::claude_accounts::Profile {
+            id: crate::claude_accounts::identity(&home),
+            path: home.to_str().unwrap().into(),
+            name: "Travail".into(),
+            visible: true,
+        });
+        save_to(&file, &p).unwrap();
+        assert_eq!(parse(&fs::read(&file).unwrap()), p);
+        let bytes = fs::read(&file).unwrap();
+        let mut bad = p.clone();
+        bad.codex_accounts.profiles[0].path = "relative".into();
+        assert!(save_to(&file, &bad).is_err());
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        // An unknown mode in a hand-edited file is refused at save time too.
+        bad = p.clone();
+        bad.codex_accounts.mode = "odd".into();
+        assert!(save_to(&file, &bad).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_display_edits_do_not_restart_children_but_followed_homes_do() {
+        let before = Prefs::default();
+        let mut after = before.clone();
+        after.codex_accounts.mode = "multi".into();
+        after.codex_accounts.selected_id = Some("display-only".into());
+        after.layout = "compact".into();
+        assert!(!codex_collection_changed(&before, &after));
+        let before = after.clone();
+        after.codex_accounts.profiles.push(crate::claude_accounts::Profile {
+            id: "profile:a".into(),
+            path: "/fixture/a".into(),
+            name: "A".into(),
+            visible: true,
+        });
+        assert!(codex_collection_changed(&before, &after));
+        // Claude collection is not touched by a Codex change, and vice versa.
+        assert!(!collection_changed(&before, &after));
+        let before = after.clone();
+        after.codex_accounts.profiles[0].name = "Travail".into();
+        after.codex_accounts.profiles[0].visible = false;
+        assert!(!codex_collection_changed(&before, &after));
+        after.codex_enabled = false;
+        assert!(codex_collection_changed(&before, &after));
+    }
+
+    #[test]
     fn defaults_keep_codex_only_behaviour() {
         let p = Prefs::default();
         assert!(p.codex_enabled && !p.claude_enabled);
@@ -526,6 +623,7 @@ mod tests {
             display_mode: "app".into(),
             ntfy: crate::ntfy::Config::default(),
             claude_accounts: crate::claude_accounts::AccountPrefs::default(),
+            codex_accounts: crate::claude_accounts::AccountPrefs::default(),
             layout: "classic".into(),
             claude_layout: "classic".into(),
             codex_layout: "classic".into(),

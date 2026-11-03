@@ -1,4 +1,4 @@
-import type { ClaudeAccount, ClaudeLayout, ClaudeSnapshot, Preferences, QuotaSnapshot } from "./types";
+import type { ClaudeAccount, ClaudeLayout, ClaudeSnapshot, CodexAccount, Preferences, QuotaSnapshot } from "./types";
 
 /** One presentation for Claude AND Codex. Same rule as Rust `prefs::parse`:
  *  `layout` wins (unknown = compact); absent (older file) → the explicit
@@ -30,6 +30,28 @@ export function claudePlan(prefs: Preferences | null, accounts: ClaudeAccount[],
     ? shown.map((account) => ({ key: account.id, name: named ? "Claude · " + account.name : "Claude", snapshot: account.snapshot, account }))
     : [{ key: "claude", name: "Claude", snapshot: fallback, account: null }];
   return { cards, paired, named, emptyMulti: false };
+}
+
+export type CodexCard = { key: string; name: string; account: CodexAccount | null; rows: QuotaSnapshot[] };
+/** Codex cards (mirrors the native `codex_account_panels`): the primary
+ *  alone — or an older backend without accounts — is the exact historical
+ *  « Codex » card fed by `get_quota_snapshots`; several visible homes get
+ *  one « Codex · nom » card each. Never an aggregate. */
+export type CodexPlan = { cards: CodexCard[]; paired: boolean; named: boolean; emptyMulti: boolean };
+
+export function codexPlan(prefs: Preferences | null, accounts: CodexAccount[], snapshots: QuotaSnapshot[]): CodexPlan {
+  const paired = layoutOf(prefs) === "compact";
+  if (!(prefs?.codexEnabled ?? true)) return { cards: [], paired, named: false, emptyMulti: false };
+  const shown = accounts.filter((account) => account.tracked && account.visible);
+  const named = shown.length > 1;
+  if (!shown.length && accounts.length && prefs?.codexAccounts?.mode === "multi") return { cards: [], paired, named, emptyMulti: true };
+  if (!shown.length || (shown.length === 1 && shown[0].primary)) {
+    return { cards: [{ key: "codex", name: "Codex", account: shown[0] ?? null, rows: snapshots }], paired, named: false, emptyMulti: false };
+  }
+  return {
+    cards: shown.map((account) => ({ key: account.id, name: named ? "Codex · " + account.name : "Codex", account, rows: account.rows })),
+    paired, named, emptyMulti: false,
+  };
 }
 
 export function quotaPercentage(snapshot: QuotaSnapshot) {

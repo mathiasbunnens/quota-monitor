@@ -46,6 +46,19 @@ if(query.get('codexState')==='edge') {
  codexRows.push({...codexRows[1],period:'codex:review:secondary',model:'review',remaining:27,label:'Review · 7 jours'});
 }
 const accounts = () => profiles.map(a=>{const saved=prefs.claudeAccounts.profiles.find(p=>p.id===a.id);return {...a,name:saved?.name||a.name,visible:prefs.claudeEnabled&&(prefs.claudeAccounts.mode==='multi'?(saved?.visible??a.primary):a.id===(prefs.claudeAccounts.selectedId||'personal'))};});
+// Codex homes (?codexAccounts=multi|one): synthetic rows only, never a real CODEX_HOME.
+const codexRow=(r5,r7,m5=95)=>[{...codexRows[0],remaining:r5,resetAt:new Date(base+m5*60000).toISOString()},{...codexRows[1],remaining:r7}];
+const codexHome=(name,extra={})=>({id:'profile:'+name,path:'/fixtures/.codex-'+name,name,visible:true,primary:false,tracked:true,available:true,refreshing:false,phase:'ready',message:'Quotas synchronisés directement avec Codex.',planType:'pro',lastChecked:null,rows:codexRow(18,64,42),duplicateOf:null,...extra});
+const codexHomes=query.get('codexAccounts')?[
+ codexHome('Principal',{id:'primary',path:'~/.codex',primary:true,planType:'plus',rows:structuredClone(codexRows)}),
+ codexHome('travail',{name:'Travail'}),
+ codexHome('perso',{name:'Perso',phase:'signed_out',planType:null,rows:[],message:'Non connecté. Connectez ce dossier dans un terminal : CODEX_HOME=/fixtures/.codex-perso codex login'}),
+ codexHome('alias',{name:'Alias',planType:'plus',rows:structuredClone(codexRows),duplicateOf:'Principal'}),
+ codexHome('detecte',{name:'.codex-detecte',tracked:false,visible:false,phase:'detected',rows:[],planType:null,message:'Dossier détecté, non suivi.'}),
+]:[];
+if(query.get('codexAccounts')==='one') codexHomes.splice(1,3);
+if(codexHomes.length) prefs.codexAccounts={mode:query.get('codexAccounts')==='multi'?'multi':'single',selectedId:null,profiles:codexHomes.filter(h=>h.tracked&&!h.primary).map(({id,path,name})=>({id,path,name,visible:true}))};
+const codexAccounts=()=>codexHomes.map(h=>{const saved=prefs.codexAccounts?.profiles.find(p=>p.id===h.id);const multi=prefs.codexAccounts?.mode==='multi';return {...h,name:saved?.name||h.name,visible:prefs.codexEnabled&&h.tracked&&(multi?(h.primary?prefs.codexAccounts.primaryVisible!==false:saved?.visible??true):h.id===(prefs.codexAccounts?.selectedId||'primary'))};});
 const emit = () => { for(const listener of listeners) listener(); };
 window.__fixture = {get prefs(){return prefs},get accounts(){return accounts()},calls:[],emit,get minuteTimers(){return timers.size},advanceMinute(){clock+=60000;for(const fn of timers.values())fn();}};
 export const listen = async (_event, cb) => {listeners.add(cb);return ()=>listeners.delete(cb)};
@@ -61,6 +74,10 @@ export async function invoke(command, payload) {
  case 'get_codex_status':return {phase:'ready',message:'',planType:'plus',refreshSettings:{customSeconds:null},refreshSeconds:60,availableResets:null};
  case 'add_claude_profile':if(payload.path!=='/fixtures/.claude-work')throw new Error('Fixture: dossier inexistant');prefs={...prefs,claudeAccounts:{...prefs.claudeAccounts,mode:'multi',profiles:profiles.map(({id,path,name})=>({id,path,name,visible:true}))}};emit();return structuredClone(prefs);
  case 'follow_claude_profile':if(scenario==='add-error')throw new Error('« Travail » est déjà affiché. Choisissez un autre profil Claude Code.');prefs={...prefs,claudeAccounts:{...prefs.claudeAccounts,mode:'multi',profiles:profiles.map(({id,path,name})=>({id,path,name,visible:true}))}};emit();return structuredClone(prefs);
+ case 'get_codex_accounts':return structuredClone(codexAccounts());
+ case 'follow_codex_profile':case 'add_codex_profile':{const id=payload.id||'profile:new';codexHomes.forEach(h=>{if(h.id===id)h.tracked=true;});prefs={...prefs,codexAccounts:{mode:'multi',selectedId:null,profiles:codexHomes.filter(h=>h.tracked&&!h.primary).map(({id,path,name})=>({id,path,name,visible:true}))}};emit();return structuredClone(prefs);}
+ case 'untrack_codex_profile':codexHomes.forEach(h=>{if(h.id===payload.id)h.tracked=false;});prefs={...prefs,codexAccounts:{...prefs.codexAccounts,profiles:(prefs.codexAccounts?.profiles||[]).filter(p=>p.id!==payload.id)}};emit();return structuredClone(prefs);
+ case 'choose_codex_profile_folder':return null;
  case 'choose_claude_profile_folder':return query.get('pick')||null;
  case 'fit_settings_window': case 'request_claude_refresh': case 'request_quota_refresh': return null;
  default: throw new Error('Blocked external action in fixture: '+command);

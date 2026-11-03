@@ -43,8 +43,26 @@ export type ClaudeAccount = ClaudeProfile & {
   refreshing: boolean;
   snapshot: ClaudeSnapshot;
 };
+/** One Codex environment (CODEX_HOME folder) from `get_codex_accounts`.
+ *  `visible` already applies Unique/Multi and the enable switch. Never a
+ *  token: `duplicateOf` only names an earlier home returning the same account. */
+export type CodexAccount = ClaudeProfile & {
+  primary: boolean;
+  /** Followed (collected). A detected `~/.codex-*` folder is listed only. */
+  tracked: boolean;
+  available: boolean;
+  refreshing: boolean;
+  phase: CodexStatus["phase"] | "detected" | "unavailable";
+  message: string;
+  planType: string | null;
+  lastChecked: string | null;
+  rows: QuotaSnapshot[];
+  duplicateOf: string | null;
+};
 export type Preferences = {
   claudeAccounts: ClaudeAccountsPreferences;
+  /** Codex homes followed besides the primary. Absent in older files: Unique, primary only. */
+  codexAccounts?: ClaudeAccountsPreferences;
   codexEnabled: boolean;
   claudeEnabled: boolean;
   fableEnabled: boolean;

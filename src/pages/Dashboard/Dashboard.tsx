@@ -4,8 +4,8 @@ import ResetCredits from "../../features/quota/ResetCredits";
 import ProviderCard from "../../features/quota/ProviderCard";
 import { useCallback, useEffect, useState } from "react";
 import CodexConnection from "../../features/setup/CodexConnection";
-import { claudePlan, claudeRows, claudeStatusText, codexRows, layoutOf } from "../../features/quota/providers";
-import type { ClaudeAccount, ClaudeSnapshot, CodexStatus, Preferences, QuotaSnapshot } from "../../features/quota/types";
+import { claudePlan, claudeRows, claudeStatusText, codexPlan, codexRows, type CodexCard } from "../../features/quota/providers";
+import type { ClaudeAccount, ClaudeSnapshot, CodexAccount, CodexStatus, Preferences, QuotaSnapshot } from "../../features/quota/types";
 import "./dashboard.scss";
 
 export default function Dashboard() {
@@ -22,6 +22,8 @@ export default function Dashboard() {
   const [revision, setRevision] = useState(0);
   const [accounts, setAccounts] = useState<ClaudeAccount[]>([]);
   const [now, setNow] = useState(Date.now);
+  // Every Codex home (primary + followed); [] with an older backend → historical card.
+  const [codexAccounts, setCodexAccounts] = useState<CodexAccount[]>([]);
   const reload = useCallback(() => setRevision((value) => value + 1), []);
 
   useEffect(() => {
@@ -49,12 +51,13 @@ export default function Dashboard() {
     let disposed = false;
     let timer: number;
     const poll = async () => {
-      const [p, s, c, k, a] = await Promise.allSettled([
+      const [p, s, c, k, a, x] = await Promise.allSettled([
         invoke<Preferences>("get_preferences"),
         invoke<QuotaSnapshot[]>("get_quota_snapshots"),
         invoke<CodexStatus>("get_codex_status"),
         invoke<ClaudeSnapshot>("get_claude_snapshot"),
         invoke<ClaudeAccount[]>("get_claude_accounts"),
+        invoke<CodexAccount[]>("get_codex_accounts"),
       ]);
       if (disposed) return;
       if (p.status === "fulfilled") setPrefs(p.value);
@@ -63,6 +66,7 @@ export default function Dashboard() {
       } else setCodexError("Impossible de lire l’état de Codex.");
       if (k.status === "fulfilled") setClaude(k.value);
       if (a.status === "fulfilled") setAccounts(a.value);
+      if (x.status === "fulfilled" && Array.isArray(x.value)) setCodexAccounts(x.value);
       setClaudeError(a.status === "rejected" || k.status === "rejected" ? "Impossible de lire l’état de Claude." : null);
       timer = window.setTimeout(() => void poll(), 2000);
     };
@@ -75,7 +79,10 @@ export default function Dashboard() {
   // Shared with the native menu/compact window: the saved Compacte/Classique
   // choice applies to one or several cards; only names/notes follow the count.
   const plan = claudePlan(prefs, accounts, claude);
-  const codexPaired = layoutOf(prefs) === "compact";
+  const codex = codexPlan(prefs, codexAccounts, snapshots);
+  const named = plan.named || codex.named;
+  // Credits act on the primary session only: shown with its card.
+  const primaryShown = codex.cards.some((card) => !card.account || card.account.primary);
   const fableEnabled = prefs?.fableEnabled ?? true;
 
   const refresh = async () => {
@@ -117,12 +124,11 @@ export default function Dashboard() {
     {error && <p role="alert">{error}</p>}
     {none && <p className="dashboard__source" role="status">Aucun fournisseur actif. Active Codex ou Claude dans les Réglages.</p>}
     {/* Classique with several accounts: full-width stacked sections, like the menu. */}
-    <div className={"provider-grid" + (plan.named && !plan.paired ? ""
-      : (both || plan.named ? " provider-grid--two" : "") + (plan.named ? " provider-grid--accounts" : ""))}>
-      {codexOn && <ProviderCard name="Codex" badge={status?.planType} rows={codexRows(snapshots)} compact={codexPaired || both}
-        accountCompact={codexPaired} now={now}
-        status={codexStatus} error={codexFailure}
-        empty={status?.phase === "ready" ? "Aucun quota à afficher. La réserve peut ne pas être communiquée par Codex." : "Quotas indisponibles."} />}
+    <div className={"provider-grid" + (named && !plan.paired ? ""
+      : (both || named ? " provider-grid--two" : "") + (named ? " provider-grid--accounts" : ""))}>
+      {codex.cards.map((card) => <CodexAccountCard key={card.key} card={card} named={codex.named} paired={codex.paired}
+        compact={codex.paired || (!named && both)} now={now} status={status} codexStatus={codexStatus} codexFailure={codexFailure} />)}
+      {codex.emptyMulti && <p className="provider-card__note" role="status">Aucun compte Codex visible. Choisissez les comptes dans les Réglages.</p>}
       {plan.cards.map(({ key, name, snapshot, account }) => <ProviderCard key={key} name={name}
         badge={plan.named ? snapshot?.planType : undefined} rows={snapshot ? claudeRows(snapshot, fableEnabled) : []}
         compact={plan.paired || (!plan.named && both)} accountCompact={plan.paired} now={now}
@@ -133,7 +139,7 @@ export default function Dashboard() {
       </ProviderCard>)}
       {plan.emptyMulti && <p className="provider-card__note" role="status">Aucun compte Claude visible. Choisissez les comptes dans les Réglages.</p>}
     </div>
-    {codexOn && <ResetCredits status={status} onChange={reload} />}
+    {codexOn && primaryShown && <ResetCredits status={status} onChange={reload} />}
     <footer className="dashboard__footer">
       <span>{codexOn && snapshots[0]?.checkedAt ? "Codex vérifié : " + new Date(snapshots[0].checkedAt).toLocaleTimeString("fr-FR") : ""}</span>
       {codexOn && <button onClick={() => void openDetails()}>Voir les détails sur Codex ↗</button>}
@@ -141,4 +147,28 @@ export default function Dashboard() {
     {codexOn && <p className="dashboard__strategy">Actualisation Codex {status?.refreshSettings.customSeconds ? "personnalisée" : "dynamique"} · toutes les {status?.refreshSeconds || 120} s{claudeOn ? " · Claude : mis à jour par Claude Code" : ""}</p>}
     {codexOn && !isConnected && (showSetup || needsSetup) && <CodexConnection status={status} onChange={reload} />}
   </main>;
+}
+
+/** One Codex card. The historical card (primary alone, or no account list)
+ *  is drawn exactly as before from the primary collector; an additional
+ *  home shows its own rows, state and duplicate note, never a sum. */
+function CodexAccountCard({ card, named, paired, compact, now, status, codexStatus, codexFailure }: {
+  card: CodexCard; named: boolean; paired: boolean; compact: boolean; now: number;
+  status: CodexStatus | null; codexStatus: string | null; codexFailure: string | null;
+}) {
+  const account = card.account;
+  if (!account || (!named && account.primary)) {
+    return <ProviderCard name="Codex" badge={status?.planType} rows={codexRows(card.rows)} compact={compact}
+      accountCompact={paired} now={now} status={codexStatus} error={codexFailure}
+      empty={status?.phase === "ready" ? "Aucun quota à afficher. La réserve peut ne pas être communiquée par Codex." : "Quotas indisponibles."} />;
+  }
+  const ready = account.phase === "ready";
+  const state = !account.available ? "Dossier indisponible."
+    : account.refreshing ? "Actualisation…"
+    : !ready && account.phase !== "error" ? account.message : null;
+  return <ProviderCard name={card.name} badge={account.planType} rows={codexRows(card.rows)} compact={compact}
+    accountCompact={paired} now={now} status={state} error={account.phase === "error" ? account.message : null}
+    empty={ready ? "Aucun quota à afficher pour ce compte." : "Quotas indisponibles."}>
+    {account.duplicateOf && <p className="provider-card__note">Même compte que « {account.duplicateOf} » : quotas non additionnés.</p>}
+  </ProviderCard>;
 }

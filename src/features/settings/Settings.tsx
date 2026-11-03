@@ -5,9 +5,9 @@ import ExternalIcon from "../ui/ExternalIcon";
 import CodexConnection from "../setup/CodexConnection";
 import RefreshSettings from "../setup/RefreshSettings";
 import NtfySettings from "./NtfySettings";
-import ClaudeAccountsSettings from "./ClaudeAccountsSettings";
+import ClaudeAccountsSettings, { CodexAccountsSettings } from "./ClaudeAccountsSettings";
 import ResetCredits from "../quota/ResetCredits";
-import type { ClaudeAccount, ClaudeLayout, ClaudeSnapshot, CodexStatus, DisplayMode, IndicatorChoice, Preferences } from "../quota/types";
+import type { ClaudeAccount, ClaudeLayout, ClaudeSnapshot, CodexAccount, CodexStatus, DisplayMode, IndicatorChoice, Preferences } from "../quota/types";
 import { layoutOf } from "../quota/providers";
 import "../../pages/Dashboard/dashboard.scss";
 import "./settings.scss";
@@ -187,6 +187,10 @@ export default function Settings() {
   const mutation = useRef(false);
   const [canChooseMode, setCanChooseMode] = useState(false);
   const [accountActionError, setAccountActionError] = useState<string | null>(null);
+  // Codex homes (primary + followed + detected), same flow as Claude.
+  const [codexAccounts, setCodexAccounts] = useState<CodexAccount[]>([]);
+  const [codexAccountsError, setCodexAccountsError] = useState<string | null>(null);
+  const [codexActionError, setCodexActionError] = useState<string | null>(null);
   useFitWindow(root, [tab, prefs !== null].join());
   const reload = useCallback(() => setRevision((value) => value + 1), []);
 
@@ -207,16 +211,19 @@ export default function Settings() {
     let disposed = false;
     let timer: number;
     const poll = async () => {
-      const [p, s, k, a] = await Promise.allSettled([
+      const [p, s, k, a, x] = await Promise.allSettled([
         invoke<Preferences>("get_preferences"),
         invoke<CodexStatus>("get_codex_status"),
         invoke<ClaudeSnapshot>("get_claude_snapshot"),
         invoke<ClaudeAccount[]>("get_claude_accounts"),
+        invoke<CodexAccount[]>("get_codex_accounts"),
       ]);
       if (disposed) return;
       if (p.status === "fulfilled" && !mutation.current) setPrefs(p.value);
       if (a.status === "fulfilled") setAccounts(a.value);
       setAccountsError(a.status === "rejected" ? "Impossible de découvrir les comptes Claude. Nouvelle tentative automatique…" : null);
+      if (x.status === "fulfilled" && Array.isArray(x.value)) setCodexAccounts(x.value);
+      setCodexAccountsError(x.status === "rejected" ? "Impossible de découvrir les comptes Codex. Nouvelle tentative automatique…" : null);
       if (s.status === "fulfilled") setStatus(s.value);
       if (k.status === "fulfilled") setClaude(k.value);
       timer = window.setTimeout(() => void poll(), 2000);
@@ -247,6 +254,22 @@ export default function Settings() {
     setAccountActionError(null); setBusy(true);
     try { return await invoke<string | null>("choose_claude_profile_folder"); }
     catch (cause) { setAccountActionError(String(cause).replace(/^Error: /, "")); return null; }
+    finally { setBusy(false); }
+  };
+  // Codex homes: explicit add/follow/untrack commands, never login/logout.
+  // The backend validates and returns the canonical preferences.
+  const codexAction = async (command: "add_codex_profile" | "follow_codex_profile" | "untrack_codex_profile", payload: Record<string, string>) => {
+    if (mutation.current) return false;
+    mutation.current = true; setCodexActionError(null); setBusy(true);
+    try { setPrefs(await invoke<Preferences>(command, payload)); reload(); return true; }
+    catch (cause) { setCodexActionError(String(cause).replace(/^Error: /, "")); return false; }
+    finally { mutation.current = false; setBusy(false); }
+  };
+  const chooseCodexFolder = async () => {
+    if (mutation.current) return null;
+    setCodexActionError(null); setBusy(true);
+    try { return await invoke<string | null>("choose_codex_profile_folder"); }
+    catch (cause) { setCodexActionError(String(cause).replace(/^Error: /, "")); return null; }
     finally { setBusy(false); }
   };
   const relay = async (command: "install_claude_relay" | "uninstall_claude_relay") => {
@@ -307,6 +330,13 @@ export default function Settings() {
           </div>}
           {prefs.codexEnabled && codexReady && codexMore && <CodexConnection status={status} onChange={reload} />}
           {prefs.codexEnabled && !codexReady && <CodexConnection status={status} onChange={reload} />}
+          <CodexAccountsSettings prefs={prefs} accounts={codexAccounts} busy={busy} onUpdate={update}
+            onAdd={(path) => codexAction("add_codex_profile", { path })}
+            onFollow={(id) => codexAction("follow_codex_profile", { id })}
+            onUntrack={(id) => codexAction("untrack_codex_profile", { id })}
+            onChooseFolder={canChooseMode ? chooseCodexFolder : undefined} actionError={codexActionError}
+            advanced={<p className="prefs-footnote">Un dossier <code>CODEX_HOME</code> par compte, lu en lecture seule par Codex CLI. Connexion dans un terminal : <code>CODEX_HOME=… codex login</code>.</p>} />
+          {codexAccountsError && <p className="prefs-state prefs-state--error" role="alert">{codexAccountsError}</p>}
         </section>
 
         <section className="prefs-group" aria-labelledby="claude-heading">

@@ -62,7 +62,7 @@ pub struct Discovered {
     pub available: bool,
     pub visible: bool,
 }
-fn normalized(path: &Path) -> PathBuf {
+pub(crate) fn normalized(path: &Path) -> PathBuf {
     if let Ok(path) = path.canonicalize() {
         return path;
     }

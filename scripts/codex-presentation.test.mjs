@@ -21,7 +21,10 @@ test('one preference drives Codex too; legacy Codex key migrates; no Codex-speci
  const settings=fs.readFileSync(new URL('../src/features/settings/Settings.tsx',import.meta.url),'utf8');
  assert.doesNotMatch(settings,/Présentation Codex|name="codexLayout"|name="claudeLayout"/);
  const dashboard=fs.readFileSync(new URL('../src/pages/Dashboard/Dashboard.tsx',import.meta.url),'utf8');
- assert.match(dashboard,/accountCompact=\{codexPaired\}/);assert.match(dashboard,/layoutOf\(prefs\)/);
+ // Codex cards (one or several homes) follow the same single layout.
+ assert.match(dashboard,/accountCompact=\{paired\}/);assert.match(dashboard,/codexPlan\(prefs, codexAccounts, snapshots\)/);
+ const plan=fs.readFileSync(new URL('../src/features/quota/providers.ts',import.meta.url),'utf8');
+ assert.match(plan.slice(plan.indexOf('export function codexPlan')),/layoutOf\(prefs\) === "compact"/);
 });
 test('mono Codex compact exposes both real windows, countdowns and remaining values',()=>{
  const html=render([bucket('five-hour'),bucket('weekly',85)]);

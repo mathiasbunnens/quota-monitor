@@ -1,12 +1,15 @@
 import { useId, useRef, useState, type ReactNode } from "react";
-import type { ClaudeAccount, ClaudeAccountsPreferences, ClaudeProfile, Preferences } from "../quota/types";
+import type { ClaudeAccount, ClaudeAccountsPreferences, ClaudeProfile, CodexAccount, Preferences } from "../quota/types";
 import "./claude-accounts.scss";
 
 type Tone = "good" | "warning" | "error" | "neutral";
 
-type Props = {
+/** What the shared account list needs from a Claude profile or a Codex home. */
+type ListedAccount = ClaudeProfile & { primary: boolean; available: boolean; refreshing: boolean; tracked?: boolean };
+
+type Props<A extends ListedAccount = ClaudeAccount> = {
   prefs: Preferences;
-  accounts: ClaudeAccount[];
+  accounts: A[];
   busy: boolean;
   onUpdate: (patch: Partial<Preferences>) => Promise<boolean>;
   /** Existing folder (picker or typed absolute path). */
@@ -17,6 +20,14 @@ type Props = {
   actionError?: string | null;
   /** Extra technical actions shown in the single secondary area. */
   advanced?: ReactNode;
+  /** Codex reuse: provider wording, preference key and per-account state. */
+  provider?: "Claude" | "Codex";
+  stateOf?: (account: A) => [string, Tone, string];
+  planOf?: (account: A) => string | null | undefined;
+  /** Follow a detected, not yet followed folder (`tracked: false`). */
+  onFollow?: (id: string) => Promise<boolean>;
+  /** Stop following an additional folder (never deletes it). */
+  onUntrack?: (id: string) => Promise<boolean>;
 };
 
 /** Connection state of one profile: [pill, tone, actionable detail]. */
@@ -35,6 +46,22 @@ export function accountState(account: ClaudeAccount): [string, Tone, string] {
   }
 }
 
+/** Connection state of one Codex home: [pill, tone, actionable detail]. */
+export function codexAccountState(account: CodexAccount): [string, Tone, string] {
+  if (!account.tracked) return ["Détecté", "neutral", "Dossier détecté, non suivi : « Suivre » lit seulement ses quotas, sans connexion ni modification."];
+  if (!account.available) return ["Indisponible", "neutral", "Dossier CODEX_HOME introuvable : vérifiez qu’il existe encore (disque, renommage)."];
+  if (account.refreshing) return ["Actualisation…", "warning", ""];
+  if (account.duplicateOf && account.phase === "ready") return ["Même compte", "warning", "Même compte que « " + account.duplicateOf + " » : quotas non additionnés."];
+  switch (account.phase) {
+    case "ready": return ["Connecté", "good", ""];
+    case "signed_out": return ["Non connecté", "warning", account.message || "Dossier non connecté à Codex."];
+    case "disabled": return ["Désactivé", "neutral", ""];
+    case "missing": return ["Non installé", "neutral", account.message];
+    case "error": return ["Erreur", "error", account.message || "Lecture impossible : vérifiez Codex CLI."];
+    default: return ["Connexion…", "warning", ""];
+  }
+}
+
 const pencil = <path d="M10.5 2.8 13.2 5.5 6 12.7 3 13l.3-3 7.2-7.2Z" />;
 const info = <><circle cx="8" cy="8" r="6" /><path d="M8 7.2v3.6M8 5.2v.1" /></>;
 const chevron = <path d="M6 3.5 10.5 8 6 12.5" />;
@@ -45,7 +72,7 @@ function Glyph({ children }: { children: ReactNode }) {
 }
 
 /** Inline rename: the pencil swaps the name for a field (Enter saves, Escape cancels). */
-export function AccountName({ account, disabled, onSave }: { account: ClaudeAccount; disabled: boolean; onSave: (name: string) => Promise<boolean> }) {
+export function AccountName({ account, disabled, onSave }: { account: { name: string }; disabled: boolean; onSave: (name: string) => Promise<boolean> }) {
   const [draft, setDraft] = useState<string | null>(null);
   const button = useRef<HTMLButtonElement>(null);
   // Enter/Escape unmount the field, which also fires blur: settle only once.
@@ -72,25 +99,35 @@ export function AccountName({ account, disabled, onSave }: { account: ClaudeAcco
   </>;
 }
 
-export default function ClaudeAccountsSettings({ prefs, accounts, busy, onUpdate, onAdd, onChooseFolder, actionError = null, advanced }: Props) {
+export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeAccount>({ prefs, accounts, busy, onUpdate, onAdd, onChooseFolder, actionError = null, advanced,
+  provider = "Claude", stateOf, planOf, onFollow, onUntrack }: Props<A>) {
   const [path, setPath] = useState("");
   const [pathError, setPathError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [details, setDetails] = useState<string | null>(null);
   const pathInput = useRef<HTMLInputElement>(null);
   const advancedId = useId();
-  const settings: ClaudeAccountsPreferences = prefs.claudeAccounts ?? { mode: "single", selectedId: null, profiles: [] };
-  const selected = accounts.find((account) => account.id === settings.selectedId) ?? accounts.find((account) => account.primary) ?? accounts[0];
+  const codex = provider === "Codex";
+  const key = codex ? "codexAccounts" : "claudeAccounts";
+  const slug = codex ? "codex" : "claude";
+  // Visibility labels stay unique when both providers list a « Principal ».
+  const show = (account: A) => "Afficher " + (codex ? "Codex " : "") + account.name;
+  const state = stateOf ?? ((account: A) => accountState(account as unknown as ClaudeAccount));
+  const plan = planOf ?? ((account: A) => (account as unknown as ClaudeAccount).snapshot?.planType);
+  const settings: ClaudeAccountsPreferences = prefs[key] ?? { mode: "single", selectedId: null, profiles: [] };
+  // Only followed accounts can be displayed; a detected folder is listed to be followed.
+  const listed = accounts.filter((account) => account.tracked !== false);
+  const selected = listed.find((account) => account.id === settings.selectedId) ?? listed.find((account) => account.primary) ?? listed[0];
   const multi = settings.mode === "multi";
-  const several = accounts.length >= 2;
+  const several = listed.length >= 2;
   // Stored choice, not the effective view (which is false while Claude is off).
-  const storedVisible = (account: ClaudeAccount) => settings.profiles.find((profile) => profile.id === account.id)?.visible ?? account.primary;
-  const saveProfile = (account: ClaudeAccount, patch: Partial<ClaudeProfile>) => {
+  const storedVisible = (account: A) => settings.profiles.find((profile) => profile.id === account.id)?.visible ?? account.primary;
+  const saveProfile = (account: A, patch: Partial<ClaudeProfile>) => {
     // Discovery metadata is not persisted until an explicit edit. Visibility
     // returned while Claude is off is false, not the user's stored choice.
     const stored = settings.profiles.find((profile) => profile.id === account.id);
     const profile: ClaudeProfile = { id: account.id, path: account.path, name: account.name, visible: stored?.visible ?? account.primary, ...patch };
-    return onUpdate({ claudeAccounts: { ...settings, profiles: [...settings.profiles.filter((item) => item.id !== account.id), profile] } });
+    return onUpdate({ [key]: { ...settings, profiles: [...settings.profiles.filter((item) => item.id !== account.id), profile] } });
   };
   // « Ajouter » opens the folder chooser directly; without one, the path field.
   const add = async () => {
@@ -111,34 +148,39 @@ export default function ClaudeAccountsSettings({ prefs, accounts, busy, onUpdate
   };
 
   return <div className="claude-accounts" aria-busy={busy || undefined}>
-    {several && <div className="prefs-segmented" role="radiogroup" aria-label="Comptes Claude affichés">
+    {several && <div className="prefs-segmented" role="radiogroup" aria-label={"Comptes " + provider + " affichés"}>
       {([["single", "Unique"], ["multi", "Multi"]] as const).map(([mode, label]) => <label key={mode} className={settings.mode === mode ? "is-selected" : ""}>
-        <input type="radio" name="claude-mode" checked={settings.mode === mode}
-          onChange={() => void onUpdate({ claudeAccounts: { ...settings, mode } })} />{label}
+        <input type="radio" name={slug + "-mode"} checked={settings.mode === mode}
+          onChange={() => void onUpdate({ [key]: { ...settings, mode } })} />{label}
       </label>)}
     </div>}
 
-    {accounts.length > 0 && <ul className="claude-accounts__list" aria-label="Comptes Claude">
+    {accounts.length > 0 && <ul className="claude-accounts__list" aria-label={"Comptes " + provider}>
       {accounts.map((account) => {
-        const [pill, tone, detail] = accountState(account);
-        const detailId = "claude-detail-" + account.id;
+        const [pill, tone, detail] = state(account);
+        const detailId = slug + "-detail-" + account.id;
+        const tracked = account.tracked !== false;
+        const planType = plan(account);
         return <li className="claude-accounts__row" key={account.id}>
           <div className="claude-accounts__who">
-            <AccountName key={account.id} account={account} disabled={busy} onSave={(name) => saveProfile(account, { name })} />
+            <AccountName key={account.id} account={account} disabled={busy || !tracked} onSave={(name) => saveProfile(account, { name })} />
             {account.primary && <small>Principal</small>}
-            {account.snapshot.planType && <span className="prefs-plan">{account.snapshot.planType}</span>}
+            {planType && <span className="prefs-plan">{planType}</span>}
           </div>
           <span className={"prefs-pill prefs-pill--" + tone} title={detail || undefined}>{pill}</span>
           {detail && <button type="button" className="claude-accounts__icon" aria-label={"Détail " + account.name}
             aria-expanded={details === account.id} aria-controls={details === account.id ? detailId : undefined}
             onClick={() => setDetails((value) => value === account.id ? null : account.id)}><Glyph>{info}</Glyph></button>}
-          {multi
-            ? <label className="prefs-switch"><input type="checkbox" role="switch" aria-label={"Afficher " + account.name}
+          {!tracked
+            ? onFollow && <button type="button" className="prefs-link" disabled={busy} aria-label={"Suivre " + account.name}
+              onClick={() => void onFollow(account.id)}>Suivre</button>
+            : multi
+            ? <label className="prefs-switch"><input type="checkbox" role="switch" aria-label={show(account)}
               checked={storedVisible(account)}
               onChange={(event) => void saveProfile(account, { visible: event.target.checked })} /><span aria-hidden="true" /></label>
-            : several && <label className="claude-accounts__pick"><input type="radio" name="claude-selected" aria-label={"Afficher " + account.name}
+            : several && <label className="claude-accounts__pick"><input type="radio" name={slug + "-selected"} aria-label={show(account)}
               checked={account.id === selected?.id}
-              onChange={() => void onUpdate({ claudeAccounts: { ...settings, selectedId: account.id } })} /><span aria-hidden="true" /></label>}
+              onChange={() => void onUpdate({ [key]: { ...settings, selectedId: account.id } })} /><span aria-hidden="true" /></label>}
           {details === account.id && detail && <p id={detailId} className="claude-accounts__detail">{detail}</p>}
         </li>;
       })}
@@ -157,11 +199,15 @@ export default function ClaudeAccountsSettings({ prefs, accounts, busy, onUpdate
 
     {open && <div id={advancedId} className="prefs-advanced claude-accounts__advanced" role="group" aria-label="Chemins et options avancées">
       {accounts.length > 0 && <dl className="claude-accounts__paths">
-        {accounts.map((account) => <div key={account.id}><dt>{account.name}</dt><dd><code>{account.path}</code></dd></div>)}
+        {accounts.map((account) => <div key={account.id}><dt>{account.name}</dt><dd><code>{account.path}</code>
+          {onUntrack && account.tracked !== false && !account.primary && <> <button type="button" className="prefs-link" disabled={busy}
+            aria-label={"Ne plus suivre " + account.name} title="Le dossier et son contenu ne sont pas modifiés"
+            onClick={() => void onUntrack(account.id)}>Ne plus suivre</button></>}
+        </dd></div>)}
       </dl>}
       <form className="claude-accounts__manual" onSubmit={(event) => { event.preventDefault(); void submitPath(); }}>
-        <input ref={pathInput} value={path} disabled={busy} placeholder="/Users/nom/.claude-travail" spellCheck={false}
-          aria-label="Chemin absolu d’un profil Claude Code" aria-invalid={pathError ? true : undefined}
+        <input ref={pathInput} value={path} disabled={busy} placeholder={codex ? "/Users/nom/.codex-travail" : "/Users/nom/.claude-travail"} spellCheck={false}
+          aria-label={codex ? "Chemin absolu d’un dossier CODEX_HOME" : "Chemin absolu d’un profil Claude Code"} aria-invalid={pathError ? true : undefined}
           onChange={(event) => setPath(event.target.value)} />
         <button type="submit" disabled={busy || !path}>Ajouter</button>
       </form>
@@ -169,4 +215,10 @@ export default function ClaudeAccountsSettings({ prefs, accounts, busy, onUpdate
       {advanced}
     </div>}
   </div>;
+}
+
+type CodexProps = Omit<Props<CodexAccount>, "provider" | "stateOf" | "planOf">;
+/** Codex homes: the same list, wording adapted, `codexAccounts` preferences. */
+export function CodexAccountsSettings(props: CodexProps) {
+  return <ClaudeAccountsSettings<CodexAccount> {...props} provider="Codex" stateOf={codexAccountState} planOf={(account) => account.planType} />;
 }

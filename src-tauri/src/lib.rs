@@ -3,6 +3,7 @@ mod claude;
 mod claude_accounts;
 mod claude_cli;
 mod codex;
+mod codex_accounts;
 mod display_mode;
 mod indicator;
 #[cfg(target_os = "macos")]
@@ -1093,7 +1094,7 @@ fn paired_panel_rows(provider: &PanelProvider) -> Vec<&PanelRow> {
     if !provider.compact {
         return vec![];
     }
-    if provider.name == "Codex" {
+    if provider.name == "Codex" || provider.name.starts_with("Codex · ") {
         let mut rows: Vec<_> = provider
             .rows
             .iter()
@@ -1511,25 +1512,16 @@ struct PanelModel {
 }
 
 /// Native menu / compact window providers: the ONE saved Compacte/Classique
-/// choice (`prefs.layout`) drives Codex and every visible Claude account.
+/// choice (`prefs.layout`) drives every visible Codex and Claude account.
 #[cfg(target_os = "macos")]
 fn quota_providers(
     prefs: &prefs::Prefs,
-    codex_rows: &[QuotaPayload],
-    phase: &str,
-    message: &str,
-    plan: Option<String>,
+    codex: &[codex::CodexAccount],
     accounts: &[claude::AccountSnapshot],
 ) -> Vec<PanelProvider> {
     let mut providers = Vec::new();
     if prefs.codex_enabled {
-        providers.push(codex_presentation(
-            codex_rows,
-            phase,
-            message,
-            plan,
-            &prefs.layout,
-        ));
+        providers.extend(codex_account_panels(codex, &prefs.layout));
     }
     providers.extend(claude_account_panels(
         accounts,
@@ -1538,15 +1530,45 @@ fn quota_providers(
     providers
 }
 
+/// Same contract as `claude_account_panels`: one card per visible Codex
+/// environment, drawn with the saved layout. A sole card keeps the plain
+/// historical "Codex" name (and is the exact historical card for the
+/// primary); several are named « Codex · {compte} ». Never an aggregate: a
+/// home returning the same account as an earlier one is only flagged.
+#[cfg(target_os = "macos")]
+fn codex_account_panels(accounts: &[codex::CodexAccount], layout: &str) -> Vec<PanelProvider> {
+    let visible: Vec<_> = accounts.iter().filter(|a| a.profile.visible).collect();
+    let several = visible.len() > 1;
+    visible
+        .into_iter()
+        .map(|a| {
+            let mut panel =
+                codex_presentation(&a.rows, &a.phase, &a.message, a.plan_type.clone(), layout);
+            if several {
+                panel.name = format!("Codex · {}", a.profile.name);
+            }
+            if let Some(other) = &a.duplicate_of {
+                let text = format!("Même compte que « {other} » : quotas non additionnés.");
+                panel.note = Some(match panel.note {
+                    Some((note, tone)) => (format!("{note} · {text}"), tone),
+                    None => (text, Tone::Neutral),
+                });
+            }
+            panel
+        })
+        .collect()
+}
+
 #[cfg(target_os = "macos")]
 fn panel_model(app: &tauri::AppHandle) -> PanelModel {
-    let snapshots = get_quota_snapshots(app.clone());
     let prefs = prefs::current(app);
     // Every visible Claude profile, drawn with the saved Compacte/Classique choice.
     let accounts: Vec<_> = claude::accounts(app)
         .into_iter()
         .filter(|a| a.profile.visible && claude_is_visible(&a.snapshot))
         .collect();
+    // Every visible Codex environment (primary = historical collector).
+    let codex_accounts = codex::accounts(app);
     let codex_status = app
         .try_state::<codex::Provider>()
         .map(|provider| provider.status());
@@ -1554,19 +1576,14 @@ fn panel_model(app: &tauri::AppHandle) -> PanelModel {
         .as_ref()
         .map(|status| status.phase.clone())
         .unwrap_or_else(|| "starting".into());
-    let providers = quota_providers(
-        &prefs,
-        &snapshots,
-        &connection_phase,
-        codex_status
-            .as_ref()
-            .map(|s| s.message.as_str())
-            .unwrap_or(""),
-        codex_status.as_ref().and_then(|s| s.plan_type.clone()),
-        &accounts,
-    );
+    let providers = quota_providers(&prefs, &codex_accounts, &accounts);
+    let shown_rows: Vec<QuotaPayload> = codex_accounts
+        .iter()
+        .filter(|a| prefs.codex_enabled && a.profile.visible)
+        .flat_map(|a| a.rows.iter().cloned())
+        .collect();
     let claude_snaps: Vec<_> = accounts.iter().map(|a| &a.snapshot).collect();
-    let header = panel_header(&providers, latest_refresh(&snapshots, &claude_snaps));
+    let header = panel_header(&providers, latest_refresh(&shown_rows, &claude_snaps));
     PanelModel {
         header,
         providers,
@@ -1606,7 +1623,11 @@ async fn choose_claude_profile_folder(app: tauri::AppHandle) -> Result<Option<St
     let (tx, rx) = std::sync::mpsc::channel();
     app.run_on_main_thread(move || {
         let mtm = MainThreadMarker::new().expect("folder picker runs on main thread");
-        let _ = tx.send(pick_profile_folder(mtm));
+        let _ = tx.send(pick_profile_folder(
+            mtm,
+            "Choisissez le dossier d’un profil Claude Code déjà connecté (par exemple .claude-travail). Aucun compte n’est créé.",
+            "Suivre ce profil",
+        ));
     })
     .map_err(|e| e.to_string())?;
     tauri::async_runtime::spawn_blocking(move || rx.recv())
@@ -1615,20 +1636,45 @@ async fn choose_claude_profile_folder(app: tauri::AppHandle) -> Result<Option<St
         .map_err(|_| "Sélecteur de dossier interrompu.".to_string())
 }
 
+/// Same chooser for « Ajouter un compte » Codex: one existing CODEX_HOME
+/// folder, path only (no content read, no login, no folder created).
 #[cfg(target_os = "macos")]
-fn pick_profile_folder(mtm: MainThreadMarker) -> Option<String> {
+#[tauri::command]
+async fn choose_codex_profile_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let mtm = MainThreadMarker::new().expect("folder picker runs on main thread");
+        let _ = tx.send(pick_profile_folder(
+            mtm,
+            "Choisissez un dossier CODEX_HOME existant (par exemple .codex-travail). Aucun compte n’est créé ni connecté.",
+            "Suivre ce dossier",
+        ));
+    })
+    .map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || rx.recv())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|_| "Sélecteur de dossier interrompu.".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn choose_codex_profile_folder() -> Result<Option<String>, String> {
+    Err("Sélecteur de dossier indisponible : indiquez le chemin absolu du dossier CODEX_HOME.".into())
+}
+
+#[cfg(target_os = "macos")]
+fn pick_profile_folder(mtm: MainThreadMarker, message: &str, prompt: &str) -> Option<String> {
     use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
     let panel = NSOpenPanel::openPanel(mtm);
     panel.setCanChooseDirectories(true);
     panel.setCanChooseFiles(false);
     panel.setAllowsMultipleSelection(false);
     panel.setCanCreateDirectories(false);
-    // Claude Code profiles are usually hidden folders (~/.claude-travail).
+    // Profiles are usually hidden folders (~/.claude-travail, ~/.codex-travail).
     panel.setShowsHiddenFiles(true);
-    panel.setMessage(Some(&NSString::from_str(
-        "Choisissez le dossier d’un profil Claude Code déjà connecté (par exemple .claude-travail). Aucun compte n’est créé.",
-    )));
-    panel.setPrompt(Some(&NSString::from_str("Suivre ce profil")));
+    panel.setMessage(Some(&NSString::from_str(message)));
+    panel.setPrompt(Some(&NSString::from_str(prompt)));
     if let Some(home) = std::env::var_os("HOME") {
         let url =
             objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&home.to_string_lossy()));
@@ -2610,6 +2656,76 @@ pub fn quota_ui_smoke(directory: &str) {
             "compact",
         )],
     ));
+    // Multi-Codex: production projection (account_view -> mark_duplicates ->
+    // codex_account_panels), synthetic rows only, no Codex process.
+    let codex_env = |name: &str, primary: bool, phase: &str, message: &str, rows: &[QuotaPayload], identity: Option<u64>| {
+        let found = codex_accounts::Discovered {
+            profile: claude_accounts::Profile {
+                id: format!("profile:{name}"),
+                path: format!("/fixture/.codex-{name}"),
+                name: name.into(),
+                visible: true,
+            },
+            primary,
+            tracked: true,
+            launch: (!primary).then(|| format!("/fixture/.codex-{name}").into()),
+            available: true,
+            visible: true,
+        };
+        let reading = codex::Reading {
+            phase: phase.into(),
+            message: message.into(),
+            // Signed out: account/read returns no account, hence no plan.
+            plan_type: (phase == "ready").then(|| if primary { "plus" } else { "pro" }.into()),
+            rows: (!rows.is_empty()).then(|| rows.to_vec()),
+            identity,
+            last_checked: None,
+        };
+        let view = codex::PrimaryView {
+            status: codex::Status {
+                phase: phase.into(),
+                message: message.into(),
+                plan_type: Some("plus".into()),
+                ..codex::Status::default()
+            },
+            rows: rows.to_vec(),
+            identity,
+        };
+        codex::account_view(found, true, Some(&view), (!primary).then_some((reading, false)))
+    };
+    let mut work_codex = native_codex.clone();
+    work_codex[0].remaining = 18;
+    work_codex[0].reset_at = (Local::now() + chrono::Duration::minutes(42)).to_rfc3339();
+    work_codex[1].remaining = 64;
+    let mut codex_envs = vec![
+        codex_env("Principal", true, "ready", "", &native_codex, Some(1)),
+        codex_env("Travail", false, "ready", "", &work_codex[..2], Some(2)),
+        codex_env(
+            "Perso",
+            false,
+            "signed_out",
+            "Non connecté. Connectez ce dossier dans un terminal : CODEX_HOME=/fixture/.codex-Perso codex login",
+            &[],
+            None,
+        ),
+        codex_env("Alias", false, "ready", "", &native_codex[..2], Some(1)),
+    ];
+    codex::mark_duplicates(&mut codex_envs);
+    scenarios.push((
+        "codex-multi-accounts",
+        codex_account_panels(&codex_envs, "compact"),
+    ));
+    scenarios.push((
+        "codex-multi-accounts-classic",
+        codex_account_panels(&codex_envs, "classic"),
+    ));
+    scenarios.push((
+        "codex-and-claude-multi",
+        codex_account_panels(&codex_envs[..2], "compact")
+            .into_iter()
+            .chain(claude_account_panels(&[fixture("Personnel", "pro", Some(27.0), Some(14.0), None), work.clone()], false))
+            .collect(),
+    ));
     let target = QuotaMenuTarget::new(mtm);
     // Main-thread AppKit regression checks use the production builder without
     // starting Tauri, reading preferences, or contacting either quota provider.
@@ -3179,6 +3295,11 @@ pub fn run() {
             claude::add_claude_profile,
             claude::follow_claude_profile,
             choose_claude_profile_folder,
+            choose_codex_profile_folder,
+            codex::get_codex_accounts,
+            codex::add_codex_profile,
+            codex::follow_codex_profile,
+            codex::untrack_codex_profile,
             claude::request_claude_refresh,
             claude::install_claude_relay,
             claude::uninstall_claude_relay,
@@ -3251,6 +3372,8 @@ pub fn run() {
             build_desktop(app)?;
 
             app.manage(codex::start(app.handle().clone()));
+            // Additional followed CODEX_HOME homes (none by default).
+            app.state::<codex::Provider>().reconcile(app.handle());
             claude::start_watcher(app.handle().clone());
             Ok(())
         })
@@ -3628,6 +3751,142 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    fn codex_fixture(name: &str, primary: bool, visible: bool, rows: &[QuotaPayload]) -> codex::CodexAccount {
+        let found = codex_accounts::Discovered {
+            profile: claude_accounts::Profile {
+                id: format!("profile:{name}"),
+                path: format!("/fixture/{name}"),
+                name: name.into(),
+                visible,
+            },
+            primary,
+            tracked: true,
+            launch: (!primary).then(|| format!("/fixture/{name}").into()),
+            available: true,
+            visible,
+        };
+        let status = codex::Status {
+            phase: "ready".into(),
+            message: "Quotas synchronisés directement avec Codex.".into(),
+            ..codex::Status::default()
+        };
+        let reading = codex::Reading {
+            phase: "ready".into(),
+            message: status.message.clone(),
+            rows: Some(rows.to_vec()),
+            ..Default::default()
+        };
+        let view = codex::PrimaryView {
+            status,
+            rows: rows.to_vec(),
+            identity: None,
+        };
+        codex::account_view(found, true, Some(&view), (!primary).then_some((reading, false)))
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn one_visible_codex_account_is_the_exact_historical_card() {
+        let rows = [
+            payload("five-hour", 63, Some(300)),
+            payload("weekly", 85, Some(10080)),
+        ];
+        for layout in ["compact", "classic"] {
+            let historical = codex_presentation(&rows, "ready", "Quotas synchronisés directement avec Codex.", None, layout);
+            // Unique (primary only) and Multi with a hidden extra.
+            for accounts in [
+                vec![codex_fixture("Principal", true, true, &rows)],
+                vec![
+                    codex_fixture("Principal", true, true, &rows),
+                    codex_fixture("Travail", false, false, &rows[..1]),
+                ],
+            ] {
+                let panels = codex_account_panels(&accounts, layout);
+                assert_eq!(panels, vec![historical.clone()]);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn several_codex_accounts_get_named_cards_following_the_single_layout() {
+        let rows = [
+            payload("five-hour", 63, Some(300)),
+            payload("weekly", 85, Some(10080)),
+        ];
+        let work_rows = [
+            payload("five-hour", 12, Some(300)),
+            payload("weekly", 40, Some(10080)),
+        ];
+        let mut signed_out = codex_fixture("Perso", false, true, &[]);
+        signed_out.phase = "signed_out".into();
+        signed_out.message = "Non connecté. Connectez ce dossier dans un terminal : CODEX_HOME=/fixture/Perso codex login".into();
+        let mut dup = codex_fixture("Alias", false, true, &rows);
+        dup.duplicate_of = Some("Principal".into());
+        let accounts = vec![
+            codex_fixture("Principal", true, true, &rows),
+            codex_fixture("Travail", false, true, &work_rows),
+            signed_out,
+            dup,
+            codex_fixture("Caché", false, false, &work_rows),
+        ];
+        let compact = codex_account_panels(&accounts, "compact");
+        let classic = codex_account_panels(&accounts, "classic");
+        let names: Vec<_> = compact.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Codex · Principal", "Codex · Travail", "Codex · Perso", "Codex · Alias"]);
+        assert!(compact.iter().all(|p| p.compact) && classic.iter().all(|p| !p.compact));
+        // Each named card pairs its own real windows (not only the plain "Codex").
+        assert_eq!(paired_panel_rows(&compact[0]).len(), 2);
+        assert_eq!(paired_panel_rows(&compact[1]).len(), 2);
+        // Named card with a weekly-only real window + another bucket: only the
+        // real same-bucket window is paired (Codex rule, not "first two rows").
+        let weekly = [
+            payload("codex:codex:secondary", 40, Some(10080)),
+            payload("codex:review:secondary", 70, Some(10080)),
+        ];
+        let pair = codex_account_panels(
+            &[
+                codex_fixture("Principal", true, true, &rows),
+                codex_fixture("Hebdo", false, true, &weekly),
+            ],
+            "compact",
+        );
+        assert_eq!(pair[1].name, "Codex · Hebdo");
+        let paired = paired_panel_rows(&pair[1]);
+        assert_eq!(paired.len(), 1);
+        assert_eq!(paired[0].pair_slot, Some(1));
+        assert_eq!(compact[0].rows[0].remaining, Some(63));
+        assert_eq!(compact[1].rows[0].remaining, Some(12), "no aggregation");
+        // Signed out: a note, no invented bars.
+        assert!(compact[2].rows.is_empty());
+        let (note, tone) = compact[2].note.clone().unwrap();
+        assert!(note.contains("Non connecté") && tone == Tone::Warning);
+        // Same identity: flagged, values kept apart.
+        assert!(compact[3].note.as_ref().unwrap().0.contains("Même compte que « Principal »"));
+        assert_eq!(compact[3].rows[0].remaining, Some(63));
+        // Codex disabled: no card at all; Claude-only providers unaffected.
+        let mut prefs = prefs::Prefs::default();
+        prefs.codex_enabled = false;
+        assert!(quota_providers(&prefs, &accounts, &[]).is_empty());
+        prefs.codex_enabled = true;
+        prefs.layout = "classic".into();
+        assert_eq!(quota_providers(&prefs, &accounts, &[]), classic);
+        // Compact model (React compact window) keeps the pair slots per card.
+        let model = PanelModel {
+            header: panel_header(&compact, None),
+            providers: compact.clone(),
+            connection: None,
+        };
+        let serialized = compact_panel(&model, "fixture", None);
+        assert_eq!(serialized.providers.len(), 4);
+        assert_eq!(serialized.providers[1].section, "CODEX · TRAVAIL");
+        assert_eq!(
+            serialized.providers[1].rows.iter().filter(|r| r.pair_slot.is_some()).count(),
+            2
+        );
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn one_saved_layout_switches_codex_and_claude_in_the_native_menu() {
         let rows = [
@@ -3641,7 +3900,7 @@ mod tests {
                 format!(r#"{{"layout":"{layout}","claudeEnabled":true,"codexLayout":"classic"}}"#)
                     .as_bytes(),
             );
-            quota_providers(&prefs, &rows, "ready", "", None, &[personal.clone()])
+            quota_providers(&prefs, &[codex_fixture("Principal", true, true, &rows)], &[personal.clone()])
         };
         let (compact, classic) = (build("compact"), build("classic"));
         assert_eq!((compact.len(), classic.len()), (2, 2));

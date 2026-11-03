@@ -1,6 +1,6 @@
 //! Opt-in, best-effort ntfy delivery. A single bounded worker owns the persistent
 //! attempt ledger; quota collection never waits for disk or network delivery.
-use crate::{claude, codex, prefs, QuotaState};
+use crate::{claude, codex, prefs};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, path::Path, sync::mpsc, time::Duration};
 use tauri::Manager;
@@ -124,35 +124,49 @@ fn timestamp(value: &str) -> Option<i64> {
 fn observations(app: &tauri::AppHandle, p: &prefs::Prefs) -> Vec<Observation> {
     let mut out = Vec::new();
     if p.codex_enabled {
-        let ready = app
-            .try_state::<codex::Provider>()
-            .is_some_and(|s| s.status().phase == "ready");
-        if let Ok(rows) = app.state::<QuotaState>().0.lock() {
-            for row in rows.iter() {
-                out.push(Observation {
-                    key: format!("Codex:{}", row.period),
-                    provider: "Codex".into(),
-                    window: if crate::is_reserve(row) {
-                        "réserve"
-                    } else {
-                        match row.window_minutes {
-                            Some(300) => "5 heures",
-                            Some(10080) => "7 jours",
-                            _ => "autre limite",
-                        }
-                    },
-                    used: row.used_percent,
-                    checked: timestamp(&row.checked_at),
-                    reset: timestamp(&row.reset_at),
-                    valid: ready && row.confidence == "high" && row.source == "codex",
-                });
-            }
-        }
+        out.extend(codex_account_observations(&codex::accounts(app)));
     }
     if p.claude_enabled {
         out.extend(claude_profile_observations(&claude::raw_accounts(app)));
     }
     out
+}
+
+/// Every followed Codex environment (visibility is display only), stable key
+/// `Codex:<environment id>:<period>`. The account name appears only when
+/// several environments are followed; a single one keeps the v3.1.0 text.
+/// A home returning the same identity as an earlier one is skipped, so one
+/// account never notifies twice.
+fn codex_account_observations(accounts: &[codex::CodexAccount]) -> Vec<Observation> {
+    let named = accounts.iter().filter(|a| a.tracked).count() > 1;
+    accounts
+        .iter()
+        .filter(|a| a.tracked && a.duplicate_of.is_none())
+        .flat_map(|a| {
+            let ready = a.phase == "ready";
+            a.raw_rows.iter().map(move |row| Observation {
+                key: format!("Codex:{}:{}", a.profile.id, row.period),
+                provider: if named {
+                    format!("Codex · {}", a.profile.name)
+                } else {
+                    "Codex".into()
+                },
+                window: if crate::is_reserve(row) {
+                    "réserve"
+                } else {
+                    match row.window_minutes {
+                        Some(300) => "5 heures",
+                        Some(10080) => "7 jours",
+                        _ => "autre limite",
+                    }
+                },
+                used: row.used_percent,
+                checked: timestamp(&row.checked_at),
+                reset: timestamp(&row.reset_at),
+                valid: ready && row.confidence == "high" && row.source == "codex",
+            })
+        })
+        .collect()
 }
 
 /// Every profile is observed (visibility is display-only) with a stable key
@@ -248,6 +262,24 @@ impl Ledger {
             }
         }
         changed
+    }
+    /// Bind historical unqualified Codex entries (`Codex:<period>`) once to
+    /// the startup primary environment. Qualified keys are left untouched.
+    fn migrate_codex_primary(&mut self, id: &str) -> bool {
+        let legacy: Vec<String> = self
+            .0
+            .keys()
+            .filter(|k| k.starts_with("Codex:") && !k.starts_with("Codex:profile:"))
+            .cloned()
+            .collect();
+        for key in &legacy {
+            if let Some(value) = self.0.remove(key) {
+                self.0
+                    .entry(format!("Codex:{id}:{}", &key["Codex:".len()..]))
+                    .or_insert(value);
+            }
+        }
+        !legacy.is_empty()
     }
     fn observe(&mut self, enabled: bool, o: &Observation, now: i64) -> Option<String> {
         if !enabled
@@ -397,6 +429,15 @@ pub fn start(app: tauri::AppHandle) {
         };
         if let Some(primary) = claude::accounts(&app).into_iter().find(|a| a.primary) {
             if ledger.migrate_primary(&primary.profile.id) && ledger.save(&path).is_err() {
+                eprintln!("Notifications ntfy suspendues : migration non enregistrable.");
+                return;
+            }
+        }
+        let codex_primary = codex::discovered(&app, &prefs::current(&app))
+            .into_iter()
+            .find(|a| a.primary);
+        if let Some(primary) = codex_primary {
+            if ledger.migrate_codex_primary(&primary.profile.id) && ledger.save(&path).is_err() {
                 eprintln!("Notifications ntfy suspendues : migration non enregistrable.");
                 return;
             }
@@ -1078,5 +1119,94 @@ mod tests {
         assert!(send(&c, "test local timeout").is_err());
         assert!(started.elapsed() < Duration::from_secs(11));
         server.join().unwrap();
+    }
+
+    fn codex_account(name: &str, primary: bool, used5: f64, identity: Option<u64>) -> codex::CodexAccount {
+        let found = crate::codex_accounts::Discovered {
+            profile: crate::claude_accounts::Profile {
+                id: format!("profile:{name}"),
+                path: format!("/fixture/{name}"),
+                name: name.into(),
+                visible: true,
+            },
+            primary,
+            tracked: true,
+            launch: (!primary).then(|| format!("/fixture/{name}").into()),
+            available: true,
+            visible: true,
+        };
+        let checked = chrono::DateTime::from_timestamp(1000, 0).unwrap().to_rfc3339();
+        let mut rows = codex::normalize(&serde_json::json!({"rateLimits":{
+            "primary":{"usedPercent":used5,"windowDurationMins":300,"resetsAt":2000}
+        }}))
+        .unwrap();
+        for row in &mut rows {
+            row.checked_at = checked.clone();
+        }
+        let reading = codex::Reading {
+            phase: "ready".into(),
+            rows: Some(rows.clone()),
+            identity,
+            ..Default::default()
+        };
+        let primary_view = codex::PrimaryView {
+            status: codex::Status {
+                phase: "ready".into(),
+                ..codex::Status::default()
+            },
+            rows,
+            identity,
+        };
+        codex::account_view(found, true, Some(&primary_view), (!primary).then_some((reading, false)))
+    }
+
+    #[test]
+    fn codex_accounts_notify_separately_without_duplicates_and_legacy_keys_migrate_once() {
+        // One environment: v3.1.0 wording, key qualified by the environment id.
+        let single = codex_account_observations(&[codex_account("Principal", true, 50.0, None)]);
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].provider, "Codex");
+        assert_eq!(single[0].key, "Codex:profile:Principal:codex:codex:primary");
+        // Several: per-account keys and names; same identity notifies once.
+        let mut accounts = vec![
+            codex_account("Principal", true, 50.0, Some(7)),
+            codex_account("Travail", false, 50.0, Some(8)),
+            codex_account("Alias", false, 50.0, Some(7)),
+        ];
+        codex::mark_duplicates(&mut accounts);
+        let rows = codex_account_observations(&accounts);
+        let keys: Vec<_> = rows.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "Codex:profile:Principal:codex:codex:primary",
+                "Codex:profile:Travail:codex:codex:primary"
+            ]
+        );
+        assert_eq!(rows[1].provider, "Codex · Travail");
+        let mut ledger = Ledger::default();
+        assert!(ledger.observe_all(&rows, 1000).is_none()); // silent baseline
+        let refilled: Vec<_> = vec![
+            codex_account("Principal", true, 0.0, Some(7)),
+            codex_account("Travail", false, 50.0, Some(8)),
+            codex_account("Alias", false, 0.0, Some(7)),
+        ];
+        let mut refilled = refilled;
+        codex::mark_duplicates(&mut refilled);
+        let message = ledger
+            .observe_all(&codex_account_observations(&refilled), 1000)
+            .unwrap();
+        assert_eq!(message, "Codex · Principal · 5 heures : quota reconstitué (100 % restant).");
+        // Legacy unqualified Codex entries move once to the primary id.
+        let mut legacy: Ledger = serde_json::from_value(serde_json::json!({
+            "Codex:codex:codex:primary": {"reset":null,"full":true,"attempted":true,"checked":900},
+            "Claude:claude:five_hour": {"reset":null,"full":true,"attempted":false,"checked":900}
+        }))
+        .unwrap();
+        assert!(legacy.migrate_codex_primary("profile:Principal"));
+        assert!(legacy.0.contains_key("Codex:profile:Principal:codex:codex:primary"));
+        assert!(!legacy.0.contains_key("Codex:codex:codex:primary"));
+        assert!(legacy.0.contains_key("Claude:claude:five_hour"), "Claude keys untouched");
+        assert!(!legacy.migrate_codex_primary("profile:Other"), "only once");
     }
 }
