@@ -27,6 +27,7 @@ try{
  for(const scenario of ['weekly','edge','empty']){await open(1,`scenario=one&codex=yes&claude=off&codexLayout=compact&codexState=${scenario}`,360,'dark');const state=await geometry();assert.equal(state.overflow,false);assert.equal(state.meters,scenario==='empty'?0:scenario==='weekly'?1:3);if(scenario==='weekly')assert.equal(state.short.length,0);results.push({name:'edge-'+scenario,...state});}
  for(const scheme of ['light','dark'])for(const model of ['codex-compact','codex-classic','codex-both-compact','codex-weekly-only']){
   await open(2,`model=${model}`,324,scheme);const state=await geometry();assert.equal(state.overflow,false);if(model==='codex-compact'){assert.equal(state.short[0].height,5);assert.equal(state.week[0].height,3);assert.equal(state.week[0].top-state.short[0].bottom,2);}
+  if(model==='codex-weekly-only'){assert.equal(state.short.length,0);assert.equal(state.meters,2);assert.equal(await evaluate(`document.querySelectorAll('.compact-pair [role="meter"]').length`),1);assert.equal(await evaluate(`document.querySelector('.compact-pair__track--week').getBoundingClientRect().y-document.querySelector('.compact-pair__bars').getBoundingClientRect().y`),7);}
   await capture(`compact-${model}-${scheme}`);results.push({name:`compact-${model}-${scheme}`,...state});
  }
  await open(1,'view=settings&scenario=one&codex=yes&codexLayout=compact&layout=compact&platform=macos',480,'light');

@@ -77,6 +77,7 @@ function Pair({ rows }: { rows: CompactRow[] }) {
         // A fill narrower than its own track height only shows the track.
         const visible = row.fill.ratio * 276 >= (week ? 3 : 5);
         return <div key={index} className={"compact-row__track compact-pair__track--" + (week ? "week" : "short")}
+          style={{ gridRow: slot + 1 }}
           role="meter" aria-label={`${windows[slot]} : ${row.label} · ${row.remaining === null ? row.value : `${row.value} restant`}`}
           aria-valuemin={0} aria-valuemax={100} aria-valuenow={row.remaining ?? undefined}
           aria-valuetext={row.remaining === null ? row.value : `${row.value} restant`}>

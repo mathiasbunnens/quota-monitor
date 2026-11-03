@@ -56,6 +56,7 @@ test("Codex paired windows use explicit slots and preserve unknown and additiona
   assert.match(paired,/compact-pair__track--short/);assert.match(paired,/compact-pair__track--week/);
   assert.match(paired,/1h35 · 85 %/);assert.match(paired,/Autre modèle/);
   const only = render([week]);
+  assert.match(only,/grid-row:2/); // no fictitious meter, but retain the native weekly y slot
   assert.doesNotMatch(only,/compact-pair__track--short/);assert.match(only,/compact-pair__track--week/);
   assert.equal((only.match(/role="meter"/g)||[]).length,1);
   assert.doesNotMatch(render([week],false),/class="compact-pair"/);
