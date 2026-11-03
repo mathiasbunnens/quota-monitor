@@ -67,15 +67,17 @@ function Pair({ rows }: { rows: CompactRow[] }) {
   return <div className="compact-pair">
     <div className="compact-pair__values">
       {rows.map((row, index) => <span key={index} className={row.low ? "is-low" : undefined}
-        title={`${windows[index]} · ${row.label} · ${row.reset}`}>{pairHeading(row)}</span>)}
+        style={{ marginLeft: row.pairSlot === 1 ? "auto" : undefined }}
+        title={`${windows[row.pairSlot ?? index]} · ${row.label} · ${row.reset}`}>{pairHeading(row)}</span>)}
     </div>
     <div className="compact-pair__bars">
       {rows.map((row, index) => {
-        const week = index === 1;
+        const slot = row.pairSlot ?? index;
+        const week = slot === 1;
         // A fill narrower than its own track height only shows the track.
         const visible = row.fill.ratio * 276 >= (week ? 3 : 5);
         return <div key={index} className={"compact-row__track compact-pair__track--" + (week ? "week" : "short")}
-          role="meter" aria-label={`${windows[index]} : ${row.label} · ${row.remaining === null ? row.value : `${row.value} restant`}`}
+          role="meter" aria-label={`${windows[slot]} : ${row.label} · ${row.remaining === null ? row.value : `${row.value} restant`}`}
           aria-valuemin={0} aria-valuemax={100} aria-valuenow={row.remaining ?? undefined}
           aria-valuetext={row.remaining === null ? row.value : `${row.value} restant`}>
           {visible && <span className="compact-row__fill"
@@ -126,6 +128,12 @@ export type CompactPanelProps = {
 };
 
 export function CompactPanel({ panel, error, pending, onSettings, onUpdate, onConnect }: CompactPanelProps) {
+  const pairRows = (provider: NonNullable<CompactPanelModel>["providers"][number]) => {
+    if (!provider.compact) return [];
+    // Compatibility for historical Claude fixture models without pairSlot.
+    if (provider.name !== "Codex" && provider.rows.every(r => r.pairSlot === undefined)) return provider.rows.length >= 2 ? provider.rows.slice(0, 2) : [];
+    return provider.rows.filter(r => r.pairSlot === 0 || r.pairSlot === 1).sort((a, b) => a.pairSlot! - b.pairSlot!);
+  };
   const update = updateIndicator(panel?.update ?? null);
   const updateTitle = update.state === "idle"
     ? "Vérifier les mises à jour…"
@@ -166,8 +174,8 @@ export function CompactPanel({ panel, error, pending, onSettings, onUpdate, onCo
         {provider.badge && <span className="compact-provider__badge">{provider.badge}</span>}
       </div>
       <div className="compact-card">
-        {provider.compact && provider.rows.length >= 2 && <Pair rows={provider.rows.slice(0, 2)} />}
-        {provider.rows.slice(provider.compact && provider.rows.length >= 2 ? 2 : 0)
+        {pairRows(provider).length > 0 && <Pair rows={pairRows(provider)} />}
+        {provider.rows.filter(row => !pairRows(provider).includes(row))
           .map((row, index) => <Row key={`${row.label}-${index}`} row={row} />)}
         {provider.note && <p className={`compact-card__note compact-tone--${provider.note.tone}`
           + (provider.rows.length ? " has-rows" : "")}>{provider.note.text}</p>}

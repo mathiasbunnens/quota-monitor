@@ -8,6 +8,10 @@ export function claudeLayoutOf(prefs: { claudeLayout?: string; claudeAccounts?: 
   return prefs.claudeLayout === "classic" ? "classic" : "compact";
 }
 
+export function codexLayoutOf(prefs: { codexLayout?: string } | null | undefined): ClaudeLayout {
+  return prefs?.codexLayout === undefined || prefs.codexLayout === "classic" ? "classic" : "compact";
+}
+
 export type ClaudeCard = { key: string; name: string; snapshot: ClaudeSnapshot | null; account: ClaudeAccount | null };
 /** Cards to draw and how, shared by every React view (mirrors the native
  *  `claude_account_panels`). The layout applies to one or several cards;
@@ -56,6 +60,8 @@ export function quotaLabel(snapshot: QuotaSnapshot) {
 
 export type QuotaRow = {
   id: string;
+  /** Slot in the paired block, only for a real window of the selected bucket. */
+  pairSlot?: 0 | 1;
   label: string;
   modelLabel?: string;
   /** Remaining percentage, or null when the provider did not report it. */
@@ -64,16 +70,32 @@ export type QuotaRow = {
   /** Human text shown instead of a percentage when remaining is null. */
   missing: string;
   resetText: string;
-  /** Structured reset (RFC 3339) for local countdowns; absent for Codex rows. */
+  /** Structured reset (RFC 3339) for local countdowns, without collection. */
   resetAt?: string | null;
 };
 
 export function codexRows(snapshots: QuotaSnapshot[]): QuotaRow[] {
-  return snapshots.map((snapshot) => {
+  const window = (s: QuotaSnapshot): { bucket: string; slot: 0 | 1 } | null => {
+    if (/reserve|luna|base_model_inference/i.test(s.period)) return null;
+    if (s.period === "five-hour" || s.period === "weekly") return { bucket: "legacy", slot: s.period === "five-hour" ? 0 : 1 };
+    const match = /^(codex:.+):(primary|secondary)$/.exec(s.period);
+    if (!match || (s.windowMinutes !== 300 && s.windowMinutes !== 10080)) return null;
+    return { bucket: match[1] + ":" + s.model, slot: s.windowMinutes === 300 ? 0 : 1 };
+  };
+  const windows = snapshots.map(window);
+  const bucket = windows.find((w) => w?.bucket.startsWith("codex:codex:"))?.bucket
+    ?? windows.find((w) => w !== null)?.bucket;
+  const selected = new Set<number>();
+  for (const slot of [0, 1]) {
+    const index = windows.findIndex((w) => w?.bucket === bucket && w?.slot === slot);
+    if (index >= 0) selected.add(index);
+  }
+  return snapshots.map((snapshot, index) => {
     const remaining = Math.round(quotaPercentage(snapshot));
     return {
       id: snapshot.period, label: quotaLabel(snapshot), remaining, exhausted: remaining <= 0,
-      missing: "", resetText: formatResetDate(snapshot.resetAt),
+      ...(selected.has(index) ? { pairSlot: windows[index]!.slot } : {}),
+      missing: "", resetText: formatResetDate(snapshot.resetAt), resetAt: snapshot.resetAt,
     };
   });
 }

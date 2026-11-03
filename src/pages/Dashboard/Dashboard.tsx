@@ -4,7 +4,7 @@ import ResetCredits from "../../features/quota/ResetCredits";
 import ProviderCard from "../../features/quota/ProviderCard";
 import { useCallback, useEffect, useState } from "react";
 import CodexConnection from "../../features/setup/CodexConnection";
-import { claudePlan, claudeRows, claudeStatusText, codexRows } from "../../features/quota/providers";
+import { claudePlan, claudeRows, claudeStatusText, codexRows, codexLayoutOf } from "../../features/quota/providers";
 import type { ClaudeAccount, ClaudeSnapshot, CodexStatus, Preferences, QuotaSnapshot } from "../../features/quota/types";
 import "./dashboard.scss";
 
@@ -75,6 +75,7 @@ export default function Dashboard() {
   // Shared with the native menu/compact window: the saved Compacte/Classique
   // choice applies to one or several cards; only names/notes follow the count.
   const plan = claudePlan(prefs, accounts, claude);
+  const codexPaired = codexLayoutOf(prefs) === "compact";
   const fableEnabled = prefs?.fableEnabled ?? true;
 
   const refresh = async () => {
@@ -118,7 +119,8 @@ export default function Dashboard() {
     {/* Classique with several accounts: full-width stacked sections, like the menu. */}
     <div className={"provider-grid" + (plan.named && !plan.paired ? ""
       : (both || plan.named ? " provider-grid--two" : "") + (plan.named ? " provider-grid--accounts" : ""))}>
-      {codexOn && <ProviderCard name="Codex" badge={status?.planType} rows={codexRows(snapshots)} compact={both}
+      {codexOn && <ProviderCard name="Codex" badge={status?.planType} rows={codexRows(snapshots)} compact={codexPaired || both}
+        accountCompact={codexPaired} now={now}
         status={codexStatus} error={codexFailure}
         empty={status?.phase === "ready" ? "Aucun quota à afficher. La réserve peut ne pas être communiquée par Codex." : "Quotas indisponibles."} />}
       {plan.cards.map(({ key, name, snapshot, account }) => <ProviderCard key={key} name={name}

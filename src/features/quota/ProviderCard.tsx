@@ -66,8 +66,8 @@ function PairedProgress({ row, className }: { row: QuotaRow; className: string }
 
 /** 5 h row and the weekly row (or the weekly window coalesced into Fable). */
 function pairedRows(rows: QuotaRow[]) {
-  const short = rows.find((row) => row.id.endsWith("five_hour"));
-  const week = rows.find((row) => row.id.endsWith("seven_day"))
+  const short = rows.find((row) => row.pairSlot === 0 || row.id === "claude:five_hour" || row.id === "five_hour");
+  const week = rows.find((row) => row.pairSlot === 1 || row.id === "claude:seven_day" || row.id === "seven_day")
     ?? rows.find((row, index) => index === 1 && row.id === "claude:weekly_fable");
   return { short, week, others: rows.filter((row) => row !== short && row !== week) };
 }

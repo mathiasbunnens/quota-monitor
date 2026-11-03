@@ -8,7 +8,7 @@ import NtfySettings from "./NtfySettings";
 import ClaudeAccountsSettings from "./ClaudeAccountsSettings";
 import ResetCredits from "../quota/ResetCredits";
 import type { ClaudeAccount, ClaudeLayout, ClaudeSnapshot, CodexStatus, DisplayMode, IndicatorChoice, Preferences } from "../quota/types";
-import { claudeLayoutOf } from "../quota/providers";
+import { claudeLayoutOf, codexLayoutOf } from "../quota/providers";
 import "../../pages/Dashboard/dashboard.scss";
 import "./settings.scss";
 
@@ -352,8 +352,11 @@ export default function Settings() {
           <Choices legend="Afficher dans la barre des menus" label="Indicateur de la barre des menus (quota 5 heures)" name="indicator"
             options={indicatorOptions} value={prefs.indicator} onChange={(indicator) => void update({ indicator })} />
         </fieldset>}
-        {/* Presentation only, for one or several Claude accounts: independent of
-            Fournisseurs → Claude (Unique/Multi, visibility). Never a quota read. */}
+        {/* Independent provider presentation, without quota collection. */}
+        <fieldset className="prefs-group" aria-busy={busy || undefined}>
+          <Choices legend="Présentation Codex" label="Présentation Codex" name="codexLayout" tiles
+            options={claudeLayoutOptions} value={codexLayoutOf(prefs)} onChange={(codexLayout) => void update({ codexLayout })} />
+        </fieldset>
         <fieldset className="prefs-group" aria-busy={busy || undefined}>
           <Choices legend="Présentation Claude" label="Présentation des comptes Claude" name="claudeLayout" tiles
             options={claudeLayoutOptions} value={layout} onChange={(claudeLayout) => void update({ claudeLayout })} />

@@ -10,6 +10,7 @@ export type QuotaSnapshot = {
   confidence: "low" | "medium" | "high";
   period: QuotaPeriod;
   label?: string | null;
+  windowMinutes?: number | null;
 };
 export type CodexStatus = {
   phase: "starting" | "disabled" | "missing" | "signed_out" | "ready" | "error" | "logging_in";
@@ -52,6 +53,8 @@ export type Preferences = {
   ntfy: NtfyConfig;
   /** Absent in older files: see `claudeLayoutOf` (same migration as Rust). */
   claudeLayout?: ClaudeLayout;
+  /** Absent older key preserves historical Codex rows. Independent of Claude. */
+  codexLayout?: ClaudeLayout;
 };
 
 export type ClaudeMetric = {

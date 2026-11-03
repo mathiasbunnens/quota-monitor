@@ -46,6 +46,8 @@ pub struct Prefs {
     /// "compact" (paired 5 h/7 j bars) or "classic" (historical separated
     /// rows), for one or several accounts. Display only.
     pub claude_layout: String,
+    /// Codex-only presentation. Absent older key preserves historical rows.
+    pub codex_layout: String,
 }
 
 impl Default for Prefs {
@@ -59,6 +61,7 @@ impl Default for Prefs {
             ntfy: crate::ntfy::Config::default(),
             claude_accounts: crate::claude_accounts::AccountPrefs::default(),
             claude_layout: CLAUDE_LAYOUT_CLASSIC.into(),
+            codex_layout: CLAUDE_LAYOUT_CLASSIC.into(),
         }
     }
 }
@@ -95,6 +98,7 @@ pub fn parse(bytes: &[u8]) -> Prefs {
             // Unknown/absent mode (older file) keeps the menu-bar behaviour
             // without discarding the rest of the preferences.
             prefs.display_mode = crate::display_mode::normalize(&prefs.display_mode).into();
+            prefs.codex_layout = normalize_claude_layout(&prefs.codex_layout).into();
             // Explicit migration: an older file keeps its look; once saved,
             // the explicit choice wins over the account mode/count.
             prefs.claude_layout = if raw.get("claudeLayout").is_some() {
@@ -135,6 +139,7 @@ pub fn set_preferences(app: tauri::AppHandle, mut prefs: Prefs) -> Result<Prefs,
     };
     // Presentation only: never a collection, session or cache change.
     prefs.claude_layout = normalize_claude_layout(&prefs.claude_layout).into();
+    prefs.codex_layout = normalize_claude_layout(&prefs.codex_layout).into();
     // Validation (indicator, ntfy, Claude profiles) happens in save_to before
     // the file or the in-memory state is replaced.
     let file = path(&app)?;
@@ -193,6 +198,42 @@ fn save_to(file: &std::path::Path, prefs: &Prefs) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_layout_is_independent_migrates_and_persists() {
+        let old = parse(br#"{"claudeLayout":"compact","claudeEnabled":true,"displayMode":"app"}"#);
+        let value = serde_json::to_value(&old).unwrap();
+        assert_eq!(value["codexLayout"], "classic");
+        assert_eq!(value["claudeLayout"], "compact");
+        for (input, expected) in [
+            ("compact", "compact"),
+            ("classic", "classic"),
+            ("odd", "compact"),
+        ] {
+            let p = parse(
+                format!(
+                    r#"{{"codexLayout":"{input}","claudeLayout":"classic","fableEnabled":false}}"#
+                )
+                .as_bytes(),
+            );
+            assert_eq!(serde_json::to_value(&p).unwrap()["codexLayout"], expected);
+            assert_eq!(p.claude_layout, "classic");
+            assert!(!p.fable_enabled);
+            let mut changed = old.clone();
+            changed.codex_layout = expected.into();
+            assert!(!collection_changed(&old, &changed));
+            assert_eq!(changed.claude_accounts, old.claude_accounts);
+            assert_eq!(parse(&serde_json::to_vec(&p).unwrap()), p);
+        }
+        let root = std::env::temp_dir().join(format!("qm-codex-layout-{}", std::process::id()));
+        let file = root.join("prefs.json");
+        let mut p = old;
+        p.codex_layout = "compact".into();
+        save_to(&file, &p).unwrap();
+        assert_eq!(parse(&fs::read(&file).unwrap()), p);
+        assert_eq!(p.claude_layout, "compact");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn v310_preferences_file_loads_without_loss_and_defaults_to_single_primary() {
@@ -396,6 +437,7 @@ mod tests {
             ntfy: crate::ntfy::Config::default(),
             claude_accounts: crate::claude_accounts::AccountPrefs::default(),
             claude_layout: "classic".into(),
+            codex_layout: "classic".into(),
         };
         let bytes = serde_json::to_vec(&saved).unwrap();
         assert_eq!(

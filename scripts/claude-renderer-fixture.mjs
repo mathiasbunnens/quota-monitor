@@ -34,6 +34,18 @@ if (scenario === 'add-error') profiles[1].snapshot.planType = 'team';
 let prefs = {codexEnabled:query.get('codex')==='yes',claudeEnabled:true,fableEnabled:query.get('fable')!=='off',indicator:'claude',displayMode:'menubar',ntfy:{enabled:false,serverUrl:'https://ntfy.sh',topic:''},claudeAccounts:{mode:['single','one','zero','add-error'].includes(scenario)?'single':'multi',selectedId:null,profiles:profiles.map(({id,path,name,visible})=>({id,path,name,visible}))},...(query.get('layout')?{claudeLayout:query.get('layout')}:{})};
 if(scenario==='none') prefs.claudeAccounts.profiles.forEach(p=>p.visible=false);
 if(scenario==='one-visible') prefs.claudeAccounts.profiles[1].visible=false;
+if(query.get('claude')==='off') prefs.claudeEnabled=false;
+if(query.get('codexLayout')) prefs.codexLayout=query.get('codexLayout');
+const codexRows = [
+ {model:'codex',remaining:63,limit:100,period:'codex:codex:primary',windowMinutes:300,resetAt:new Date(base+95*60000).toISOString(),label:'Codex · 5 heures'},
+ {model:'codex',remaining:85,limit:100,period:'codex:codex:secondary',windowMinutes:10080,resetAt:new Date(base+5760*60000).toISOString(),label:'Codex · 7 jours'},
+];
+if(query.get('codexState')==='weekly') codexRows.splice(0,1);
+if(query.get('codexState')==='empty') codexRows.splice(0);
+if(query.get('codexState')==='edge') {
+ codexRows[0].remaining=0; codexRows[1].resetAt='';
+ codexRows.push({...codexRows[1],period:'codex:review:secondary',model:'review',remaining:27,label:'Review · 7 jours'});
+}
 const accounts = () => profiles.map(a=>{const saved=prefs.claudeAccounts.profiles.find(p=>p.id===a.id);return {...a,name:saved?.name||a.name,visible:prefs.claudeEnabled&&(prefs.claudeAccounts.mode==='multi'?(saved?.visible??a.primary):a.id===(prefs.claudeAccounts.selectedId||'personal'))};});
 const emit = () => { for(const listener of listeners) listener(); };
 window.__fixture = {get prefs(){return prefs},get accounts(){return accounts()},calls:[],emit,get minuteTimers(){return timers.size},advanceMinute(){clock+=60000;for(const fn of timers.values())fn();}};
@@ -46,7 +58,7 @@ export async function invoke(command, payload) {
  case 'set_preferences':prefs=structuredClone(payload.prefs);emit();return structuredClone(prefs);
  case 'get_claude_accounts':return structuredClone(accounts());
  case 'get_claude_snapshot':return accounts().find(a=>a.visible)?.snapshot||profiles[0].snapshot;
- case 'get_quota_snapshots':return prefs.codexEnabled?[{model:'codex',remaining:63,limit:100,period:'five-hour',resetAt:'2030-01-01T12:00:00Z',checkedAt:'2026-10-31T10:00:00Z',source:'codex',confidence:'high'}]:[];
+ case 'get_quota_snapshots':return prefs.codexEnabled?structuredClone(codexRows):[];
  case 'get_codex_status':return {phase:'ready',message:'',planType:'plus',refreshSettings:{customSeconds:null},refreshSeconds:60,availableResets:null};
  case 'add_claude_profile':if(payload.path!=='/fixtures/.claude-work')throw new Error('Fixture: dossier inexistant');prefs={...prefs,claudeAccounts:{...prefs.claudeAccounts,mode:'multi',profiles:profiles.map(({id,path,name})=>({id,path,name,visible:true}))}};emit();return structuredClone(prefs);
  case 'follow_claude_profile':if(scenario==='add-error')throw new Error('« Travail » est déjà affiché. Choisissez un autre profil Claude Code.');prefs={...prefs,claudeAccounts:{...prefs.claudeAccounts,mode:'multi',profiles:profiles.map(({id,path,name})=>({id,path,name,visible:true}))}};emit();return structuredClone(prefs);

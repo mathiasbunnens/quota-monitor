@@ -17,6 +17,8 @@ export type CompactFill = {
 };
 
 export type CompactRow = {
+  /** Explicit pair membership from panel_model, never inferred from order. */
+  pairSlot?: 0 | 1 | null;
   model: boolean;
   label: string;
   /** Percentage REMAINING (100 = full quota available), null when unknown. */

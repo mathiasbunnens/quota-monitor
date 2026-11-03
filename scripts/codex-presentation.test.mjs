@@ -1,0 +1,44 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import fs from 'node:fs';
+import ts from 'typescript';
+import {createElement} from 'react';
+import {renderToStaticMarkup} from 'react-dom/server';
+import * as providers from '../src/features/quota/providers.ts';
+const source=fs.readFileSync(new URL('../src/features/quota/ProviderCard.tsx',import.meta.url),'utf8');
+const compiled=ts.transpileModule(source,{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.ESNext}}).outputText.replaceAll('"react/jsx-runtime"',JSON.stringify(import.meta.resolve('react/jsx-runtime'))).replaceAll('"react"',JSON.stringify(import.meta.resolve('react')));
+const {default:Card}=await import('data:text/javascript;base64,'+Buffer.from(compiled).toString('base64'));
+const now=Date.parse('2030-01-01T10:00:00Z');
+const bucket=(period,remaining=63)=>({model:'codex',period,remaining,limit:100,resetAt:'2030-01-01T12:00:00Z'});
+const render=(snapshots,paired=true)=>renderToStaticMarkup(createElement(Card,{name:'Codex',badge:'plus',rows:providers.codexRows(snapshots),compact:paired,accountCompact:paired,now}));
+test('Codex preference is independent and migrates old files to classic',()=>{
+ assert.equal(providers.codexLayoutOf?.(null),'classic');
+ assert.equal(providers.codexLayoutOf?.({claudeLayout:'compact'}),'classic');
+ assert.equal(providers.codexLayoutOf?.({codexLayout:'compact',claudeLayout:'classic'}),'compact');
+ assert.equal(providers.codexLayoutOf?.({codexLayout:'unknown'}),'compact');
+ const settings=fs.readFileSync(new URL('../src/features/settings/Settings.tsx',import.meta.url),'utf8');
+ assert.match(settings,/Présentation Codex/);assert.match(settings,/name="codexLayout"/);
+ const dashboard=fs.readFileSync(new URL('../src/pages/Dashboard/Dashboard.tsx',import.meta.url),'utf8');
+ assert.match(dashboard,/accountCompact=\{codexPaired\}/);
+});
+test('mono Codex compact exposes both real windows, countdowns and remaining values',()=>{
+ const html=render([bucket('five-hour'),bucket('weekly',85)]);
+ assert.match(html,/provider-card__window--short/);assert.match(html,/provider-card__window--week/);
+ assert.match(html,/2h00/); assert.match(html,/85 %/);assert.match(html,/plus/);
+ assert.equal((html.match(/role="progressbar"/g)||[]).length,2);
+ const classic=render([bucket('five-hour'),bucket('weekly',85)],false);
+ assert.doesNotMatch(classic,/provider-card__paired-bars/);assert.equal((classic.match(/Réinitialisation :/g)||[]).length,2);
+});
+test('real Codex IDs pair only windows of the same bucket, never invent missing windows',()=>{
+ const real=(id,slot,mins,n)=>({...bucket(`codex:${id}:${slot}`,n),windowMinutes:mins});
+ const input=[real('codex','primary',300,0),real('codex','secondary',10080,85),real('review','secondary',10080,27),real('reserve','primary',300,91)];
+ const html=render(input);
+ assert.match(html,/provider-card__window--short/);assert.match(html,/provider-card__window--week/);
+ assert.match(html,/Épuisé/);assert.equal((html.match(/role="progressbar"/g)||[]).length,4);
+ const weekly=render([input[1],input[2]]);
+ assert.doesNotMatch(weekly,/provider-card__window--short/);assert.match(weekly,/provider-card__window--week/);
+ assert.equal((weekly.match(/role="progressbar"/g)||[]).length,2);
+ const empty=render([]);assert.doesNotMatch(empty,/role="progressbar"/);
+ const crossed=providers.codexRows([input[0],input[2]]);
+ assert.equal(crossed.filter(r=>r.pairSlot!==undefined).length,1);
+});

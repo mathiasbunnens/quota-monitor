@@ -47,6 +47,23 @@ function find(node, predicate, out = []) {
   return out;
 }
 
+test("Codex paired windows use explicit slots and preserve unknown and additional rows", () => {
+  const row = { ...panel.providers[0].rows[0], countdown: "1h35" };
+  const week = { ...row, pairSlot: 1, label: "7 jours", remaining: 85, value: "85 %" };
+  const render = (rows, compact = true) => html({panel: {...panel, providers:[{...panel.providers[0],compact,rows}]}});
+  const paired = render([{...row,pairSlot:0},week,{...row,label:"Autre modèle",pairSlot:null}]);
+  assert.equal((paired.match(/role="meter"/g)||[]).length,3);
+  assert.match(paired,/compact-pair__track--short/);assert.match(paired,/compact-pair__track--week/);
+  assert.match(paired,/1h35 · 85 %/);assert.match(paired,/Autre modèle/);
+  const only = render([week]);
+  assert.doesNotMatch(only,/compact-pair__track--short/);assert.match(only,/compact-pair__track--week/);
+  assert.equal((only.match(/role="meter"/g)||[]).length,1);
+  assert.doesNotMatch(render([week],false),/class="compact-pair"/);
+  const missing = render([{...week,remaining:null,value:"Non communiquée"}]);
+  assert.doesNotMatch(missing,/aria-valuenow/);assert.match(missing,/Non communiquée/);
+  assert.doesNotMatch(render([]),/role="meter"/);
+});
+
 test("header carries exactly two icon buttons, settings then update, after the status", () => {
   const markup = html();
   const header = markup.slice(markup.indexOf("<header"), markup.indexOf("</header>"));

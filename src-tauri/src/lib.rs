@@ -822,6 +822,7 @@ enum Tone {
 #[cfg(target_os = "macos")]
 #[derive(Clone, Debug, PartialEq)]
 struct PanelRow {
+    pair_slot: Option<usize>,
     /// Model-scoped row (Fable): normal-size model name matching the fill, full opacity.
     model: bool,
     label: String,
@@ -900,6 +901,76 @@ fn limit_label(reset_at: Option<&str>, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn codex_compact_countdown_uses_real_reset() {
+    let reset = (Local::now() + chrono::Duration::minutes(90)).to_rfc3339();
+    let rows = [demo_payload(
+        "Limite 5 heures",
+        "five-hour",
+        63,
+        &reset,
+        Some(300),
+    )];
+    let panel = codex_panel(&rows, "ready", "", Some("plus".into()));
+    assert_eq!(panel.rows[0].countdown, "1h30");
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn codex_layout_pairs_real_same_bucket_and_preserves_extra_windows() {
+    let result = serde_json::json!({"rateLimitsByLimitId":{
+        "codex":{"primary":{"usedPercent":100,"windowDurationMins":300},"secondary":{"usedPercent":15,"windowDurationMins":10080}},
+        "review":{"secondary":{"usedPercent":73,"windowDurationMins":10080}}
+    }});
+    let rows = codex::normalize(&result).unwrap();
+    let p = codex_presentation(&rows, "ready", "", Some("plus".into()), "compact");
+    assert!(p.compact);
+    assert_eq!(paired_panel_rows(&p).len(), 2);
+    assert_eq!(p.rows.len(), 3);
+    assert_eq!(p.rows[0].remaining, Some(0));
+    let classic = codex_presentation(&rows, "ready", "", None, "classic");
+    assert!(!classic.compact);
+    assert_eq!(
+        card_height(&classic) - card_height(&p),
+        2.0 * PANEL_ROW_HEIGHT - 40.0
+    );
+    let weekly = codex_presentation(&rows[1..], "ready", "", None, "compact");
+    assert_eq!(paired_panel_rows(&weekly).len(), 1);
+    assert_eq!(paired_panel_rows(&weekly)[0].pair_slot, Some(1));
+    let model = PanelModel {
+        header: panel_header(&[p.clone()], None),
+        providers: vec![p],
+        connection: None,
+    };
+    let compact = compact_panel(&model, "fixture", None);
+    assert_eq!(
+        compact.providers[0]
+            .rows
+            .iter()
+            .filter(|r| r.pair_slot.is_some())
+            .count(),
+        2
+    );
+    assert_eq!(compact.providers[0].rows.len(), 3);
+    for phase in ["ready", "error", "starting"] {
+        let empty = codex_presentation(&[], phase, "", None, "compact");
+        assert!(empty.rows.is_empty());
+        assert!(paired_panel_rows(&empty).is_empty());
+        assert!(empty.note.is_some());
+    }
+    let crossed = codex_presentation(
+        &[rows[0].clone(), rows[2].clone()],
+        "error",
+        "Lecture impossible",
+        None,
+        "compact",
+    );
+    assert_eq!(paired_panel_rows(&crossed).len(), 1);
+    assert_eq!(crossed.rows.len(), 2);
+    assert_eq!(crossed.note.unwrap().1, Tone::Error);
+}
+
 #[cfg(target_os = "macos")]
 fn codex_panel(
     rows: &[QuotaPayload],
@@ -907,6 +978,13 @@ fn codex_panel(
     message: &str,
     plan: Option<String>,
 ) -> PanelProvider {
+    let windows: Vec<_> = rows.iter().filter_map(codex_window).collect();
+    let bucket = windows
+        .iter()
+        .find(|(bucket, _)| bucket.starts_with("codex:codex:"))
+        .or_else(|| windows.first())
+        .map(|(bucket, _)| bucket);
+    let mut slots = [false; 2];
     // Same vocabulary and order for every provider: 5 heures, hebdomadaire, réserve.
     let rank = |p: &QuotaPayload| -> u8 {
         if is_reserve(p) {
@@ -927,6 +1005,14 @@ fn codex_panel(
             let short = rank(p) == 0;
             let remaining = p.remaining.min(100);
             PanelRow {
+                pair_slot: codex_window(p).and_then(|(key, slot)| {
+                    if Some(&key) == bucket && !slots[slot] {
+                        slots[slot] = true;
+                        Some(slot)
+                    } else {
+                        None
+                    }
+                }),
                 model: false,
                 label: match rank(p) {
                     0 => limit_label(Some(&p.reset_at), "Limite 5 heures"),
@@ -936,7 +1022,7 @@ fn codex_panel(
                 },
                 remaining: Some(remaining),
                 value: value_text(Some(remaining), false, ""),
-                countdown: "—".into(),
+                countdown: reset_countdown(Some(&p.reset_at), Local::now().timestamp()),
                 reset: reset_phrase(&p.reset_at, short)
                     .or_else(|| {
                         p.reset_label
@@ -967,6 +1053,61 @@ fn codex_panel(
     }
 }
 
+/// Only windows from one rate-limit bucket/model enter the paired block.
+/// Extra buckets and unknown durations stay as complete historical rows.
+#[cfg(target_os = "macos")]
+fn codex_window(p: &QuotaPayload) -> Option<(String, usize)> {
+    if is_reserve(p) {
+        return None;
+    }
+    if p.period == "five-hour" || p.period == "weekly" {
+        return Some(("legacy".into(), usize::from(p.period == "weekly")));
+    }
+    let (bucket, slot) = p.period.rsplit_once(':')?;
+    if !bucket.starts_with("codex:") || !matches!(slot, "primary" | "secondary") {
+        return None;
+    }
+    let index = match p.window_minutes {
+        Some(300) => 0,
+        Some(10080) => 1,
+        _ => return None,
+    };
+    Some((format!("{bucket}:{}", p.model), index))
+}
+
+#[cfg(target_os = "macos")]
+fn codex_presentation(
+    rows: &[QuotaPayload],
+    phase: &str,
+    message: &str,
+    plan: Option<String>,
+    layout: &str,
+) -> PanelProvider {
+    let mut panel = codex_panel(rows, phase, message, plan);
+    panel.compact = layout == "compact";
+    panel
+}
+
+#[cfg(target_os = "macos")]
+fn paired_panel_rows(provider: &PanelProvider) -> Vec<&PanelRow> {
+    if !provider.compact {
+        return vec![];
+    }
+    if provider.name == "Codex" {
+        let mut rows: Vec<_> = provider
+            .rows
+            .iter()
+            .filter(|r| r.pair_slot.is_some())
+            .collect();
+        rows.sort_by_key(|r| r.pair_slot);
+        rows
+    } else if provider.rows.len() >= 2 {
+        provider.rows.iter().take(2).collect()
+    } else {
+        vec![]
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
     let rows: Vec<PanelRow> = claude::display_metrics(&snapshot.metrics)
@@ -982,6 +1123,7 @@ fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
                 "—"
             };
             PanelRow {
+                pair_slot: None,
                 model: m.id == "claude:weekly_fable",
                 label: if m.id == "claude:weekly_fable" {
                     "Limite Fable".into()
@@ -1212,6 +1354,7 @@ struct CompactFill {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CompactRow {
+    pair_slot: Option<usize>,
     model: bool,
     label: String,
     remaining: Option<u32>,
@@ -1296,6 +1439,7 @@ fn connection_label(logging_in: bool) -> &'static str {
 fn compact_row(row: &PanelRow) -> CompactRow {
     let (from, to, fraction) = quota_color_transition(row.remaining.unwrap_or(0));
     CompactRow {
+        pair_slot: row.pair_slot,
         model: row.model,
         label: row.label.clone(),
         remaining: row.remaining,
@@ -1330,7 +1474,18 @@ fn compact_panel(model: &PanelModel, version: &str, update: Option<UpdateStatus>
                 section: p.name.to_uppercase(),
                 compact: p.compact,
                 badge: p.badge.as_deref().map(pretty_badge),
-                rows: p.rows.iter().map(compact_row).collect(),
+                rows: p
+                    .rows
+                    .iter()
+                    .map(|r| {
+                        let mut row = compact_row(r);
+                        row.pair_slot = paired_panel_rows(p)
+                            .iter()
+                            .position(|paired| std::ptr::eq(*paired, r))
+                            .map(|index| r.pair_slot.unwrap_or(index));
+                        row
+                    })
+                    .collect(),
                 note: p.note.as_ref().map(|(text, tone)| CompactNote {
                     text: text.clone(),
                     tone: tone_name(*tone),
@@ -1373,7 +1528,7 @@ fn panel_model(app: &tauri::AppHandle) -> PanelModel {
         .unwrap_or_else(|| "starting".into());
     let mut providers = Vec::new();
     if prefs.codex_enabled {
-        providers.push(codex_panel(
+        providers.push(codex_presentation(
             &snapshots,
             &connection_phase,
             codex_status
@@ -1381,6 +1536,7 @@ fn panel_model(app: &tauri::AppHandle) -> PanelModel {
                 .map(|s| s.message.as_str())
                 .unwrap_or(""),
             codex_status.as_ref().and_then(|s| s.plan_type.clone()),
+            &prefs.codex_layout,
         ));
     }
     providers.extend(claude_account_panels(
@@ -1493,8 +1649,9 @@ fn note_lines(text: &str) -> f64 {
 
 #[cfg(target_os = "macos")]
 fn card_height(provider: &PanelProvider) -> f64 {
-    let rows = if provider.compact && provider.rows.len() >= 2 {
-        40.0 + provider.rows.len().saturating_sub(2) as f64 * PANEL_ROW_HEIGHT
+    let paired_count = paired_panel_rows(provider).len();
+    let rows = if paired_count > 0 {
+        40.0 + (provider.rows.len() - paired_count) as f64 * PANEL_ROW_HEIGHT
     } else {
         provider.rows.len() as f64 * PANEL_ROW_HEIGHT
     };
@@ -1666,8 +1823,8 @@ fn make_panel_view(
         let mut row_top = top + 8.0;
         // Multi-account card: 5 h and 7 j share one 40 pt block with their
         // countdowns visible; the 5 h track/fill keeps the Unique thickness.
-        let paired = provider.compact && provider.rows.len() >= 2;
-        if paired {
+        let paired_rows = paired_panel_rows(provider);
+        if !paired_rows.is_empty() {
             let group = NSView::initWithFrame(
                 mtm.alloc(),
                 frame(0.0, height - row_top - 40.0, PANEL_WIDTH, 40.0),
@@ -1678,7 +1835,8 @@ fn make_panel_view(
                 group.addSubview(view);
             };
             let tracks = compact_tracks();
-            for (index, row) in provider.rows.iter().take(2).enumerate() {
+            for (position, row) in paired_rows.iter().enumerate() {
+                let index = row.pair_slot.unwrap_or(position);
                 let window = if index == 0 {
                     "Limite 5 heures"
                 } else {
@@ -1735,7 +1893,11 @@ fn make_panel_view(
             }
             row_top += 40.0;
         }
-        for row in provider.rows.iter().skip(if paired { 2 } else { 0 }) {
+        for row in provider
+            .rows
+            .iter()
+            .filter(|r| !paired_rows.iter().any(|paired| std::ptr::eq(*paired, *r)))
+        {
             // Composite the complete row once: track, fill, value, label and reset.
             let group = NSView::initWithFrame(
                 mtm.alloc(),
@@ -2281,7 +2443,7 @@ pub fn quota_ui_smoke(directory: &str) {
             vec![PanelProvider {
                 rows: vec![],
                 note: Some(("Lecture via Claude Code…".into(), Tone::Warning)),
-                ..claude
+                ..claude.clone()
             }],
         ),
         ("none", vec![]),
@@ -2384,6 +2546,48 @@ pub fn quota_ui_smoke(directory: &str) {
         "multi-one-visible-classic",
         claude_account_panels(&[personal, hidden], true),
     ));
+    let mut native_codex = codex_rows.clone();
+    native_codex[0].period = "codex:codex:primary".into();
+    native_codex[1].period = "codex:codex:secondary".into();
+    for layout in ["classic", "compact"] {
+        let codex = codex_presentation(&native_codex, "ready", "", Some("plus".into()), layout);
+        scenarios.push((
+            if layout == "compact" {
+                "codex-compact"
+            } else {
+                "codex-classic"
+            },
+            vec![codex.clone()],
+        ));
+        scenarios.push((
+            if layout == "compact" {
+                "codex-both-compact"
+            } else {
+                "codex-both-classic"
+            },
+            vec![codex, claude.clone()],
+        ));
+    }
+    scenarios.push((
+        "codex-weekly-only",
+        vec![codex_presentation(
+            &native_codex[1..],
+            "ready",
+            "",
+            None,
+            "compact",
+        )],
+    ));
+    scenarios.push((
+        "codex-empty-error",
+        vec![codex_presentation(
+            &[],
+            "error",
+            "Compte déconnecté",
+            None,
+            "compact",
+        )],
+    ));
     let target = QuotaMenuTarget::new(mtm);
     // Main-thread AppKit regression checks use the production builder without
     // starting Tauri, reading preferences, or contacting either quota provider.
@@ -2453,6 +2657,16 @@ pub fn quota_ui_smoke(directory: &str) {
     }
     for (name, providers) in scenarios {
         let header = panel_header(&providers, (!providers.is_empty()).then(Local::now));
+        let fixture_model = PanelModel {
+            header: header.clone(),
+            providers: providers.clone(),
+            connection: None,
+        };
+        std::fs::write(
+            format!("{directory}/{name}.json"),
+            serde_json::to_vec_pretty(&compact_panel(&fixture_model, "fixture", None)).unwrap(),
+        )
+        .unwrap();
         for (mode, appearance) in [
             ("light", unsafe { NSAppearanceNameAqua }),
             ("dark", unsafe { NSAppearanceNameDarkAqua }),
@@ -2466,6 +2680,8 @@ pub fn quota_ui_smoke(directory: &str) {
                     | "multi-accounts"
                     | "multi-accounts-classic"
                     | "two-providers"
+                    | "codex-compact"
+                    | "codex-classic"
             ) {
                 // Measure the real AppKit frames (rows are composited in group
                 // views since v3.1.0): every track/fill at x = 22, in root space.
@@ -2489,6 +2705,12 @@ pub fn quota_ui_smoke(directory: &str) {
                 let heights: Vec<f64> = found.iter().map(|r| r.size.height).collect();
                 let unique_claude = vec![PANEL_TRACK_HEIGHT; 4];
                 match name {
+                    "codex-compact" => {
+                        assert_eq!(heights, vec![5.0, 5.0, 3.0, 3.0, 5.0]);
+                        let gap = found[0].origin.y - (found[2].origin.y + found[2].size.height);
+                        assert!((gap - 2.0).abs() < 0.01);
+                    }
+                    "codex-classic" => assert_eq!(heights, vec![5.0; 5]),
                     "single-account-classic" => assert_eq!(heights, unique_claude),
                     // Compacte, one account: one paired 5 h / 7 j block.
                     "single-account" => assert_eq!(
@@ -3557,6 +3779,7 @@ mod tests {
     #[test]
     fn compact_heading_shows_countdown_and_honest_fallbacks() {
         let row = PanelRow {
+            pair_slot: None,
             model: false,
             label: "Limite 5 heures".into(),
             remaining: Some(0),
@@ -3581,6 +3804,7 @@ mod tests {
         // Weekly window coalesced into "Limite Fable" (v3.1.0): pairing must
         // not hide the model name.
         let fable = PanelRow {
+            pair_slot: None,
             model: true,
             label: "Limite Fable".into(),
             remaining: Some(86),
