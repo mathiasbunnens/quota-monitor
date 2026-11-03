@@ -8,7 +8,7 @@ import NtfySettings from "./NtfySettings";
 import ClaudeAccountsSettings from "./ClaudeAccountsSettings";
 import ResetCredits from "../quota/ResetCredits";
 import type { ClaudeAccount, ClaudeLayout, ClaudeSnapshot, CodexStatus, DisplayMode, IndicatorChoice, Preferences } from "../quota/types";
-import { claudeLayoutOf, codexLayoutOf } from "../quota/providers";
+import { layoutOf } from "../quota/providers";
 import "../../pages/Dashboard/dashboard.scss";
 import "./settings.scss";
 
@@ -272,7 +272,7 @@ export default function Settings() {
   const codexReady = status?.phase === "ready";
   const claudeReady = claude?.state === "ready";
   const extra = claude?.extraUsage;
-  const layout = claudeLayoutOf(prefs);
+  const layout = layoutOf(prefs);
 
   return <main className="prefs" ref={root} aria-label="Réglages">
     <nav role="tablist" aria-label="Catégories de réglages" className="prefs-toolbar">
@@ -352,14 +352,10 @@ export default function Settings() {
           <Choices legend="Afficher dans la barre des menus" label="Indicateur de la barre des menus (quota 5 heures)" name="indicator"
             options={indicatorOptions} value={prefs.indicator} onChange={(indicator) => void update({ indicator })} />
         </fieldset>}
-        {/* Independent provider presentation, without quota collection. */}
+        {/* One presentation for both providers, without quota collection. */}
         <fieldset className="prefs-group" aria-busy={busy || undefined}>
-          <Choices legend="Présentation Codex" label="Présentation Codex" name="codexLayout" tiles
-            options={claudeLayoutOptions} value={codexLayoutOf(prefs)} onChange={(codexLayout) => void update({ codexLayout })} />
-        </fieldset>
-        <fieldset className="prefs-group" aria-busy={busy || undefined}>
-          <Choices legend="Présentation Claude" label="Présentation des comptes Claude" name="claudeLayout" tiles
-            options={claudeLayoutOptions} value={layout} onChange={(claudeLayout) => void update({ claudeLayout })} />
+          <Choices legend="Présentation" label="Présentation" name="layout" tiles
+            options={claudeLayoutOptions} value={layout} onChange={(layout) => void update({ layout })} />
         </fieldset>
       </div>}
 

@@ -230,7 +230,7 @@ test('dashboard single mode uses selected profile even if hidden in multi mode',
 test('a sole Compacte card pairs its bars without an added name or extra-usage note', () => {
   const extra = { ...accounts[0], snapshot: { ...snapshot, extraUsage: { enabled: true, limitReached: true } } };
   for (const layout of ['compact', 'classic']) {
-    const html = renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, [[], null, snapshot, { ...prefs, claudeLayout: layout }, false, null, null, null, false, 0, [extra]]));
+    const html = renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, [[], null, snapshot, { ...prefs, layout }, false, null, null, null, false, 0, [extra]]));
     assert.doesNotMatch(html, /Extra · plafond atteint|Usage supplémentaire|Claude · Principal/);
     assert.equal(/paired-bars/.test(html), layout === 'compact');
   }
@@ -268,7 +268,7 @@ test('Fable preference applies to every multi account card', () => {
 test('multi mode with one visible account follows the saved layout (Classique = expanded rows)', () => {
   const metric = { id: 'claude:five_hour', label: '5 h', usedPercent: 19, resetAt: null, availability: 'available', periodDurationSeconds: 18000, exhausted: false };
   const current = [{ ...accounts[0], snapshot: { ...snapshot, metrics: [metric] } }, { ...accounts[1], visible: false }];
-  const render = (claudeLayout) => renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, [[], null, snapshot, { ...prefs, claudeLayout, claudeAccounts: { ...prefs.claudeAccounts, mode: 'multi' } }, false, null, null, null, false, 0, current]));
+  const render = (layout) => renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, [[], null, snapshot, { ...prefs, layout, claudeAccounts: { ...prefs.claudeAccounts, mode: 'multi' } }, false, null, null, null, false, 0, current]));
   assert.doesNotMatch(render('classic'), /paired-bars|Claude · Principal/);
   assert.match(render('classic'), /81 %/);
   assert.match(render('compact'), /paired-bars/);
@@ -424,21 +424,21 @@ test('settings add/choose commands are explicit and their failures stay next to 
 const display = (p, list = accounts) => component('../settings/Settings.tsx', {}, ['menubar', p, null, snapshot, null, false, 0, false, list, null, true]);
 const group = (html, label) => { const start = html.lastIndexOf("<div", html.indexOf(`aria-label="${label}"`)); return html.slice(start, html.indexOf('</fieldset>', start)); };
 test('Affichage: every choice is a labelled radio with a pictogram, and no explanatory paragraph', () => {
-  const html = renderToStaticMarkup(display({ ...prefs, claudeLayout: 'compact' }));
+  const html = renderToStaticMarkup(display({ ...prefs, layout: 'compact' }));
   const panel = html.slice(html.indexOf('id="panel-menubar"'));
   assert.doesNotMatch(panel, /<p[ >]|Un seul compte|habituel|plusieurs comptes seront/);
-  for (const [label, names] of [['Mode d’affichage', ['Barre des menus', 'Application']], ['Indicateur de la barre des menus (quota 5 heures)', ['Codex', 'Claude', 'Les deux']], ['Présentation des comptes Claude', ['Compacte', 'Classique']]]) {
+  for (const [label, names] of [['Mode d’affichage', ['Barre des menus', 'Application']], ['Indicateur de la barre des menus (quota 5 heures)', ['Codex', 'Claude', 'Les deux']], ['Présentation', ['Compacte', 'Classique']]]) {
     const part = group(html, label);
     assert.match(part, /role="radiogroup"/, label);
     for (const name of names) assert.match(part, new RegExp(`<input type="radio"[^>]*/><span class="prefs-choices__icon" aria-hidden="true"><svg[^>]*>[\\s\\S]*?</svg></span><span>${name}</span>`), name);
   }
   // Presentation: two different schematics, without any figure.
-  const presentation = group(html, 'Présentation des comptes Claude');
+  const presentation = group(html, 'Présentation');
   const svgs = presentation.match(/<svg[\s\S]*?<\/svg>/g);
   assert.equal(svgs.length, 2);
   assert.notEqual(svgs[0], svgs[1]);
   assert.doesNotMatch(presentation, /%|\d+ ?h\b|<text/);
-  assert.match(presentation, /<label class="is-selected"><input type="radio" name="claudeLayout" checked="" value="compact"/);
+  assert.match(presentation, /<label class="is-selected"><input type="radio" name="layout" checked="" value="compact"/);
   assert.doesNotMatch(presentation, /Multi/);
   // Application mode: the menu-bar indicator has no effect and is not shown.
   assert.doesNotMatch(renderToStaticMarkup(display({ ...prefs, displayMode: 'app' })), /Indicateur de la barre des menus/);
@@ -447,39 +447,63 @@ test('Classique/Compacte selection reflects the saved choice for one or several 
   const one = [accounts[0], { ...accounts[1], visible: false }];
   for (const list of [accounts, one, [accounts[0]], []]) {
     for (const layout of ['compact', 'classic']) {
-      assert.match(group(renderToStaticMarkup(display({ ...prefs, claudeLayout: layout }, list)), 'Présentation des comptes Claude'), new RegExp(`checked="" value="${layout}"`));
+      assert.match(group(renderToStaticMarkup(display({ ...prefs, layout }, list)), 'Présentation'), new RegExp(`checked="" value="${layout}"`));
     }
   }
   // Unknown value normalised like Rust; absent follows the same migration.
-  assert.match(renderToStaticMarkup(display({ ...prefs, claudeLayout: 'multi' })), /checked="" value="compact"/);
+  assert.match(renderToStaticMarkup(display({ ...prefs, layout: 'multi' })), /checked="" value="compact"/);
   assert.match(renderToStaticMarkup(display(prefs)), /checked="" value="classic"/);
   assert.match(renderToStaticMarkup(display({ ...prefs, claudeAccounts: { ...prefs.claudeAccounts, mode: 'multi' } })), /checked="" value="compact"/);
 });
-test('claudeLayoutOf mirrors the Rust migration: explicit choice wins over the account mode', () => {
-  const { claudeLayoutOf } = require('./providers.ts');
-  assert.equal(claudeLayoutOf(null), 'classic');
-  assert.equal(claudeLayoutOf({ claudeAccounts: { mode: 'single' } }), 'classic');
-  assert.equal(claudeLayoutOf({ claudeAccounts: { mode: 'multi' } }), 'compact');
-  assert.equal(claudeLayoutOf({ claudeLayout: 'compact', claudeAccounts: { mode: 'single' } }), 'compact');
-  assert.equal(claudeLayoutOf({ claudeLayout: 'classic', claudeAccounts: { mode: 'multi' } }), 'classic');
-  assert.equal(claudeLayoutOf({ claudeLayout: 'other' }), 'compact');
+test('layoutOf: the single key wins; legacy keys migrate like Rust (Claude explicit > Codex > account mode)', () => {
+  const { layoutOf } = require('./providers.ts');
+  assert.equal(layoutOf(null), 'classic');
+  assert.equal(layoutOf({ claudeAccounts: { mode: 'single' } }), 'classic');
+  assert.equal(layoutOf({ claudeAccounts: { mode: 'multi' } }), 'compact');
+  assert.equal(layoutOf({ layout: 'classic', claudeLayout: 'compact', codexLayout: 'compact' }), 'classic');
+  assert.equal(layoutOf({ layout: 'compact', claudeLayout: 'classic', claudeAccounts: { mode: 'single' } }), 'compact');
+  assert.equal(layoutOf({ layout: 'other' }), 'compact');
+  assert.equal(layoutOf({ claudeLayout: 'compact', claudeAccounts: { mode: 'single' } }), 'compact');
+  assert.equal(layoutOf({ claudeLayout: 'classic', claudeAccounts: { mode: 'multi' } }), 'classic');
+  assert.equal(layoutOf({ codexLayout: 'compact' }), 'compact');
+  assert.equal(layoutOf({ claudeLayout: 'classic', codexLayout: 'compact' }), 'classic');
+  assert.equal(layoutOf({ claudeLayout: 'other' }), 'compact');
 });
-test('changing the style saves only claudeLayout: no refresh, mode or visibility change', async () => {
+test('Affichage has ONE Présentation control (name=layout); Fournisseurs has none', () => {
+  const html = renderToStaticMarkup(display({ ...prefs, layout: 'classic' }));
+  assert.equal((html.match(/name="layout"/g) || []).length, 2);
+  assert.doesNotMatch(html, /name="claudeLayout"|name="codexLayout"|Présentation (Codex|Claude|des comptes)/);
+  assert.equal((html.match(/<legend[^>]*>Présentation<\/legend>/g) || []).length, 1);
+  const providersTab = renderToStaticMarkup(component('../settings/Settings.tsx', {}, ['providers', { ...prefs, codexEnabled: true }, null, snapshot, null, false, 0, false, accounts, null, true]));
+  assert.doesNotMatch(providersTab, /name="layout"|Compacte|Classique|Présentation/);
+});
+test('one choice changes Claude AND Codex in the Dashboard', () => {
+  const codex = [{ model: 'codex', period: 'five-hour', remaining: 63, limit: 100, resetAt: '2030-01-01T12:00:00Z' }, { model: 'codex', period: 'weekly', remaining: 85, limit: 100, resetAt: '2030-01-04T12:00:00Z' }];
+  const render = (layout) => {
+    global.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+    try { return renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, [codex, null, snapshot, { ...prefs, layout, codexEnabled: true, claudeAccounts: { ...prefs.claudeAccounts, mode: 'single' } }, false, null, null, null, false, 0, [accounts[0]]])); }
+    finally { delete global.localStorage; }
+  };
+  const count = (html) => (html.match(/paired-bars/g) || []).length;
+  assert.equal(count(render('compact')), 2, 'Codex + Claude paired');
+  assert.equal(count(render('classic')), 0, 'Codex + Claude separated');
+});
+test('changing the style saves only layout: no refresh, mode or visibility change', async () => {
   invokeCalls = []; stateChanges = []; invokeFailure = null;
   const current = { ...prefs, claudeAccounts: { mode: 'multi', selectedId: 'Travail', profiles: [{ id: 'Travail', path: '/fixtures/Travail', name: 'Travail', visible: false }] } };
-  invokeResult = { ...current, claudeLayout: 'classic' };
+  invokeResult = { ...current, layout: 'classic' };
   const tree = display(current);
-  find(tree, node => node.type?.name === 'Choices' && node.props?.name === 'claudeLayout').props.onChange('classic');
+  find(tree, node => node.type?.name === 'Choices' && node.props?.name === 'layout').props.onChange('classic');
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(invokeCalls.length, 1);
-  assert.deepEqual(invokeCalls[0], { command: 'set_preferences', payload: { prefs: { ...current, claudeLayout: 'classic' } } });
+  assert.deepEqual(invokeCalls[0], { command: 'set_preferences', payload: { prefs: { ...current, layout: 'classic' } } });
   assert.deepEqual(invokeCalls[0].payload.prefs.claudeAccounts, current.claudeAccounts);
 });
 const dashState = (p, list) => [[], null, snapshot, p, false, null, null, null, false, 0, list];
 const metric = (id, used, label, resetAt) => ({ id: 'claude:' + id, label, usedPercent: used, resetAt, availability: 'available', periodDurationSeconds: id === 'five_hour' ? 18000 : 604800, exhausted: false });
 const withRows = (a, u5, u7) => ({ ...a, snapshot: { ...snapshot, metrics: [metric('five_hour', u5, 'Limite 5 heures', '2030-01-01T12:00:00Z'), metric('seven_day', u7, 'Limite hebdomadaire', '2030-01-04T12:00:00Z')] } });
 const pair = [withRows(accounts[0], 27, 14), withRows(accounts[1], 65, 80)];
-const multiPrefs = (layout) => ({ ...prefs, ...(layout ? { claudeLayout: layout } : {}), claudeAccounts: { ...prefs.claudeAccounts, mode: 'multi' } });
+const multiPrefs = (layout) => ({ ...prefs, ...(layout ? { layout } : {}), claudeAccounts: { ...prefs.claudeAccounts, mode: 'multi' } });
 test('Classique + several accounts: one section per account with separated rows, resets and plans, never aggregated', () => {
   const html = renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, dashState(multiPrefs('classic'), pair)));
   assert.doesNotMatch(html, /paired-bars|provider-card--compact|provider-grid--two/);

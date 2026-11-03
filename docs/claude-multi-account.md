@@ -58,9 +58,9 @@ Contrat en vigueur depuis t_ad995d23 (remplace celui de 644cca6, où un seul com
 Deux réglages indépendants :
 
 - **Fournisseurs → Claude** choisit *quels* comptes sont affichés (`Unique | Multi`, dès deux profils).
-- **Affichage → Présentation Claude** choisit *comment* : `Compacte` (barres 5 h / 7 j jumelées, décomptes) ou `Classique` (lignes séparées historiques : 5 h, hebdomadaire, Fable, pourcentages, réinitialisations). **S'applique à tous les cas** : Unique, Multi avec un seul visible, plusieurs visibles. Jamais d'agrégation.
+- **Affichage → Présentation** (réglage unique Claude + Codex, voir la fin du document) choisit *comment* : `Compacte` (barres 5 h / 7 j jumelées, décomptes) ou `Classique` (lignes séparées historiques : 5 h, hebdomadaire, Fable, pourcentages, réinitialisations). **S'applique à tous les cas** : Unique, Multi avec un seul visible, plusieurs visibles. Jamais d'agrégation.
 
-### Préférence `claudeLayout`
+### Préférence `claudeLayout` (devenue `layout`, voir la fin)
 
 - Règle partagée : Rust `prefs::parse` / `claude_account_panels` (menu AppKit et fenêtre compacte/Dock via `panel_model()`) et React `claudeLayoutOf` / `claudePlan` (Dashboard). Plus aucune condition sur le nombre de comptes.
 - Choix enregistré explicite = prioritaire sur le mode et le nombre de comptes ; valeur inconnue → `compact`, autres préférences conservées.
@@ -117,3 +117,15 @@ Les quatre onglets partagent désormais `prefs-group__title` (13 px, graisse 600
 RED navigateur : titre Actualisation absent et titre Notifications à 700 au lieu de 600. GREEN : 16 captures comparables (4 onglets × clair/sombre × avant/après 029dff0), titres tous à 13/600 et au même alignement gauche 35 px sur viewport 480 px, sans clipping ni débordement ; captures examinées. Les 73 tests Node, typecheck et build Vite passent après ce complément. Aucun transport, réglage d'actualisation ou envoi de notification modifié.
 
 Revue indépendante : seul écart repéré, la semaine seule remontait de 7 px dans la fenêtre React. Correctif : grille aux slots explicites 5/3 px, écart 2 px, sans créer de barre manquante. RED/GREEN du test SSR ; cas navigateur clair/sombre mesure l'offset 7 px et préserve la réserve supplémentaire. Aucun nouveau changement natif.
+
+## Un seul réglage Compacte/Classique — t_5d9c886a
+
+- **Réglages → Affichage → Présentation** (un seul contrôle `prefs-segmented`, icônes existantes) s'applique à Codex **et** Claude : menu natif macOS, fenêtre compacte React (même `panel_model`) et Dashboard. Les contrôles « Présentation Codex » / « Présentation Claude » sont supprimés ; Fournisseurs n'en contient aucun. Aucune condition sur le nombre de comptes ; changer la présentation n'appelle que `set_preferences` (aucune collecte).
+- **Clé effective : `layout`** (`compact` | `classic`, inconnue → `compact`). Rust : `prefs::parse` / `normalized_for_save` / `quota_providers` ; React : `layoutOf` (même règle).
+- **Migration (clé `layout` absente)** :
+  1. une seule ancienne clé (`claudeLayout` ou `codexLayout`) → reprise telle quelle ;
+  2. les deux présentes et différentes → **le choix Claude explicite l'emporte** (les clés ne portent aucune date : « le plus récent » n'est pas connaissable) ;
+  3. aucune → aspect historique du fichier : `compact` pour un ancien Multi, sinon `classic`.
+  Si `layout` existe, il prime sur les deux anciennes clés.
+- **Compatibilité `prefs.json`** : `claudeLayout` et `codexLayout` restent écrites, toujours égales à `layout`, pour qu'un build antérieur relise le même choix ; elles ne sont lues qu'à la migration. Premier enregistrement après mise à jour : le fichier contient `layout` + les deux miroirs.
+- Tests : Rust `single_layout_migrates_from_legacy_keys_with_a_documented_rule`, `single_layout_keeps_legacy_keys_readable_and_mirrored`, `one_saved_layout_switches_codex_and_claude_in_the_native_menu` ; Node `layoutOf…`, `Affichage has ONE Présentation control…`, `one choice changes Claude AND Codex in the Dashboard`.

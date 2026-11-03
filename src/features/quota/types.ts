@@ -51,9 +51,11 @@ export type Preferences = {
   indicator: IndicatorChoice;
   displayMode: DisplayMode;
   ntfy: NtfyConfig;
-  /** Absent in older files: see `claudeLayoutOf` (same migration as Rust). */
+  /** Single Compacte/Classique choice for Claude and Codex. Absent in older
+   *  files: see `layoutOf` (same migration as Rust). */
+  layout?: ClaudeLayout;
+  /** Legacy keys, kept in sync by Rust for older builds; read-only here. */
   claudeLayout?: ClaudeLayout;
-  /** Absent older key preserves historical Codex rows. Independent of Claude. */
   codexLayout?: ClaudeLayout;
 };
 

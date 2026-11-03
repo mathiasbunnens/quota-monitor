@@ -11,15 +11,17 @@ const {default:Card}=await import('data:text/javascript;base64,'+Buffer.from(com
 const now=Date.parse('2030-01-01T10:00:00Z');
 const bucket=(period,remaining=63)=>({model:'codex',period,remaining,limit:100,resetAt:'2030-01-01T12:00:00Z'});
 const render=(snapshots,paired=true)=>renderToStaticMarkup(createElement(Card,{name:'Codex',badge:'plus',rows:providers.codexRows(snapshots),compact:paired,accountCompact:paired,now}));
-test('Codex preference is independent and migrates old files to classic',()=>{
- assert.equal(providers.codexLayoutOf?.(null),'classic');
- assert.equal(providers.codexLayoutOf?.({claudeLayout:'compact'}),'classic');
- assert.equal(providers.codexLayoutOf?.({codexLayout:'compact',claudeLayout:'classic'}),'compact');
- assert.equal(providers.codexLayoutOf?.({codexLayout:'unknown'}),'compact');
+test('one preference drives Codex too; legacy Codex key migrates; no Codex-specific control',()=>{
+ assert.equal(providers.layoutOf?.(null),'classic');
+ assert.equal(providers.layoutOf?.({claudeLayout:'compact'}),'compact');
+ assert.equal(providers.layoutOf?.({codexLayout:'compact'}),'compact');
+ assert.equal(providers.layoutOf?.({codexLayout:'compact',claudeLayout:'classic'}),'classic');
+ assert.equal(providers.layoutOf?.({layout:'classic',codexLayout:'compact',claudeLayout:'compact'}),'classic');
+ assert.equal(providers.codexLayoutOf,undefined);
  const settings=fs.readFileSync(new URL('../src/features/settings/Settings.tsx',import.meta.url),'utf8');
- assert.match(settings,/Présentation Codex/);assert.match(settings,/name="codexLayout"/);
+ assert.doesNotMatch(settings,/Présentation Codex|name="codexLayout"|name="claudeLayout"/);
  const dashboard=fs.readFileSync(new URL('../src/pages/Dashboard/Dashboard.tsx',import.meta.url),'utf8');
- assert.match(dashboard,/accountCompact=\{codexPaired\}/);
+ assert.match(dashboard,/accountCompact=\{codexPaired\}/);assert.match(dashboard,/layoutOf\(prefs\)/);
 });
 test('mono Codex compact exposes both real windows, countdowns and remaining values',()=>{
  const html=render([bucket('five-hour'),bucket('weekly',85)]);

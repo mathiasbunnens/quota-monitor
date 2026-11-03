@@ -4,7 +4,7 @@ import ResetCredits from "../../features/quota/ResetCredits";
 import ProviderCard from "../../features/quota/ProviderCard";
 import { useCallback, useEffect, useState } from "react";
 import CodexConnection from "../../features/setup/CodexConnection";
-import { claudePlan, claudeRows, claudeStatusText, codexRows, codexLayoutOf } from "../../features/quota/providers";
+import { claudePlan, claudeRows, claudeStatusText, codexRows, layoutOf } from "../../features/quota/providers";
 import type { ClaudeAccount, ClaudeSnapshot, CodexStatus, Preferences, QuotaSnapshot } from "../../features/quota/types";
 import "./dashboard.scss";
 
@@ -75,7 +75,7 @@ export default function Dashboard() {
   // Shared with the native menu/compact window: the saved Compacte/Classique
   // choice applies to one or several cards; only names/notes follow the count.
   const plan = claudePlan(prefs, accounts, claude);
-  const codexPaired = codexLayoutOf(prefs) === "compact";
+  const codexPaired = layoutOf(prefs) === "compact";
   const fableEnabled = prefs?.fableEnabled ?? true;
 
   const refresh = async () => {

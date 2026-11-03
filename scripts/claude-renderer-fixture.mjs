@@ -31,11 +31,10 @@ if (scenario === 'fable') for (const [i,p] of profiles.entries()) p.snapshot.met
 if (scenario === 'one') profiles.splice(1);
 if (scenario === 'zero') { profiles.splice(1); Object.assign(profiles[0], {available:false}); Object.assign(profiles[0].snapshot, {state:'error',metrics:[],planType:null,message:'Dossier de profil Claude indisponible.'}); }
 if (scenario === 'add-error') profiles[1].snapshot.planType = 'team';
-let prefs = {codexEnabled:query.get('codex')==='yes',claudeEnabled:true,fableEnabled:query.get('fable')!=='off',indicator:'claude',displayMode:'menubar',ntfy:{enabled:false,serverUrl:'https://ntfy.sh',topic:''},claudeAccounts:{mode:['single','one','zero','add-error'].includes(scenario)?'single':'multi',selectedId:null,profiles:profiles.map(({id,path,name,visible})=>({id,path,name,visible}))},...(query.get('layout')?{claudeLayout:query.get('layout')}:{})};
+let prefs = {codexEnabled:query.get('codex')==='yes',claudeEnabled:true,fableEnabled:query.get('fable')!=='off',indicator:'claude',displayMode:'menubar',ntfy:{enabled:false,serverUrl:'https://ntfy.sh',topic:''},claudeAccounts:{mode:['single','one','zero','add-error'].includes(scenario)?'single':'multi',selectedId:null,profiles:profiles.map(({id,path,name,visible})=>({id,path,name,visible}))},...(query.get('layout')?{layout:query.get('layout'),claudeLayout:query.get('layout'),codexLayout:query.get('layout')}:{})};
 if(scenario==='none') prefs.claudeAccounts.profiles.forEach(p=>p.visible=false);
 if(scenario==='one-visible') prefs.claudeAccounts.profiles[1].visible=false;
 if(query.get('claude')==='off') prefs.claudeEnabled=false;
-if(query.get('codexLayout')) prefs.codexLayout=query.get('codexLayout');
 const codexRows = [
  {model:'codex',remaining:63,limit:100,period:'codex:codex:primary',windowMinutes:300,resetAt:new Date(base+95*60000).toISOString(),label:'Codex · 5 heures'},
  {model:'codex',remaining:85,limit:100,period:'codex:codex:secondary',windowMinutes:10080,resetAt:new Date(base+5760*60000).toISOString(),label:'Codex · 7 jours'},
@@ -55,7 +54,7 @@ export async function invoke(command, payload) {
  switch(command){
  case 'get_platform':return query.get('platform')||'linux';
  case 'get_preferences':return structuredClone(prefs);
- case 'set_preferences':prefs=structuredClone(payload.prefs);emit();return structuredClone(prefs);
+ case 'set_preferences':prefs=structuredClone(payload.prefs);if(prefs.layout)prefs.claudeLayout=prefs.codexLayout=prefs.layout;emit();return structuredClone(prefs);
  case 'get_claude_accounts':return structuredClone(accounts());
  case 'get_claude_snapshot':return accounts().find(a=>a.visible)?.snapshot||profiles[0].snapshot;
  case 'get_quota_snapshots':return prefs.codexEnabled?structuredClone(codexRows):[];

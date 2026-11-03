@@ -1510,6 +1510,34 @@ struct PanelModel {
     connection: Option<bool>,
 }
 
+/// Native menu / compact window providers: the ONE saved Compacte/Classique
+/// choice (`prefs.layout`) drives Codex and every visible Claude account.
+#[cfg(target_os = "macos")]
+fn quota_providers(
+    prefs: &prefs::Prefs,
+    codex_rows: &[QuotaPayload],
+    phase: &str,
+    message: &str,
+    plan: Option<String>,
+    accounts: &[claude::AccountSnapshot],
+) -> Vec<PanelProvider> {
+    let mut providers = Vec::new();
+    if prefs.codex_enabled {
+        providers.push(codex_presentation(
+            codex_rows,
+            phase,
+            message,
+            plan,
+            &prefs.layout,
+        ));
+    }
+    providers.extend(claude_account_panels(
+        accounts,
+        prefs.classic_claude_layout(),
+    ));
+    providers
+}
+
 #[cfg(target_os = "macos")]
 fn panel_model(app: &tauri::AppHandle) -> PanelModel {
     let snapshots = get_quota_snapshots(app.clone());
@@ -1526,23 +1554,17 @@ fn panel_model(app: &tauri::AppHandle) -> PanelModel {
         .as_ref()
         .map(|status| status.phase.clone())
         .unwrap_or_else(|| "starting".into());
-    let mut providers = Vec::new();
-    if prefs.codex_enabled {
-        providers.push(codex_presentation(
-            &snapshots,
-            &connection_phase,
-            codex_status
-                .as_ref()
-                .map(|s| s.message.as_str())
-                .unwrap_or(""),
-            codex_status.as_ref().and_then(|s| s.plan_type.clone()),
-            &prefs.codex_layout,
-        ));
-    }
-    providers.extend(claude_account_panels(
+    let providers = quota_providers(
+        &prefs,
+        &snapshots,
+        &connection_phase,
+        codex_status
+            .as_ref()
+            .map(|s| s.message.as_str())
+            .unwrap_or(""),
+        codex_status.as_ref().and_then(|s| s.plan_type.clone()),
         &accounts,
-        prefs.classic_claude_layout(),
-    ));
+    );
     let claude_snaps: Vec<_> = accounts.iter().map(|a| &a.snapshot).collect();
     let header = panel_header(&providers, latest_refresh(&snapshots, &claude_snaps));
     PanelModel {
@@ -3603,6 +3625,37 @@ mod tests {
             "model_scoped":[{"display_name":"Fable","utilization":10,"resets_at":at(chrono::Duration::hours(hours7 + 1))}],
             "extra_usage":{"is_enabled":true,"spend_limit_reached":true}
         })
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn one_saved_layout_switches_codex_and_claude_in_the_native_menu() {
+        let rows = [
+            payload("five-hour", 63, Some(300)),
+            payload("weekly", 85, Some(10080)),
+        ];
+        let personal = fixture_account("Personnel", true, fixture_limits(27.0, 14.0, 210, 80));
+        let build = |layout: &str| {
+            // Same file shape as an older build with only the Codex key.
+            let prefs = prefs::parse(
+                format!(r#"{{"layout":"{layout}","claudeEnabled":true,"codexLayout":"classic"}}"#)
+                    .as_bytes(),
+            );
+            quota_providers(&prefs, &rows, "ready", "", None, &[personal.clone()])
+        };
+        let (compact, classic) = (build("compact"), build("classic"));
+        assert_eq!((compact.len(), classic.len()), (2, 2));
+        assert!(compact.iter().all(|p| p.compact), "both providers paired");
+        assert!(
+            classic.iter().all(|p| !p.compact),
+            "both providers separated"
+        );
+        // Presentation only: same rows and values either way.
+        for (c, k) in compact.iter().zip(&classic) {
+            assert_eq!(c.name, k.name);
+            assert_eq!(c.rows, k.rows);
+            assert!(card_height(c) < card_height(k));
+        }
     }
 
     #[cfg(target_os = "macos")]

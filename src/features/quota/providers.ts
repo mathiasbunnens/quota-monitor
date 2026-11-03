@@ -1,15 +1,14 @@
 import type { ClaudeAccount, ClaudeLayout, ClaudeSnapshot, Preferences, QuotaSnapshot } from "./types";
 
-/** Same rule as Rust `prefs::parse`: an explicit value wins (unknown =
- *  compact); absent (older file) keeps that file's look — paired bars for a
- *  previous Multi build, otherwise the historical card. */
-export function claudeLayoutOf(prefs: { claudeLayout?: string; claudeAccounts?: { mode?: string } } | null | undefined): ClaudeLayout {
-  if (prefs?.claudeLayout === undefined) return prefs?.claudeAccounts?.mode === "multi" ? "compact" : "classic";
-  return prefs.claudeLayout === "classic" ? "classic" : "compact";
-}
-
-export function codexLayoutOf(prefs: { codexLayout?: string } | null | undefined): ClaudeLayout {
-  return prefs?.codexLayout === undefined || prefs.codexLayout === "classic" ? "classic" : "compact";
+/** One presentation for Claude AND Codex. Same rule as Rust `prefs::parse`:
+ *  `layout` wins (unknown = compact); absent (older file) → the explicit
+ *  Claude key, else the Codex key, else the look the file already had —
+ *  paired bars for a previous Multi build, otherwise the historical card. */
+type LayoutPrefs = { layout?: string; claudeLayout?: string; codexLayout?: string; claudeAccounts?: { mode?: string } };
+export function layoutOf(prefs: LayoutPrefs | null | undefined): ClaudeLayout {
+  const value = prefs?.layout ?? prefs?.claudeLayout ?? prefs?.codexLayout;
+  if (value === undefined) return prefs?.claudeAccounts?.mode === "multi" ? "compact" : "classic";
+  return value === "classic" ? "classic" : "compact";
 }
 
 export type ClaudeCard = { key: string; name: string; snapshot: ClaudeSnapshot | null; account: ClaudeAccount | null };
@@ -19,7 +18,7 @@ export type ClaudeCard = { key: string; name: string; snapshot: ClaudeSnapshot |
 export type ClaudePlan = { cards: ClaudeCard[]; paired: boolean; named: boolean; emptyMulti: boolean };
 
 export function claudePlan(prefs: Preferences | null, accounts: ClaudeAccount[], fallback: ClaudeSnapshot | null): ClaudePlan {
-  const paired = claudeLayoutOf(prefs) === "compact";
+  const paired = layoutOf(prefs) === "compact";
   if (!prefs?.claudeEnabled) return { cards: [], paired, named: false, emptyMulti: false };
   const multiMode = prefs.claudeAccounts?.mode === "multi";
   const selected = accounts.find((account) => account.id === prefs.claudeAccounts?.selectedId)
