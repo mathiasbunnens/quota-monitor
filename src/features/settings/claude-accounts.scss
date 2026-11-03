@@ -45,3 +45,11 @@
     button { flex: none; }
   }
 }
+
+// Detail of one account (opened by its chevron): its own windows and resets.
+.claude-accounts__windows {
+  list-style: none; margin: 4px 0 0; padding: 0;
+  li { display: grid; grid-template-columns: 1fr auto; column-gap: 8px; padding: 2px 0; font-size: 11px; }
+  strong { font-weight: 600; text-align: right; }
+  small { grid-column: 1 / -1; color: var(--desktop-muted); font-size: 11px; }
+}

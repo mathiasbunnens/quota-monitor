@@ -2680,6 +2680,7 @@ pub fn quota_ui_smoke(directory: &str) {
             rows: (!rows.is_empty()).then(|| rows.to_vec()),
             identity,
             last_checked: None,
+            available_resets: None,
         };
         let view = codex::PrimaryView {
             status: codex::Status {

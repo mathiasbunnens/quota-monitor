@@ -899,10 +899,41 @@ fn reset_outcome(value: &Value) -> Result<String, String> {
         _ => Err("Réponse inconnue. Vérifie les quotas avant de réessayer.".into()),
     }
 }
+#[derive(Debug, PartialEq)]
+pub(crate) enum RedeemRoute {
+    Primary,
+    Extra(String),
+}
+
+/// Which collector may spend a reset for `id`. Only a followed, available,
+/// connected, non-duplicate account qualifies; an unknown id is an error and
+/// never falls back to the primary session.
+pub(crate) fn redeem_route(accounts: &[CodexAccount], id: &str) -> Result<RedeemRoute, String> {
+    let account = accounts
+        .iter()
+        .find(|a| a.profile.id == id)
+        .ok_or("Compte Codex introuvable.")?;
+    if !account.tracked || !account.available || account.phase != "ready" {
+        return Err("Ce compte Codex n’est pas connecté.".into());
+    }
+    if account.duplicate_of.is_some() {
+        return Err(
+            "Ce compte est un doublon : utilise la réinitialisation du compte d’origine.".into(),
+        );
+    }
+    Ok(if account.primary {
+        RedeemRoute::Primary
+    } else {
+        RedeemRoute::Extra(id.to_string())
+    })
+}
+
 #[tauri::command]
 pub async fn redeem_codex_reset(
+    app: tauri::AppHandle,
     provider: State<'_, Provider>,
     idempotency_key: String,
+    account_id: String,
 ) -> Result<RedemptionResult, String> {
     // Only UUID-shaped keys are accepted. Retries must retain the original key.
     if idempotency_key.len() != 36
@@ -917,10 +948,21 @@ pub async fn redeem_codex_reset(
         return Err("Identifiant de réinitialisation invalide.".into());
     }
     let (tx, rx) = mpsc::channel();
-    provider
-        .tx
-        .send(Action::Redeem(idempotency_key, tx))
-        .map_err(|_| "Service Codex indisponible.")?;
+    match redeem_route(&accounts(&app), &account_id)? {
+        RedeemRoute::Primary => provider
+            .tx
+            .send(Action::Redeem(idempotency_key, tx))
+            .map_err(|_| "Service Codex indisponible.")?,
+        RedeemRoute::Extra(id) => provider
+            .extras
+            .lock()
+            .unwrap()
+            .get(&id)
+            .ok_or("Compte Codex introuvable.")?
+            .tx
+            .send(ExtraAction::Redeem(idempotency_key, tx))
+            .map_err(|_| "Service Codex indisponible.")?,
+    }
     tauri::async_runtime::spawn_blocking(move || {
         rx.recv()
             .map_err(|_| "Service Codex interrompu.".to_owned())?
@@ -1034,6 +1076,8 @@ pub(crate) struct Reading {
     pub rows: Option<Vec<QuotaPayload>>,
     pub identity: Option<u64>,
     pub last_checked: Option<String>,
+    /// Earned reset credits reported by this account's own rate-limit read.
+    pub available_resets: Option<u64>,
 }
 impl Reading {
     fn new(phase: &str, message: &str) -> Self {
@@ -1105,6 +1149,8 @@ struct ExtraHandle {
 }
 enum ExtraAction {
     Refresh,
+    /// Explicit, user-confirmed reset for THIS home only (idempotency key).
+    Redeem(String, Sender<Result<RedemptionResult, String>>),
 }
 pub(crate) struct ExtraWorker {
     id: String,
@@ -1167,12 +1213,19 @@ fn poll_extra(
             match account["account"]["type"].as_str() {
                 Some("chatgpt" | "chatgptAuthTokens") => client
                     .call("account/rateLimits/read", Value::Null)
-                    .and_then(|v| Ok(Some((plan, account_fingerprint(&account), normalize(&v)?)))),
+                    .and_then(|v| {
+                        Ok(Some((
+                            plan,
+                            account_fingerprint(&account),
+                            normalize(&v)?,
+                            available_resets(&v),
+                        )))
+                    }),
                 _ => Ok(None),
             }
         });
     match result {
-        Ok(Some((plan, identity, rows))) => {
+        Ok(Some((plan, identity, rows, resets))) => {
             *failures = 0;
             let delay = Duration::from_secs((w.interval)(plan.as_deref()));
             let mut reading = Reading::new(
@@ -1185,6 +1238,7 @@ fn poll_extra(
             );
             reading.plan_type = plan;
             reading.identity = identity;
+            reading.available_resets = resets;
             reading.rows = Some(rows);
             reading.last_checked = now();
             (reading, delay)
@@ -1214,8 +1268,36 @@ fn run_extra(w: ExtraWorker, rx: Receiver<ExtraAction>) {
     let mut next_poll = w.first_poll;
     let mut failures = 0_u32;
     while !w.shared.stop.load(Ordering::Acquire) {
+        let mut pending_reset = None;
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(ExtraAction::Refresh) => next_poll = Instant::now(),
+            Ok(ExtraAction::Redeem(key, reply)) => {
+                let ready = w
+                    .store
+                    .lock()
+                    .unwrap()
+                    .get(&w.id)
+                    .is_some_and(|(reading, _)| reading.phase == "ready");
+                match session.as_mut().filter(|_| ready) {
+                    Some(client) => {
+                        // This child only: its own CODEX_HOME, never the primary.
+                        let outcome = client
+                            .call(
+                                "account/rateLimitResetCredit/consume",
+                                json!({"idempotencyKey":key}),
+                            )
+                            .and_then(|value| reset_outcome(&value));
+                        // Re-read this account before acknowledging.
+                        next_poll = Instant::now();
+                        pending_reset = Some((reply, outcome));
+                    }
+                    None => {
+                        let _ = reply
+                            .send(Err("Reconnecte ce compte Codex avant de réessayer.".into()));
+                        continue;
+                    }
+                }
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(_) => break,
         }
@@ -1242,9 +1324,14 @@ fn run_extra(w: ExtraWorker, rx: Receiver<ExtraAction>) {
         if w.shared.stop.load(Ordering::Acquire) {
             break;
         }
+        let refreshed = reading.phase == "ready" && reading.rows.is_some();
         let committed = w.store.lock().unwrap().commit(&w.id, w.generation, reading);
         if committed {
             (w.changed)();
+        }
+        if let Some((reply, outcome)) = pending_reset {
+            // A confirmed redemption stays confirmed even if the re-read fails.
+            let _ = reply.send(redemption_result(outcome, refreshed && committed));
         }
     }
     drop(session); // closes stdin and stops this child only
@@ -1280,6 +1367,8 @@ pub struct CodexAccount {
     pub message: String,
     pub plan_type: Option<String>,
     pub last_checked: Option<String>,
+    /// Earned resets of THIS account (`None`: unknown or not connected).
+    pub available_resets: Option<u64>,
     pub rows: Vec<QuotaPayload>,
     /// Name of an earlier account returning the same identity (not added up).
     pub duplicate_of: Option<String>,
@@ -1311,6 +1400,7 @@ pub(crate) fn account_view(
                 rows: Some(p.rows.clone()),
                 identity: p.identity,
                 last_checked: p.status.last_checked.clone(),
+                available_resets: p.status.available_resets,
             })
             .unwrap_or_else(|| Reading::new("starting", "Connexion à Codex…"))
     } else if !d.tracked {
@@ -1335,6 +1425,9 @@ pub(crate) fn account_view(
     };
     let mut profile = d.profile;
     profile.visible = d.visible && enabled;
+    let available_resets = (enabled && reading.phase == "ready")
+        .then_some(reading.available_resets)
+        .flatten();
     CodexAccount {
         rows: crate::visible_quotas(raw.clone(), reading.plan_type.as_deref()),
         raw_rows: raw,
@@ -1347,6 +1440,7 @@ pub(crate) fn account_view(
         message: reading.message,
         plan_type: reading.plan_type,
         last_checked: reading.last_checked,
+        available_resets,
         duplicate_of: None,
         identity: reading.identity,
     }
@@ -1604,7 +1698,17 @@ while IFS= read -r line; do
       fi ;;
     account/rateLimits/read)
       used=$(cat "$CODEX_HOME/fixture-used" 2>/dev/null || echo 20)
-      printf '{"id":%s,"result":{"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":%s,"windowDurationMins":300,"resetsAt":1900000000},"secondary":{"usedPercent":10,"windowDurationMins":10080,"resetsAt":1900500000}}}}}\n' "$id" "$used" ;;
+      credits=""
+      [ -f "$CODEX_HOME/fixture-resets" ] && credits=",\"rateLimitResetCredits\":{\"availableCount\":$(cat "$CODEX_HOME/fixture-resets")}"
+      printf '{"id":%s,"result":{"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":%s,"windowDurationMins":300,"resetsAt":1900000000},"secondary":{"usedPercent":10,"windowDurationMins":10080,"resetsAt":1900500000}}}%s}}\n' "$id" "$used" "$credits" ;;
+    account/rateLimitResetCredit/consume)
+      left=$(cat "$CODEX_HOME/fixture-resets" 2>/dev/null || echo 0)
+      if [ "$left" -gt 0 ]; then
+        echo $((left - 1)) > "$CODEX_HOME/fixture-resets"
+        printf '{"id":%s,"result":{"outcome":"reset"}}\n' "$id"
+      else
+        printf '{"id":%s,"result":{"outcome":"noCredit"}}\n' "$id"
+      fi ;;
     *) printf '{"id":%s,"error":{"code":-1,"message":"unexpected"}}\n' "$id" ;;
   esac
 done
@@ -1872,6 +1976,205 @@ done
         let json = serde_json::to_value(&list[2]).unwrap();
         assert!(json.get("identity").is_none() && json.get("rawRows").is_none());
         assert_eq!(json["duplicateOf"], "Principal");
+    }
+
+    #[test]
+    fn reset_credits_are_reported_per_account_and_only_when_ready() {
+        let primary = PrimaryView {
+            status: Status {
+                phase: "ready".into(),
+                available_resets: Some(2),
+                ..Status::default()
+            },
+            rows: ready(1, 40.0).rows.unwrap(),
+            identity: Some(1),
+        };
+        let mut with_credit = ready(2, 10.0);
+        with_credit.available_resets = Some(1);
+        let mut signed_out = Reading::new("signed_out", "Non connecté.");
+        signed_out.available_resets = Some(9); // never shown without a connection
+        let list = [
+            account_view(
+                found("Principal", true, true, true, true),
+                true,
+                Some(&primary),
+                None,
+            ),
+            account_view(
+                found("work", false, true, true, true),
+                true,
+                None,
+                Some((with_credit, false)),
+            ),
+            account_view(
+                found("out", false, true, true, true),
+                true,
+                None,
+                Some((signed_out, false)),
+            ),
+            account_view(found("seen", false, false, true, false), true, None, None),
+        ];
+        assert_eq!(
+            list[0].available_resets,
+            Some(2),
+            "primary keeps its own count"
+        );
+        assert_eq!(
+            list[1].available_resets,
+            Some(1),
+            "each home has its own count"
+        );
+        assert_eq!(list[2].available_resets, None);
+        assert_eq!(list[3].available_resets, None);
+        assert_eq!(
+            serde_json::to_value(&list[1]).unwrap()["availableResets"],
+            1
+        );
+    }
+
+    #[test]
+    fn a_reset_is_routed_to_the_asked_account_and_never_defaults_to_the_primary() {
+        let primary = PrimaryView {
+            status: Status {
+                phase: "ready".into(),
+                ..Status::default()
+            },
+            rows: ready(1, 40.0).rows.unwrap(),
+            identity: Some(1),
+        };
+        let mut list = vec![
+            account_view(
+                found("Principal", true, true, true, true),
+                true,
+                Some(&primary),
+                None,
+            ),
+            account_view(
+                found("work", false, true, true, true),
+                true,
+                None,
+                Some((ready(2, 10.0), false)),
+            ),
+            account_view(
+                found("alias", false, true, true, true),
+                true,
+                None,
+                Some((ready(1, 40.0), false)),
+            ),
+            account_view(
+                found("out", false, true, true, true),
+                true,
+                None,
+                Some((Reading::new("signed_out", "x"), false)),
+            ),
+            account_view(found("seen", false, false, true, false), true, None, None),
+        ];
+        mark_duplicates(&mut list);
+        assert_eq!(
+            redeem_route(&list, "profile:Principal"),
+            Ok(RedeemRoute::Primary)
+        );
+        assert_eq!(
+            redeem_route(&list, "profile:work"),
+            Ok(RedeemRoute::Extra("profile:work".into()))
+        );
+        for refused in [
+            "profile:alias",
+            "profile:out",
+            "profile:seen",
+            "profile:unknown",
+            "",
+        ] {
+            assert!(
+                redeem_route(&list, refused).is_err(),
+                "{refused} must not reset anything"
+            );
+        }
+        // A primary that is not connected is refused as well.
+        let mut off = list.clone();
+        off[0].phase = "signed_out".into();
+        assert!(redeem_route(&off, "profile:Principal").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_extra_home_redeems_on_its_own_child_only_and_refreshes_only_itself() {
+        let root = scratch("extra-redeem");
+        let (exe, log) = fake_codex(&root);
+        let home = |name: &str, resets: &str| {
+            let dir = root.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("fixture-identity"),
+                format!("{name}@example.invalid"),
+            )
+            .unwrap();
+            fs::write(dir.join("fixture-resets"), resets).unwrap();
+            dir
+        };
+        let alpha = home("alpha", "2");
+        let beta = home("beta", "3");
+        let store = Arc::new(Mutex::new(AccountStore::default()));
+        let workers = vec![
+            spawn_extra(&store, "alpha", &alpha, &exe),
+            spawn_extra(&store, "beta", &beta, &exe),
+        ];
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for(&store, &["alpha", "beta"]);
+            let count = |id: &str| store.lock().unwrap().get(id).unwrap().0.available_resets;
+            assert_eq!((count("alpha"), count("beta")), (Some(2), Some(3)));
+            let key = "0b8f3f0e-8a5e-4c55-9d52-5d2f3c1e9a10";
+            let (tx, rx) = mpsc::channel();
+            workers[0]
+                .1
+                .send(ExtraAction::Redeem(key.into(), tx))
+                .unwrap();
+            let done = rx.recv_timeout(Duration::from_secs(15)).unwrap().unwrap();
+            assert_eq!(done.outcome, "reset");
+            assert!(
+                done.quotas_refreshed,
+                "the account is re-read before the answer"
+            );
+            assert_eq!(
+                (count("alpha"), count("beta")),
+                (Some(1), Some(3)),
+                "only alpha changed"
+            );
+            let calls = fs::read_to_string(&log).unwrap();
+            let consumed: Vec<_> = calls
+                .lines()
+                .filter(|l| l.starts_with("account/rateLimitResetCredit/consume|"))
+                .collect();
+            assert_eq!(consumed.len(), 1);
+            assert!(
+                consumed[0].contains(&format!("|{}|", alpha.display())),
+                "{}",
+                consumed[0]
+            );
+            assert!(consumed[0].contains(key));
+            assert!(!consumed[0].contains(beta.to_str().unwrap()));
+            // A home that is not ready refuses instead of falling back to anything else.
+            let (tx, rx) = mpsc::channel();
+            store
+                .lock()
+                .unwrap()
+                .commit("beta", 2, Reading::new("signed_out", "x"));
+            workers[1]
+                .1
+                .send(ExtraAction::Redeem(key.into(), tx))
+                .unwrap();
+            assert!(rx.recv_timeout(Duration::from_secs(15)).unwrap().is_err());
+        }));
+        for (shared, _, _) in &workers {
+            shared.stop.store(true, Ordering::Release);
+        }
+        for (shared, tx, handle) in workers {
+            drop(tx);
+            handle.join().unwrap();
+            assert!(shared.child.lock().unwrap().is_none());
+        }
+        fs::remove_dir_all(root).unwrap();
+        result.unwrap();
     }
 
     #[cfg(unix)]

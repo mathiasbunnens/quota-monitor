@@ -65,7 +65,6 @@ html:has(.prefs), html:has(.prefs) body { background: var(--desktop-bg); }
   > div { display: block; }
 }
 .prefs-actions, .prefs .settings-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 6px; }
-.prefs .prefs-external { display: inline-flex; align-items: center; gap: 4px; margin: 6px 0 0 -4px; }
 .external-icon { flex: none; vertical-align: -1px; }
 .prefs .prefs-link { border-color: transparent; background: transparent; box-shadow: none; color: var(--desktop-accent); padding-inline: 4px; }
 
@@ -131,31 +130,12 @@ html:has(.prefs), html:has(.prefs) body { background: var(--desktop-bg); }
   .prefs-body { padding-inline: 12px; }
 }
 
-// Reset credits lives in its own group: drop the dashboard card chrome.
-.prefs .reset-credits {
-  margin: 0; padding: 0; border: 0; background: none; box-shadow: none;
-  .dashboard__quota-heading { font-size: 13px; font-weight: 600; align-items: center; }
-  .dashboard__quota-heading strong { font-size: 18px; letter-spacing: -0.3px; }
-  .dashboard__actions { margin-top: 8px; }
-}
 .prefs .settings-row { display: flex; justify-content: space-between; gap: 12px; strong { text-transform: capitalize; color: var(--desktop-ink); } }
 
 @media (prefers-reduced-motion: reduce) {
   .prefs-toolbar button[role="tab"], .prefs-switch span, .prefs-switch span::after, .prefs-segmented label, .prefs-choices__icon { transition: none; }
 }
 
-// Reset credits as a compact chip in the provider header: icon + remaining count.
-.prefs .reset-chip {
-  display: inline-flex; align-items: center; gap: 4px; flex: none; padding: 2px 8px; border-radius: 999px;
-  font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 16px; box-shadow: none;
-  color: var(--desktop-accent); border-color: color-mix(in srgb, var(--desktop-accent) 35%, transparent);
-  background: color-mix(in srgb, var(--desktop-accent) 8%, transparent);
-  &:disabled { color: var(--desktop-muted); border-color: var(--desktop-border); background: transparent; opacity: 1; }
-}
-.prefs-links {
-  display: flex; align-items: center; gap: 12px; margin-top: 6px;
-  .prefs-external { margin: 0 0 0 -4px; }
-}
 // Static chevron at the right of the links row (does not rotate).
 .prefs .prefs-more {
   display: grid; place-items: center; width: 22px; height: 22px; margin-left: auto; padding: 0;
@@ -165,3 +145,14 @@ html:has(.prefs), html:has(.prefs) body { background: var(--desktop-bg); }
 }
 .prefs-advanced { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--desktop-border); }
 .prefs .prefs-group > .codex-connection { margin-top: 8px; padding-top: 8px; }
+
+// Provider title doubles as the detailed-usage link: same ink as the other
+// group titles, the existing external arrow in the accent colour (like the
+// former « Usage détaillé » link), a full-height focus target.
+.prefs .prefs-title-link {
+  display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 0 2px; margin: 0 -2px;
+  border: 0; border-radius: 6px; background: transparent; box-shadow: none;
+  font: inherit; font-weight: inherit; color: inherit;
+  .external-icon { color: var(--desktop-accent); }
+  &:hover:not(:disabled) { background: color-mix(in srgb, var(--desktop-ink) 7%, transparent); }
+}

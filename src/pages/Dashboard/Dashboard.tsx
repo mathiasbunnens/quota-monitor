@@ -2,7 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ResetCredits from "../../features/quota/ResetCredits";
 import ProviderCard from "../../features/quota/ProviderCard";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import ExternalIcon from "../../features/ui/ExternalIcon";
 import CodexConnection from "../../features/setup/CodexConnection";
 import { claudePlan, claudeRows, claudeStatusText, codexPlan, codexRows, type CodexCard } from "../../features/quota/providers";
 import type { ClaudeAccount, ClaudeSnapshot, CodexAccount, CodexStatus, Preferences, QuotaSnapshot } from "../../features/quota/types";
@@ -81,8 +82,6 @@ export default function Dashboard() {
   const plan = claudePlan(prefs, accounts, claude);
   const codex = codexPlan(prefs, codexAccounts, snapshots);
   const named = plan.named || codex.named;
-  // Credits act on the primary session only: shown with its card.
-  const primaryShown = codex.cards.some((card) => !card.account || card.account.primary);
   const fableEnabled = prefs?.fableEnabled ?? true;
 
   const refresh = async () => {
@@ -95,11 +94,14 @@ export default function Dashboard() {
     if (failed) setError(String(failed.reason));
     reload(); setRefreshing(false);
   };
-  const openDetails = async () => {
+  // Provider title arrow: the provider's detailed usage page.
+  const openUsage = async (command: "open_usage_details" | "open_claude_usage") => {
     setError(null);
-    try { await invoke("open_usage_details"); }
+    try { await invoke(command); }
     catch (cause) { setError(String(cause)); }
   };
+  const codexUsage = { label: "Codex : usage détaillé sur chatgpt.com", onOpen: () => void openUsage("open_usage_details"), icon: <ExternalIcon /> };
+  const claudeUsage = { label: "Claude : usage détaillé sur claude.ai", onOpen: () => void openUsage("open_claude_usage"), icon: <ExternalIcon /> };
   const openSettings = async () => {
     try { await invoke("open_settings"); }
     catch (cause) { setError(String(cause)); }
@@ -126,10 +128,11 @@ export default function Dashboard() {
     {/* Classique with several accounts: full-width stacked sections, like the menu. */}
     <div className={"provider-grid" + (named && !plan.paired ? ""
       : (both || named ? " provider-grid--two" : "") + (named ? " provider-grid--accounts" : ""))}>
-      {codex.cards.map((card) => <CodexAccountCard key={card.key} card={card} named={codex.named} paired={codex.paired}
-        compact={codex.paired || (!named && both)} now={now} status={status} codexStatus={codexStatus} codexFailure={codexFailure} />)}
+      {codex.cards.map((card, index) => <CodexAccountCard key={card.key} card={card} named={codex.named} paired={codex.paired}
+        compact={codex.paired || (!named && both)} now={now} status={status} codexStatus={codexStatus} codexFailure={codexFailure}
+        usage={index === 0 ? codexUsage : undefined} onChange={reload} />)}
       {codex.emptyMulti && <p className="provider-card__note" role="status">Aucun compte Codex visible. Choisissez les comptes dans les Réglages.</p>}
-      {plan.cards.map(({ key, name, snapshot, account }) => <ProviderCard key={key} name={name}
+      {plan.cards.map(({ key, name, snapshot, account }, index) => <ProviderCard key={key} name={name} usage={index === 0 ? claudeUsage : undefined}
         badge={plan.named ? snapshot?.planType : undefined} rows={snapshot ? claudeRows(snapshot, fableEnabled) : []}
         compact={plan.paired || (!plan.named && both)} accountCompact={plan.paired} now={now}
         status={plan.named && account ? (!account.available ? "Dossier indisponible." : account.refreshing ? "Actualisation…" : claudeStatusText(account.snapshot))
@@ -139,10 +142,8 @@ export default function Dashboard() {
       </ProviderCard>)}
       {plan.emptyMulti && <p className="provider-card__note" role="status">Aucun compte Claude visible. Choisissez les comptes dans les Réglages.</p>}
     </div>
-    {codexOn && primaryShown && <ResetCredits status={status} onChange={reload} />}
     <footer className="dashboard__footer">
       <span>{codexOn && snapshots[0]?.checkedAt ? "Codex vérifié : " + new Date(snapshots[0].checkedAt).toLocaleTimeString("fr-FR") : ""}</span>
-      {codexOn && <button onClick={() => void openDetails()}>Voir les détails sur Codex ↗</button>}
     </footer>
     {codexOn && <p className="dashboard__strategy">Actualisation Codex {status?.refreshSettings.customSeconds ? "personnalisée" : "dynamique"} · toutes les {status?.refreshSeconds || 120} s{claudeOn ? " · Claude : mis à jour par Claude Code" : ""}</p>}
     {codexOn && !isConnected && (showSetup || needsSetup) && <CodexConnection status={status} onChange={reload} />}
@@ -152,22 +153,29 @@ export default function Dashboard() {
 /** One Codex card. The historical card (primary alone, or no account list)
  *  is drawn exactly as before from the primary collector; an additional
  *  home shows its own rows, state and duplicate note, never a sum. */
-function CodexAccountCard({ card, named, paired, compact, now, status, codexStatus, codexFailure }: {
+function CodexAccountCard({ card, named, paired, compact, now, status, codexStatus, codexFailure, usage, onChange }: {
   card: CodexCard; named: boolean; paired: boolean; compact: boolean; now: number;
   status: CodexStatus | null; codexStatus: string | null; codexFailure: string | null;
+  usage?: { label: string; onOpen: () => void; icon: ReactNode }; onChange: () => void;
 }) {
   const account = card.account;
+  // A reset belongs to one connected, followed, non-duplicate account: shown on its card.
+  const credits = account && account.tracked && account.phase === "ready" && !account.duplicateOf
+    ? <ResetCredits accountId={account.id} accountName={account.name} primary={account.primary}
+      ready={account.available} count={account.availableResets} onChange={onChange} />
+    : null;
   if (!account || (!named && account.primary)) {
     return <ProviderCard name="Codex" badge={status?.planType} rows={codexRows(card.rows)} compact={compact}
       accountCompact={paired} now={now} status={codexStatus} error={codexFailure}
-      empty={status?.phase === "ready" ? "Aucun quota à afficher. La réserve peut ne pas être communiquée par Codex." : "Quotas indisponibles."} />;
+      usage={usage} action={credits}
+      empty={status?.phase === "ready" ? "Aucun quota à afficher. La réserve peut ne pas être communiquée par Codex." : "Quotas indisponibles."}></ProviderCard>;
   }
   const ready = account.phase === "ready";
   const state = !account.available ? "Dossier indisponible."
     : account.refreshing ? "Actualisation…"
     : !ready && account.phase !== "error" ? account.message : null;
   return <ProviderCard name={card.name} badge={account.planType} rows={codexRows(card.rows)} compact={compact}
-    accountCompact={paired} now={now} status={state} error={account.phase === "error" ? account.message : null}
+    accountCompact={paired} now={now} status={state} error={account.phase === "error" ? account.message : null} usage={usage} action={credits}
     empty={ready ? "Aucun quota à afficher pour ce compte." : "Quotas indisponibles."}>
     {account.duplicateOf && <p className="provider-card__note">Même compte que « {account.duplicateOf} » : quotas non additionnés.</p>}
   </ProviderCard>;

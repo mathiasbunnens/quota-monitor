@@ -1,5 +1,6 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import type { ClaudeAccount, ClaudeAccountsPreferences, ClaudeProfile, CodexAccount, Preferences } from "../quota/types";
+import type { QuotaRow } from "../quota/providers";
 import "./claude-accounts.scss";
 
 type Tone = "good" | "warning" | "error" | "neutral";
@@ -28,6 +29,12 @@ type Props<A extends ListedAccount = ClaudeAccount> = {
   onFollow?: (id: string) => Promise<boolean>;
   /** Stop following an additional folder (never deletes it). */
   onUntrack?: (id: string) => Promise<boolean>;
+  /** Per-account control shown before the connection state (reset, extra usage). */
+  accessory?: (account: A) => ReactNode;
+  /** Windows of THIS account, listed in its detail. */
+  rowsOf?: (account: A) => QuotaRow[];
+  /** Extra detail content of THIS account (e.g. the Codex connection panel). */
+  renderDetail?: (account: A) => ReactNode;
 };
 
 /** Connection state of one profile: [pill, tone, actionable detail]. */
@@ -63,7 +70,6 @@ export function codexAccountState(account: CodexAccount): [string, Tone, string]
 }
 
 const pencil = <path d="M10.5 2.8 13.2 5.5 6 12.7 3 13l.3-3 7.2-7.2Z" />;
-const info = <><circle cx="8" cy="8" r="6" /><path d="M8 7.2v3.6M8 5.2v.1" /></>;
 const chevron = <path d="M6 3.5 10.5 8 6 12.5" />;
 const plus = <path d="M8 3.5v9M3.5 8h9" />;
 
@@ -100,7 +106,7 @@ export function AccountName({ account, disabled, onSave }: { account: { name: st
 }
 
 export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeAccount>({ prefs, accounts, busy, onUpdate, onAdd, onChooseFolder, actionError = null, advanced,
-  provider = "Claude", stateOf, planOf, onFollow, onUntrack }: Props<A>) {
+  provider = "Claude", stateOf, planOf, onFollow, onUntrack, accessory, rowsOf, renderDetail }: Props<A>) {
   const [path, setPath] = useState("");
   const [pathError, setPathError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
@@ -112,6 +118,7 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
   const slug = codex ? "codex" : "claude";
   // Visibility labels stay unique when both providers list a « Principal ».
   const show = (account: A) => "Afficher " + (codex ? "Codex " : "") + account.name;
+  const detailLabel = (account: A) => "Détail " + (codex ? "Codex " : "") + account.name;
   const state = stateOf ?? ((account: A) => accountState(account as unknown as ClaudeAccount));
   const plan = planOf ?? ((account: A) => (account as unknown as ClaudeAccount).snapshot?.planType);
   const settings: ClaudeAccountsPreferences = prefs[key] ?? { mode: "single", selectedId: null, profiles: [] };
@@ -161,16 +168,20 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
         const detailId = slug + "-detail-" + account.id;
         const tracked = account.tracked !== false;
         const planType = plan(account);
+        const isOpen = details === account.id;
+        const windows = rowsOf?.(account) ?? [];
+        const extra = renderDetail?.(account);
         return <li className="claude-accounts__row" key={account.id}>
           <div className="claude-accounts__who">
             <AccountName key={account.id} account={account} disabled={busy || !tracked} onSave={(name) => saveProfile(account, { name })} />
             {account.primary && <small>Principal</small>}
             {planType && <span className="prefs-plan">{planType}</span>}
           </div>
+          {accessory?.(account)}
           <span className={"prefs-pill prefs-pill--" + tone} title={detail || undefined}>{pill}</span>
-          {detail && <button type="button" className="claude-accounts__icon" aria-label={"Détail " + account.name}
-            aria-expanded={details === account.id} aria-controls={details === account.id ? detailId : undefined}
-            onClick={() => setDetails((value) => value === account.id ? null : account.id)}><Glyph>{info}</Glyph></button>}
+          <button type="button" className="claude-accounts__icon" aria-label={detailLabel(account)}
+            aria-expanded={isOpen} aria-controls={isOpen ? detailId : undefined}
+            onClick={() => setDetails((value) => value === account.id ? null : account.id)}><Glyph>{chevron}</Glyph></button>
           {!tracked
             ? onFollow && <button type="button" className="prefs-link" disabled={busy} aria-label={"Suivre " + account.name}
               onClick={() => void onFollow(account.id)}>Suivre</button>
@@ -181,7 +192,17 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
             : several && <label className="claude-accounts__pick"><input type="radio" name={slug + "-selected"} aria-label={show(account)}
               checked={account.id === selected?.id}
               onChange={() => void onUpdate({ [key]: { ...settings, selectedId: account.id } })} /><span aria-hidden="true" /></label>}
-          {details === account.id && detail && <p id={detailId} className="claude-accounts__detail">{detail}</p>}
+          {isOpen && <div id={detailId} className="claude-accounts__detail" role="group" aria-label={detailLabel(account)}>
+            {detail && <p>{detail}</p>}
+            {windows.length > 0 && <ul className="claude-accounts__windows">
+              {windows.map((window) => <li key={window.id}>
+                <span>{window.label}</span>
+                <strong>{window.remaining !== null ? (window.exhausted ? "Épuisé" : window.remaining + " % restants") : window.missing}</strong>
+                <small>Réinitialisation : {window.resetText}</small>
+              </li>)}
+            </ul>}
+            {extra}
+          </div>}
         </li>;
       })}
     </ul>}

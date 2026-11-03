@@ -109,7 +109,8 @@ test('codexPlan: historical card without accounts or with the primary alone; nam
 test('dashboard: one Codex account keeps the exact historical card', () => {
   const before = dash(basePrefs, []);
   const after = dash(basePrefs, [principal, { ...travail, visible: false }, detected]);
-  assert.equal(after, before);
+  // Only the per-account reset chip (now in the card header) is new.
+  assert.equal(after.replace(/<span class="provider-card__action">[\s\S]*?<\/button><\/span><\/div>/, '').replace('<div class="provider-card__heading">', ''), before);
   assert.match(after, /aria-label="Quotas Codex"/);
 });
 
@@ -210,10 +211,10 @@ test('Codex settings edits only codexAccounts (visibility, selection, rename) an
   assert.deepEqual(patch, { codexAccounts: { mode: 'single', selectedId: travail.id, profiles: [] } });
 });
 
-// Settings useState order: tab, prefs, status, claude, error, busy, revision, codexMore,
+// Settings useState order: tab, prefs, status, claude, error, busy, revision,
 // accounts, accountsError, canChooseMode, accountActionError, codexAccounts,
 // codexAccountsError, codexActionError.
-const settingsState = (prefs, list) => ['providers', prefs, status, null, null, false, 0, false, [], null, true, null, list, null, null];
+const settingsState = (prefs, list) => ['providers', prefs, status, null, null, false, 0, [], null, true, null, list, null, null];
 
 test('Settings: Codex accounts block uses explicit Codex commands; old prefs without codexAccounts default to Unique', async () => {
   invokeCalls = []; stateChanges = []; invokeFailure = null;
@@ -238,7 +239,7 @@ test('Settings: Codex accounts block uses explicit Codex commands; old prefs wit
   assert.equal(find(tree, node => node.type?.name === 'ClaudeAccountsSettings').props.provider, undefined);
   invokeFailure = new Error('Dossier introuvable');
   assert.equal(await block.props.onAdd('/missing'), false);
-  assert.ok(stateChanges.some(change => change.index === 14 && String(change.value).includes('Dossier introuvable')));
+  assert.ok(stateChanges.some(change => change.index === 13 && String(change.value).includes('Dossier introuvable')));
   invokeFailure = null;
 });
 
@@ -252,7 +253,7 @@ test('Settings polls get_codex_accounts and reports a discovery failure without 
   invokeFailure = null;
   delete global.window;
   assert.ok(invokeCalls.some(call => call.command === 'get_codex_accounts'));
-  assert.ok(stateChanges.some(change => change.index === 13 && String(change.value).includes('comptes Codex')));
+  assert.ok(stateChanges.some(change => change.index === 12 && String(change.value).includes('comptes Codex')));
 });
 
 test('Dashboard polls get_codex_accounts alongside the historical snapshots', async () => {

@@ -58,6 +58,8 @@ export type CodexAccount = ClaudeProfile & {
   lastChecked: string | null;
   rows: QuotaSnapshot[];
   duplicateOf: string | null;
+  /** Earned resets of this account only (null: unknown or not connected). */
+  availableResets: number | null;
 };
 export type Preferences = {
   claudeAccounts: ClaudeAccountsPreferences;

@@ -25,6 +25,7 @@ const profiles = [{id:'personal',path:'/fixtures/.claude',name:'Personnel',visib
 profiles[1].snapshot.metrics[0].resetAt=new Date(base+42*60000).toISOString();
 profiles[1].snapshot.metrics[1].resetAt=new Date(base+2940*60000).toISOString();
 const scenario = query.get('scenario') || 'multi';
+if (query.get('extra')==='yes') profiles[0].snapshot.extraUsage={enabled:true,limitReached:false};
 if (scenario === 'edge') {profiles[0].snapshot.metrics = [metric('five_hour',100,'Limite 5 heures'),metric('seven_day',null,'Limite hebdomadaire'),{...metric('seven_day',15,'Limite hebdomadaire Fable'),id:'claude:weekly_fable'}];profiles[0].snapshot.extraUsage={enabled:true,limitReached:true};profiles[1].snapshot.state='error';profiles[1].snapshot.metrics=[];profiles[1].snapshot.message='Lecture Claude impossible : vérifiez la connexion.';}
 if (scenario === 'signed-out') Object.assign(profiles[1].snapshot, {state:'error',metrics:[],planType:null,errorKind:'not_signed_in',message:'Profil Claude non connecté. Connectez-vous avec CLAUDE_CONFIG_DIR=/fixtures/.claude-work claude auth login.'});
 if (scenario === 'fable') for (const [i,p] of profiles.entries()) p.snapshot.metrics.push({...metric('seven_day',i?91:40,'Limite hebdomadaire Fable',4800+1200),id:'claude:weekly_fable'});
@@ -48,13 +49,13 @@ if(query.get('codexState')==='edge') {
 const accounts = () => profiles.map(a=>{const saved=prefs.claudeAccounts.profiles.find(p=>p.id===a.id);return {...a,name:saved?.name||a.name,visible:prefs.claudeEnabled&&(prefs.claudeAccounts.mode==='multi'?(saved?.visible??a.primary):a.id===(prefs.claudeAccounts.selectedId||'personal'))};});
 // Codex homes (?codexAccounts=multi|one): synthetic rows only, never a real CODEX_HOME.
 const codexRow=(r5,r7,m5=95)=>[{...codexRows[0],remaining:r5,resetAt:new Date(base+m5*60000).toISOString()},{...codexRows[1],remaining:r7}];
-const codexHome=(name,extra={})=>({id:'profile:'+name,path:'/fixtures/.codex-'+name,name,visible:true,primary:false,tracked:true,available:true,refreshing:false,phase:'ready',message:'Quotas synchronisés directement avec Codex.',planType:'pro',lastChecked:null,rows:codexRow(18,64,42),duplicateOf:null,...extra});
+const codexHome=(name,extra={})=>({id:'profile:'+name,path:'/fixtures/.codex-'+name,name,visible:true,primary:false,tracked:true,available:true,refreshing:false,phase:'ready',message:'Quotas synchronisés directement avec Codex.',planType:'pro',lastChecked:null,rows:codexRow(18,64,42),duplicateOf:null,availableResets:1,...extra});
 const codexHomes=query.get('codexAccounts')?[
- codexHome('Principal',{id:'primary',path:'~/.codex',primary:true,planType:'plus',rows:structuredClone(codexRows)}),
+ codexHome('Principal',{id:'primary',path:'~/.codex',primary:true,planType:'plus',rows:structuredClone(codexRows),availableResets:2}),
  codexHome('travail',{name:'Travail'}),
- codexHome('perso',{name:'Perso',phase:'signed_out',planType:null,rows:[],message:'Non connecté. Connectez ce dossier dans un terminal : CODEX_HOME=/fixtures/.codex-perso codex login'}),
- codexHome('alias',{name:'Alias',planType:'plus',rows:structuredClone(codexRows),duplicateOf:'Principal'}),
- codexHome('detecte',{name:'.codex-detecte',tracked:false,visible:false,phase:'detected',rows:[],planType:null,message:'Dossier détecté, non suivi.'}),
+ codexHome('perso',{name:'Perso',phase:'signed_out',planType:null,rows:[],availableResets:null,message:'Non connecté. Connectez ce dossier dans un terminal : CODEX_HOME=/fixtures/.codex-perso codex login'}),
+ codexHome('alias',{name:'Alias',planType:'plus',rows:structuredClone(codexRows),duplicateOf:'Principal',availableResets:2}),
+ codexHome('detecte',{name:'.codex-detecte',tracked:false,visible:false,phase:'detected',rows:[],availableResets:null,planType:null,message:'Dossier détecté, non suivi.'}),
 ]:[];
 if(query.get('codexAccounts')==='one') codexHomes.splice(1,3);
 if(codexHomes.length) prefs.codexAccounts={mode:query.get('codexAccounts')==='multi'?'multi':'single',selectedId:null,profiles:codexHomes.filter(h=>h.tracked&&!h.primary).map(({id,path,name})=>({id,path,name,visible:true}))};
@@ -71,7 +72,9 @@ export async function invoke(command, payload) {
  case 'get_claude_accounts':return structuredClone(accounts());
  case 'get_claude_snapshot':return accounts().find(a=>a.visible)?.snapshot||profiles[0].snapshot;
  case 'get_quota_snapshots':return prefs.codexEnabled?structuredClone(codexRows):[];
- case 'get_codex_status':return {phase:'ready',message:'',planType:'plus',refreshSettings:{customSeconds:null},refreshSeconds:60,availableResets:null};
+ case 'get_codex_status':return {phase:'ready',message:'',planType:'plus',refreshSettings:{customSeconds:null},refreshSeconds:60,availableResets:2};
+ case 'redeem_codex_reset':{const home=codexHomes.find(h=>h.id===payload.accountId);if(!home||!home.availableResets)throw new Error('Fixture: aucun compte');home.availableResets-=1;emit();return {outcome:'reset',quotasRefreshed:true};}
+ case 'open_usage_details': case 'open_claude_usage': return null;
  case 'add_claude_profile':if(payload.path!=='/fixtures/.claude-work')throw new Error('Fixture: dossier inexistant');prefs={...prefs,claudeAccounts:{...prefs.claudeAccounts,mode:'multi',profiles:profiles.map(({id,path,name})=>({id,path,name,visible:true}))}};emit();return structuredClone(prefs);
  case 'follow_claude_profile':if(scenario==='add-error')throw new Error('« Travail » est déjà affiché. Choisissez un autre profil Claude Code.');prefs={...prefs,claudeAccounts:{...prefs.claudeAccounts,mode:'multi',profiles:profiles.map(({id,path,name})=>({id,path,name,visible:true}))}};emit();return structuredClone(prefs);
  case 'get_codex_accounts':return structuredClone(codexAccounts());

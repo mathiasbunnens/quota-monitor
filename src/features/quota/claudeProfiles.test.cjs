@@ -102,7 +102,7 @@ test('dashboard owns one local minute tick, cleans it up and never fetches on th
   delete global.window;
 });
 test('settings discovers profiles, offers Unique/Multi and selects principal without switching sessions', () => {
-  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, accounts]);
+  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, accounts]);
   const html = renderToStaticMarkup(tree);
   assert.match(html, /name="claude-mode"[^>]*\/>Unique/);
   assert.match(html, /Multi/);
@@ -203,7 +203,7 @@ test('settings saves full preferences and accepts canonical add result without r
   invokeCalls = []; stateChanges = []; invokeFailure = null;
   const canonical = { ...prefs, claudeAccounts: { ...prefs.claudeAccounts, profiles: [{ id: 'canonical', path: '/canonical/path', name: 'Added', visible: true }] } };
   invokeResult = canonical;
-  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, accounts]);
+  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, accounts]);
   const controls = find(tree, node => node.type?.name === 'ClaudeAccountsSettings');
   assert.equal(await controls.props.onUpdate({ claudeAccounts: { ...prefs.claudeAccounts, selectedId: 'Travail' } }), true);
   assert.deepEqual(invokeCalls[0], { command: 'set_preferences', payload: { prefs: { ...prefs, claudeAccounts: { ...prefs.claudeAccounts, selectedId: 'Travail' } } } });
@@ -213,7 +213,7 @@ test('settings saves full preferences and accepts canonical add result without r
 });
 test('settings exposes failed manual add and does not report success', async () => {
   invokeCalls = []; stateChanges = []; invokeFailure = new Error('Dossier introuvable');
-  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, accounts]);
+  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, accounts]);
   const controls = find(tree, node => node.type?.name === 'ClaudeAccountsSettings');
   assert.equal(await controls.props.onAdd('/missing'), false);
   assert.ok(stateChanges.some(change => String(change.value).includes('Dossier introuvable')));
@@ -296,7 +296,7 @@ test('multi accounts stack on narrow windows without changing legacy two-provide
 test('settings discovery remains available with provider off and reports discovery failure', async () => {
   invokeCalls = []; stateChanges = []; invokeFailure = new Error('Discovery fixture error');
   global.window = { setTimeout: () => 1, clearTimeout() {} };
-  component('../settings/Settings.tsx', {}, ['providers', { ...prefs, claudeEnabled: false }, null, null, null, false, 0, false, []]);
+  component('../settings/Settings.tsx', {}, ['providers', { ...prefs, claudeEnabled: false }, null, null, null, false, 0, []]);
   const cleanup = effects.find(effect => String(effect).includes('get_claude_accounts'))();
   await new Promise(resolve => setImmediate(resolve));
   cleanup();
@@ -368,11 +368,12 @@ test('Multi: one flat list (name, plan, state, info, visibility switch), then th
   assert.match(html, /prefs-pill--warning" title="[^"]*claude auth login[^"]*">Non connecté/);
   assert.match(html, /prefs-pill--neutral" title="[^"]*">Indisponible/);
   assert.equal((html.match(/aria-label="Renommer /g) || []).length, 3);
-  assert.equal((html.match(/aria-label="Détail /g) || []).length, 2);
+  assert.equal((html.match(/aria-label="Détail /g) || []).length, 3, 'every account has its detail chevron');
   assert.ok(html.indexOf('Ajouter un compte') > html.lastIndexOf('role="switch"'));
-  // Info opens the actionable detail inline (one level, no sub-panel).
+  // The chevron opens the account's detail inline (one level, no sub-panel).
   const open = renderToStaticMarkup(accountsUx({ prefs: current, accounts: list }, ['', null, false, 'Travail']));
-  assert.match(open, /aria-expanded="true"[^>]*><svg[\s\S]*<p id="claude-detail-Travail" class="claude-accounts__detail">Profil non connecté : CLAUDE_CONFIG_DIR=\/fixtures\/x claude auth login\.<\/p>/);
+  assert.match(open, /aria-expanded="true"[^>]*><svg[\s\S]*<div id="claude-detail-Travail" class="claude-accounts__detail" role="group" aria-label="Détail Travail"><p>Profil non connecté : CLAUDE_CONFIG_DIR=\/fixtures\/x claude auth login\.<\/p><\/div>/);
+  assert.equal((open.match(/class="claude-accounts__detail"/g) || []).length, 1, 'only that account');
 });
 test('inline rename: pencil swaps in a field, Enter saves the trimmed name, Escape cancels', async () => {
   global.window = { requestAnimationFrame: () => 0 };
@@ -398,7 +399,7 @@ test('inline rename: pencil swaps in a field, Enter saves the trimmed name, Esca
 });
 test('settings add/choose commands are explicit and their failures stay next to the Add action', async () => {
   invokeCalls = []; stateChanges = []; invokeFailure = null; invokeResult = prefs;
-  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, accounts, null, true]);
+  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, accounts, null, true]);
   const controls = find(tree, node => node.type?.name === 'ClaudeAccountsSettings');
   assert.equal(controls.props.onFollow, undefined);
   invokeResult = '/picked';
@@ -407,21 +408,21 @@ test('settings add/choose commands are explicit and their failures stay next to 
   invokeFailure = new Error('« Travail » est déjà affiché.');
   assert.equal(await controls.props.onAdd('/picked'), false);
   assert.deepEqual(invokeCalls[1], { command: 'add_claude_profile', payload: { path: '/picked' } });
-  assert.ok(stateChanges.some(change => change.index === 11 && String(change.value).includes('déjà affiché')));
+  assert.ok(stateChanges.some(change => change.index === 10 && String(change.value).includes('déjà affiché')));
   // No chooser offered where the platform has none (path entry remains).
-  const linux = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, false, accounts, null, false]);
+  const linux = component('../settings/Settings.tsx', {}, ['providers', prefs, null, snapshot, null, false, 0, accounts, null, false]);
   assert.equal(find(linux, node => node.type?.name === 'ClaudeAccountsSettings').props.onChooseFolder, undefined);
   // Fable, usage link and the technical actions stay reachable.
   const html = renderToStaticMarkup(tree);
   assert.match(html, /Quota Fable/);
-  assert.match(html, /Usage détaillé sur claude\.ai/);
+  assert.match(html, /aria-label="Claude : usage détaillé sur claude\.ai"/);
   assert.ok(controls.props.advanced, 'refresh/relay actions live in the single secondary area');
   invokeFailure = null;
   assert.ok(!invokeCalls.some(call => /refresh|login|follow/.test(call.command)));
 });
 
 // ---- Réglages → Affichage : choix visuels -----------------------------------
-const display = (p, list = accounts) => component('../settings/Settings.tsx', {}, ['menubar', p, null, snapshot, null, false, 0, false, list, null, true]);
+const display = (p, list = accounts) => component('../settings/Settings.tsx', {}, ['menubar', p, null, snapshot, null, false, 0, list, null, true]);
 const group = (html, label) => { const start = html.lastIndexOf("<div", html.indexOf(`aria-label="${label}"`)); return html.slice(start, html.indexOf('</fieldset>', start)); };
 test('Affichage: every choice is a labelled radio with a pictogram, and no explanatory paragraph', () => {
   const html = renderToStaticMarkup(display({ ...prefs, layout: 'compact' }));
@@ -474,7 +475,7 @@ test('Affichage has ONE Présentation control (name=layout); Fournisseurs has no
   assert.equal((html.match(/name="layout"/g) || []).length, 2);
   assert.doesNotMatch(html, /name="claudeLayout"|name="codexLayout"|Présentation (Codex|Claude|des comptes)/);
   assert.equal((html.match(/<legend[^>]*>Présentation<\/legend>/g) || []).length, 1);
-  const providersTab = renderToStaticMarkup(component('../settings/Settings.tsx', {}, ['providers', { ...prefs, codexEnabled: true }, null, snapshot, null, false, 0, false, accounts, null, true]));
+  const providersTab = renderToStaticMarkup(component('../settings/Settings.tsx', {}, ['providers', { ...prefs, codexEnabled: true }, null, snapshot, null, false, 0, accounts, null, true]));
   assert.doesNotMatch(providersTab, /name="layout"|Compacte|Classique|Présentation/);
 });
 test('one choice changes Claude AND Codex in the Dashboard', () => {

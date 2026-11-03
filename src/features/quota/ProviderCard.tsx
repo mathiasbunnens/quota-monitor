@@ -30,6 +30,10 @@ type Props = {
   /** Local clock (ms) for the visible countdowns of multi-profile cards. */
   now?: number;
   empty?: string;
+  /** Provider title doubles as the detailed-usage link; `icon` is the existing external arrow (kept out of this self-contained module). */
+  usage?: { label: string; onOpen: () => void; icon: ReactNode };
+  /** Account-level control of the header (reset chip), before « Détails ». */
+  action?: ReactNode;
   children?: ReactNode;
 };
 
@@ -99,7 +103,7 @@ function Row({ row, showReset = true }: { row: QuotaRow; showReset?: boolean }) 
   </div>;
 }
 
-export default function ProviderCard({ name, badge, rows, status, error, compact, accountCompact = false, now = Date.now(), empty, children }: Props) {
+export default function ProviderCard({ name, badge, rows, status, error, compact, accountCompact = false, now = Date.now(), empty, usage, action, children }: Props) {
   const detailsId = useId();
   const root = useRef<HTMLElement>(null);
   const [hover, setHover] = useState(false);
@@ -120,6 +124,9 @@ export default function ProviderCard({ name, badge, rows, status, error, compact
   const paired = pairedRows(rows);
   const shown = compact ? (first ? [first] : []) : rows;
   const hasDetails = compact && rows.length > 0;
+  const title = <h2>{usage
+    ? <button type="button" className="provider-card__usage" aria-label={usage.label} title={usage.label} onClick={usage.onOpen}>{name} {usage.icon}</button>
+    : name}{badge && <span className="plan-badge">{badge}</span>}</h2>;
   return <section ref={root} className={"provider-card" + (compact ? " provider-card--compact" : "")}
     aria-label={"Quotas " + name}
     onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
@@ -127,7 +134,11 @@ export default function ProviderCard({ name, badge, rows, status, error, compact
     onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false); }}
     onKeyDown={(event) => { if (event.key === "Escape") { setPinned(false); setHover(false); setFocused(false); } }}>
     <header className="provider-card__header">
-      <h2>{name}{badge && <span className="plan-badge">{badge}</span>}</h2>
+      {action
+        ? <div className="provider-card__heading">{title}
+          <span className="provider-card__action" onFocus={(event) => event.stopPropagation()}>{action}</span>
+        </div>
+        : title}
       {hasDetails && <button type="button" aria-expanded={open} aria-controls={detailsId}
         onClick={() => setPinned((value) => !value)}>Détails</button>}
     </header>
