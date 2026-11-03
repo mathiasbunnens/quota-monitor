@@ -81,3 +81,14 @@ state. Run at 360px light, 300px dark with reduced motion and 420px. Keep the
 tab visible: hidden pages throttle timers. Browser captures are not evidence of
 native window, Dock or activation behaviour. `node --test
 scripts/compact-window.test.mjs` covers the pure view without a browser.
+
+## Settings → Fournisseurs accounts (detail, auto-detection, + button)
+
+    node scripts/claude-renderer-fixture.mjs node_modules/.cache/dac-after
+    AFTER_SITE=node_modules/.cache/dac-after/site [BEFORE_SITE=<older site>] [SHOTS=<dir>] node scripts/accounts-detail-check.mjs
+
+Headless Chrome over CDP on the offline fixture (mocked IPC, no real account or
+file). Asserts the inline detail (folder + « Supprimer <compte> » only, no
+Supprimer on the principal), Escape/focus handling, the + button per provider,
+removal routed to `untrack_*_profile` and re-add through the +, and takes
+light/dark captures.

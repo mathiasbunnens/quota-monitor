@@ -525,6 +525,19 @@ pub fn add_claude_profile(app: tauri::AppHandle, path: String) -> Result<prefs::
 pub fn follow_claude_profile(app: tauri::AppHandle, id: String) -> Result<prefs::Prefs, String> {
     follow_profile(app, crate::claude_accounts::FollowTarget::Detected(&id))
 }
+/// « Supprimer <compte> » : stops tracking (preference only, no file touched).
+#[tauri::command]
+pub fn untrack_claude_profile(app: tauri::AppHandle, id: String) -> Result<prefs::Prefs, String> {
+    let mut p = prefs::current(&app);
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|_| "Dossier utilisateur introuvable.")?;
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+    p.claude_accounts =
+        crate::claude_accounts::remove(&home, config.as_deref(), &p.claude_accounts, &id)?;
+    prefs::set_preferences(app, p)
+}
 fn follow_profile(
     app: tauri::AppHandle,
     target: crate::claude_accounts::FollowTarget,

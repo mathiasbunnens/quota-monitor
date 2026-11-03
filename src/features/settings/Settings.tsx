@@ -8,7 +8,7 @@ import NtfySettings from "./NtfySettings";
 import ClaudeAccountsSettings, { CodexAccountsSettings } from "./ClaudeAccountsSettings";
 import ResetCredits from "../quota/ResetCredits";
 import type { ClaudeAccount, ClaudeLayout, ClaudeSnapshot, CodexAccount, CodexStatus, DisplayMode, IndicatorChoice, Preferences } from "../quota/types";
-import { claudeRows, codexRows, layoutOf } from "../quota/providers";
+import { layoutOf } from "../quota/providers";
 import "../../pages/Dashboard/dashboard.scss";
 import "./settings.scss";
 
@@ -233,10 +233,10 @@ export default function Settings() {
   };
   // Explicit add (folder chooser or absolute path): the backend validates and
   // deduplicates, then switches to Multi. Errors stay next to the action.
-  const addProfile = async (path: string) => {
+  const profileAction = async (command: "add_claude_profile" | "untrack_claude_profile", payload: Record<string, string>) => {
     if (mutation.current) return false;
     mutation.current = true; setAccountActionError(null); setBusy(true);
-    try { setPrefs(await invoke<Preferences>("add_claude_profile", { path })); reload(); return true; }
+    try { setPrefs(await invoke<Preferences>(command, payload)); reload(); return true; }
     catch (cause) { setAccountActionError(String(cause).replace(/^Error: /, "")); return false; }
     finally { mutation.current = false; setBusy(false); }
   };
@@ -247,9 +247,9 @@ export default function Settings() {
     catch (cause) { setAccountActionError(String(cause).replace(/^Error: /, "")); return null; }
     finally { setBusy(false); }
   };
-  // Codex homes: explicit add/follow/untrack commands, never login/logout.
+  // Codex homes: explicit add/untrack commands (detected homes are followed by the backend), never login/logout.
   // The backend validates and returns the canonical preferences.
-  const codexAction = async (command: "add_codex_profile" | "follow_codex_profile" | "untrack_codex_profile", payload: Record<string, string>) => {
+  const codexAction = async (command: "add_codex_profile" | "untrack_codex_profile", payload: Record<string, string>) => {
     if (mutation.current) return false;
     mutation.current = true; setCodexActionError(null); setBusy(true);
     try { setPrefs(await invoke<Preferences>(command, payload)); reload(); return true; }
@@ -319,10 +319,7 @@ export default function Settings() {
               ? <ResetCredits accountId={account.id} accountName={account.name} primary={account.primary}
                 ready={account.available} count={account.availableResets} onChange={reload} />
               : null}
-            rowsOf={(account) => codexRows(account.rows)}
-            renderDetail={(account) => account.primary && codexReady ? <CodexConnection status={status} onChange={reload} /> : null}
             onAdd={(path) => codexAction("add_codex_profile", { path })}
-            onFollow={(id) => codexAction("follow_codex_profile", { id })}
             onUntrack={(id) => codexAction("untrack_codex_profile", { id })}
             onChooseFolder={canChooseMode ? chooseCodexFolder : undefined} actionError={codexActionError}
             advanced={<p className="prefs-footnote">Un dossier <code>CODEX_HOME</code> par compte, lu en lecture seule par Codex CLI. Connexion dans un terminal : <code>CODEX_HOME=… codex login</code>.</p>} />
@@ -341,7 +338,7 @@ export default function Settings() {
             <Switch label="Afficher le quota Fable et ses alertes" checked={prefs.fableEnabled} disabled={busy || !prefs.claudeEnabled}
               onChange={(value) => void update({ fableEnabled: value })} />
           </div>
-          <ClaudeAccountsSettings prefs={prefs} accounts={accounts} busy={busy} onUpdate={update} onAdd={addProfile}
+          <ClaudeAccountsSettings prefs={prefs} accounts={accounts} busy={busy} onUpdate={update} onAdd={(path) => profileAction("add_claude_profile", { path })}
             // Paid extra usage is reported per account: it moves onto its row.
             accessory={(account) => prefs.claudeEnabled && account.snapshot.extraUsage?.enabled
               ? <button type="button" className="reset-chip"
@@ -350,7 +347,7 @@ export default function Settings() {
                 <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg><span>{account.snapshot.extraUsage.limitReached ? "Plafond" : "Extra"}</span>
               </button>
               : null}
-            rowsOf={(account) => claudeRows(account.snapshot, prefs.fableEnabled)}
+            onUntrack={(id) => profileAction("untrack_claude_profile", { id })}
             onChooseFolder={canChooseMode ? chooseFolder : undefined} actionError={accountActionError}
             advanced={<>
               <p className="prefs-footnote">Lu via Claude Code (<code>claude auth login</code>), sans jeton ni requête de modèle.</p>

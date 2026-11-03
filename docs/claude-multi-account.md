@@ -5,7 +5,7 @@ Branche `feature/claude-multi-account-3.1`, base `1bcc2e5` (= `v3.1.0` = `origin
 ## Comportement
 
 - Consultation uniquement : aucun login, changement de session ou accès direct aux identifiants OAuth/trousseau.
-- Profils : `CLAUDE_CONFIG_DIR` absolu, sinon `~/.claude` ; détection `~/.claude-*` ; ajout manuel absolu ; déduplication canonique/symlinks. Un dossier indisponible reste représenté sans bloquer les autres.
+- Profils : `CLAUDE_CONFIG_DIR` absolu, sinon `~/.claude` ; détection `~/.claude-*` (suivi automatique) ; « Supprimer <compte> » dans le détail déplié (chemin + Supprimer seulement) mémorise l'identité dans `claudeAccounts.excluded` (anciennes préférences : liste vide) pour que la détection ne le rajoute pas, le « + » le réintègre, aucun fichier touché ; visibilité par défaut d'un profil détecté sans entrée : affiché en Multi, mis de côté en Unique ; ajout manuel absolu ; déduplication canonique/symlinks. Un dossier indisponible reste représenté sans bloquer les autres.
 - Collecte sérialisée `initialize` / `get_usage` ; `CLAUDE_CONFIG_DIR` défini uniquement sur le processus enfant. Cache, erreur, rafraîchissement et ticket par identité canonique ; anti-chevauchement et résultats périmés rejetés. Les changements d'affichage ne relancent pas la collecte.
 - `prefs.json` 3.1.0 (mode d'affichage, Fable, ntfy, actualisation) se charge sans perte ; `claudeAccounts` absent → Unique, principal (test `v310_preferences_file_loads_without_loss_and_defaults_to_single_primary`).
 - Réglages (onglet Fournisseurs) : Unique|Multi dès deux profils, renommage, visibilité (affichage seul), ajout manuel.

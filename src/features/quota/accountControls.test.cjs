@@ -223,35 +223,84 @@ test('a single account has the same placement; Claude has a state and chevron bu
   assert.doesNotMatch(header(html, 'claude-heading'), /Plafond|Extra/);
 });
 
-test('« Ajouter un compte » sits under the accounts of every provider, even with one account', () => {
+test('the manual add is a single + icon button at the end of every provider list, named for the provider, even with one account', () => {
   for (const [codexList, claudeList] of [[[principal], [claudeAccount('Principal')]], [[principal, travail], [claudeAccount('Principal'), claudeAccount('Travail')]]]) {
     const html = settingsHtml(multiPrefs, codexList, claudeList);
-    for (const id of ['codex-heading', 'claude-heading']) {
+    for (const [id, provider] of [['codex-heading', 'Codex'], ['claude-heading', 'Claude']]) {
       const block = section(html, id);
-      assert.equal((block.match(/Ajouter un compte<\/button>/g) || []).length, 1);
-      assert.ok(block.indexOf('Ajouter un compte') > block.lastIndexOf('claude-accounts__row'));
+      const button = block.match(/<button[^>]*claude-accounts__add[^>]*>[\s\S]*?<\/button>/);
+      assert.ok(button, 'the + button exists');
+      assert.match(button[0], new RegExp('aria-label="Ajouter un compte ' + provider + '"'));
+      assert.match(button[0], /<svg[^>]*><path d="M8 3\.5v9M3\.5 8h9"><\/path><\/svg><\/button>$/, 'icon only, the existing plus glyph');
+      assert.equal((block.match(/claude-accounts__add/g) || []).length, 1);
+      assert.doesNotMatch(block, />\s*Ajouter un compte\s*</, 'no « Ajouter un compte » line');
+      assert.ok(block.indexOf('claude-accounts__add') > block.lastIndexOf('claude-accounts__row'));
     }
   }
 });
 
-test('the chevron opens only that account: its windows, resets and message, never another account', () => {
-  // CodexAccountsSettings details state: path, open, details.
-  const { codexRows } = require('./providers.ts');
-  const props = { prefs: multiPrefs, accounts: [principal, travail, perso], busy: false, onUpdate: async () => true, onAdd: async () => true, rowsOf: account => codexRows(account.rows) };
-  const open = (id) => {
-    const element = component('../settings/ClaudeAccountsSettings.tsx', props, [], 'CodexAccountsSettings');
+test('the chevron opens only that account, inline: its folder and « Supprimer » and nothing else', () => {
+  // CodexAccountsSettings state: path, pathError, open, details.
+  const props = { prefs: multiPrefs, accounts: [principal, travail, perso], busy: false, onUpdate: async () => true, onAdd: async () => true, onUntrack: async () => true };
+  const open = (id, extra = {}) => {
+    const element = component('../settings/ClaudeAccountsSettings.tsx', { ...props, ...extra }, [], 'CodexAccountsSettings');
     return renderToStaticMarkup(component('../settings/ClaudeAccountsSettings.tsx', element.props, ['', null, false, id]));
   };
   const travailOpen = open(travail.id);
-  assert.match(travailOpen, /id="codex-detail-profile:Travail"/);
-  assert.match(travailOpen, /18 % restants/);
-  assert.match(travailOpen, /64 % restants/);
-  assert.doesNotMatch(travailOpen, /63 % restants|85 % restants/, 'the other account is not in this detail');
+  const detail = travailOpen.match(/<div id="codex-detail-profile:Travail"[\s\S]*?<\/div>/)[0];
+  assert.match(detail, /<code class="claude-accounts__path" title="\/fixtures\/\.codex-Travail">\/fixtures\/\.codex-Travail<\/code>/);
+  assert.match(detail, />Supprimer Travail<\/button>/);
+  assert.equal(detail.replace(/<[^>]+>/g, '|').split('|').filter(Boolean).join(' / '), '/fixtures/.codex-Travail / Supprimer Travail', 'path + Supprimer only');
+  assert.doesNotMatch(travailOpen, /% restants|Réinitialisation :|Quotas synchronisés|<p>|prefs-pill[^>]*>[^<]*<\/span><\/div>/);
   assert.equal((travailOpen.match(/aria-expanded="true"/g) || []).length, 1);
+  assert.doesNotMatch(travailOpen, /\.codex-Principal<\/code>|\.codex-Perso<\/code>/, 'never the folder of another account');
+  // Principal: the path only, never a Supprimer.
+  const principalOpen = open(principal.id);
+  assert.match(principalOpen, /id="codex-detail-profile:Principal"/);
+  assert.doesNotMatch(principalOpen, /Supprimer/);
+  // Signed-out: same minimal detail; its state stays on the row (« Non connecté »).
   const persoOpen = open(perso.id);
-  assert.match(persoOpen, /CODEX_HOME=\/fixtures\/\.codex-Perso codex login/);
-  assert.doesNotMatch(persoOpen, /% restants/);
-  assert.doesNotMatch(open(null), /codex-detail-/);
+  assert.doesNotMatch(persoOpen.match(/<div id="codex-detail-profile:Perso"[\s\S]*?<\/div>/)[0], /codex login|Non connecté|% restants/, 'the state stays on the row, not in the detail');
+  assert.match(persoOpen, />Non connecté</);
+  assert.doesNotMatch(open(null), /claude-accounts__detail/);
+  // Without a removal handler (nothing to remove): the path only.
+  assert.doesNotMatch(open(travail.id, { onUntrack: undefined }), /Supprimer/);
+});
+
+test('Supprimer calls the untrack handler with the account id only (preference, never a file)', async () => {
+  const removed = [];
+  const element = component('../settings/ClaudeAccountsSettings.tsx', { prefs: multiPrefs, accounts: [principal, travail], busy: false, onUpdate: async () => true, onAdd: async () => true, onUntrack: async id => { removed.push(id); return true; } }, [], 'CodexAccountsSettings');
+  global.window = { requestAnimationFrame: fn => { fn(); return 1; } };
+  const tree = component('../settings/ClaudeAccountsSettings.tsx', element.props, ['', null, false, travail.id]);
+  const button = find(tree, node => node.props?.className?.includes('claude-accounts__remove'));
+  assert.ok(button && !find(tree, node => node.props?.id === 'codex-detail-profile:Principal'));
+  await button.props.onClick();
+  delete global.window;
+  assert.deepEqual(removed, [travail.id]);
+});
+
+test('each provider routes its + and Supprimer to its own commands; neither touches the other provider or a login', async () => {
+  invokeCalls = []; invokeFailure = null; invokeResult = multiPrefs;
+  const tree = component('../settings/Settings.tsx', {}, ['providers', multiPrefs, status, null, null, false, 0, [claudeAccount('Principal'), claudeAccount('Travail')], null, true, null, [principal, travail], null, null]);
+  const codexBlock = find(tree, node => node.type?.name === 'CodexAccountsSettings');
+  const claudeBlock = find(tree, node => node.type?.name === 'ClaudeAccountsSettings');
+  assert.equal(await codexBlock.props.onAdd('/fixtures/.codex-new'), true);
+  assert.equal(await claudeBlock.props.onAdd('/fixtures/.claude-new'), true);
+  assert.equal(await codexBlock.props.onUntrack(travail.id), true);
+  assert.equal(await claudeBlock.props.onUntrack('claude:Travail'), true);
+  assert.deepEqual(invokeCalls.map(c => [c.command, c.payload]), [
+    ['add_codex_profile', { path: '/fixtures/.codex-new' }],
+    ['add_claude_profile', { path: '/fixtures/.claude-new' }],
+    ['untrack_codex_profile', { id: travail.id }],
+    ['untrack_claude_profile', { id: 'claude:Travail' }],
+  ]);
+  assert.ok(!invokeCalls.some(c => /login|logout|delete|remove_file/.test(c.command)));
+  // The + opens each provider's own folder chooser.
+  invokeCalls = []; invokeResult = '/fixtures/picked';
+  assert.equal(await codexBlock.props.onChooseFolder(), '/fixtures/picked');
+  assert.equal(await claudeBlock.props.onChooseFolder(), '/fixtures/picked');
+  assert.deepEqual(invokeCalls.map(c => c.command), ['choose_codex_profile_folder', 'choose_claude_profile_folder']);
+  invokeResult = null;
 });
 
 // ---- Dashboard -----------------------------------------------------------------

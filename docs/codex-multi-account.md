@@ -5,7 +5,10 @@ Même parcours que le multi-compte Claude (`docs/claude-multi-account.md`), mêm
 ## Comportement
 
 - **Compte principal** : inchangé. Le collecteur historique lance `codex app-server` sans injecter `CODEX_HOME` (la variable héritée de l'app ou `~/.codex`). Actions, resets, cadence, connexion depuis l'app restent les siens.
-- **Dossiers supplémentaires** : découverte des dossiers `~/.codex-*` (noms et chemins seulement, aucun contenu lu), ajout par sélecteur de dossier ou chemin absolu, renommage, « Ne plus suivre » (retire le suivi, ne supprime jamais de fichier). Au plus 8 dossiers suivis.
+- **Dossiers supplémentaires** : découverte des dossiers `~/.codex-*` (noms et chemins seulement, aucun contenu lu), suivis automatiquement (sans étape « Suivre »), ajout manuel par le bouton « + » (sélecteur de dossier ou chemin absolu), renommage, « Supprimer <compte> » dans le détail (retire le suivi, ne supprime jamais de fichier). Au plus 8 dossiers supplémentaires suivis.
+- **Détail d'un compte** (chevron › de la ligne) : se déplie sous la ligne et ne contient que le chemin du dossier (lecture seule, copiable, infobulle) et « Supprimer <compte> » (absent pour le principal). Réinitialisation, état, renommage et interrupteur restent sur la ligne.
+- **Suppression** : le dossier est mémorisé dans `codexAccounts.excluded` (identités `profile:…`, absent des anciennes préférences = liste vide) ; les analyses suivantes ne le rajoutent pas. Le « + » (ou un chemin ajouté à la main) le réintègre. Aucun fichier n'est touché.
+- **Visibilité d'un dossier détecté sans entrée enregistrée** : affiché en Multi, mis de côté en Unique (qui n'affiche que le compte choisi, donc le principal par défaut). Un compte unique reste donc inchangé ; une entrée déjà enregistrée garde son nom et sa visibilité. L'ordre est stable (principal, dossiers détectés triés, puis ajouts manuels).
 - **Unique | Multi** et interrupteurs de visibilité comme Claude (Réglages → Fournisseurs → Codex). La visibilité ne change que l'affichage ; la collecte dépend du suivi et de l'activation de Codex.
 - **Présentation** : le réglage unique Compacte/Classique (Affichage) s'applique à chaque carte de compte, dans le menu natif, la fenêtre compacte et le Dashboard React.
 
@@ -36,7 +39,7 @@ CODEX_HOME=~/.codex-travail codex login
 # ou, sans navigateur local : CODEX_HOME=~/.codex-travail codex login --device-auth
 ```
 
-`CODEX_HOME` est la variable documentée par OpenAI pour choisir le dossier de configuration/authentification de Codex. Ensuite : Réglages → Fournisseurs → Codex → « Suivre » sur `.codex-travail`, puis Multi. L'app ne lance jamais ce login elle-même.
+`CODEX_HOME` est la variable documentée par OpenAI pour choisir le dossier de configuration/authentification de Codex. Ensuite : le dossier `.codex-travail` apparaît tout seul dans Réglages → Fournisseurs → Codex (« Non connecté » tant que le login n'est pas fait). L'app ne lance jamais ce login elle-même.
 
 ## Sécurité
 

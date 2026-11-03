@@ -1403,8 +1403,6 @@ pub(crate) fn account_view(
                 available_resets: p.status.available_resets,
             })
             .unwrap_or_else(|| Reading::new("starting", "Connexion à Codex…"))
-    } else if !d.tracked {
-        Reading::new("detected", "Dossier détecté, non suivi.")
     } else if !enabled {
         Reading::new("disabled", "Codex est désactivé dans les Réglages.")
     } else if !d.available {
@@ -1489,6 +1487,10 @@ pub fn accounts(app: &tauri::AppHandle) -> Vec<CodexAccount> {
 
 #[tauri::command]
 pub fn get_codex_accounts(app: tauri::AppHandle) -> Vec<CodexAccount> {
+    // Homes detected since the last change start being collected right away.
+    if let Some(provider) = app.try_state::<Provider>() {
+        provider.reconcile(&app);
+    }
     accounts(&app)
 }
 
@@ -1954,7 +1956,6 @@ done
                 Some((Reading::new("signed_out", "Non connecté."), false)),
             ),
             account_view(found("gone", false, true, false, true), true, None, None),
-            account_view(found("seen", false, false, true, false), true, None, None),
         ];
         mark_duplicates(&mut list);
         assert_eq!(list[0].rows[0].remaining, 60);
@@ -1967,8 +1968,6 @@ done
         assert_eq!(list[3].phase, "signed_out");
         assert!(list[3].rows.is_empty());
         assert_eq!(list[4].phase, "unavailable");
-        assert_eq!(list[5].phase, "detected");
-        assert!(!list[5].profile.visible && list[5].duplicate_of.is_none());
         // Disabled provider: nothing visible, nothing reported.
         let off = account_view(found("work", false, true, true, true), false, None, Some((ready(2, 10.0), false)));
         assert!(!off.profile.visible && off.rows.is_empty() && off.phase == "disabled");

@@ -207,6 +207,7 @@ fn collection_changed(previous: &Prefs, next: &Prefs) -> bool {
             .profiles
             .iter()
             .map(|a| (a.id.clone(), a.path.clone()))
+            .chain(p.claude_accounts.excluded.iter().map(|id| (id.clone(), "excluded".into())))
             .collect::<std::collections::BTreeSet<_>>()
     };
     previous.claude_enabled != next.claude_enabled || sources(previous) != sources(next)
@@ -220,6 +221,7 @@ fn codex_collection_changed(previous: &Prefs, next: &Prefs) -> bool {
             .profiles
             .iter()
             .map(|a| (a.id.clone(), a.path.clone()))
+            .chain(p.codex_accounts.excluded.iter().map(|id| (id.clone(), "excluded".into())))
             .collect::<std::collections::BTreeSet<_>>()
     };
     previous.codex_enabled != next.codex_enabled || sources(previous) != sources(next)

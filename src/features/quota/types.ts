@@ -36,6 +36,8 @@ export type ClaudeAccountsPreferences = {
   mode: "single" | "multi";
   selectedId: string | null;
   profiles: ClaudeProfile[];
+  /** Detected folders the user removed: not added back by detection (absent in old preferences). */
+  excluded?: string[];
 };
 export type ClaudeAccount = ClaudeProfile & {
   primary: boolean;
@@ -48,11 +50,11 @@ export type ClaudeAccount = ClaudeProfile & {
  *  token: `duplicateOf` only names an earlier home returning the same account. */
 export type CodexAccount = ClaudeProfile & {
   primary: boolean;
-  /** Followed (collected). A detected `~/.codex-*` folder is listed only. */
+  /** Followed (collected): detected `~/.codex-*` folders are followed automatically. */
   tracked: boolean;
   available: boolean;
   refreshing: boolean;
-  phase: CodexStatus["phase"] | "detected" | "unavailable";
+  phase: CodexStatus["phase"] | "unavailable";
   message: string;
   planType: string | null;
   lastChecked: string | null;

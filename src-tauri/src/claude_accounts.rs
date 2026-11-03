@@ -16,6 +16,9 @@ pub struct AccountPrefs {
     pub mode: String,
     pub selected_id: Option<String>,
     pub profiles: Vec<Profile>,
+    /// Identities of detected folders the user removed: automatic detection
+    /// never brings them back (an explicit add does). Absent in old prefs.
+    pub excluded: Vec<String>,
 }
 impl Default for AccountPrefs {
     fn default() -> Self {
@@ -23,14 +26,45 @@ impl Default for AccountPrefs {
             mode: "single".into(),
             selected_id: None,
             profiles: vec![],
+            excluded: vec![],
         }
     }
 }
+/// Upper bound of remembered exclusions (identities are short hex strings).
+pub const MAX_EXCLUDED: usize = 64;
 impl AccountPrefs {
+    pub(crate) fn validate_excluded(&self) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        if self.excluded.len() > MAX_EXCLUDED
+            || !self
+                .excluded
+                .iter()
+                .all(|id| id.starts_with("profile:") && id.len() <= 4096 && seen.insert(id))
+        {
+            return Err("Liste des comptes retirés invalide.".into());
+        }
+        Ok(())
+    }
+    /// Forget a removed folder (explicit add) / remember it (removal).
+    pub(crate) fn unexclude(&mut self, id: &str) -> bool {
+        let before = self.excluded.len();
+        self.excluded.retain(|e| e != id);
+        self.excluded.len() != before
+    }
+    pub(crate) fn exclude(&mut self, id: &str) {
+        if !self.excluded.iter().any(|e| e == id) {
+            self.excluded.push(id.to_string());
+            // Bounded: the oldest exclusions give way first.
+            while self.excluded.len() > MAX_EXCLUDED {
+                self.excluded.remove(0);
+            }
+        }
+    }
     pub fn validate(&self) -> Result<(), String> {
         if !["single", "multi"].contains(&self.mode.as_str()) {
             return Err("Mode Claude non pris en charge.".into());
         }
+        self.validate_excluded()?;
         let mut paths = std::collections::HashSet::new();
         for p in &self.profiles {
             if !Path::new(&p.path).is_absolute()
@@ -150,6 +184,13 @@ pub fn follow(
     prefs: &AccountPrefs,
     target: FollowTarget,
 ) -> Result<AccountPrefs, String> {
+    // An explicit add brings back a folder the user removed earlier.
+    let mut cleaned = prefs.clone();
+    let reinstated = match &target {
+        FollowTarget::Detected(id) => cleaned.unexclude(id),
+        FollowTarget::Path(raw) => cleaned.unexclude(&identity(&profile_path(raw)?)),
+    };
+    let prefs = &cleaned;
     let found = discover(home, config, prefs);
     let (id, added) = match target {
         FollowTarget::Detected(id) => {
@@ -178,7 +219,7 @@ pub fn follow(
                 existing.profile.name
             ));
         }
-        if existing.visible {
+        if existing.visible && !reinstated {
             return Err(format!(
                 "« {} » est déjà affiché. Choisissez un autre profil Claude Code.",
                 existing.profile.name
@@ -236,6 +277,37 @@ pub fn follow(
     Ok(next)
 }
 
+/// « Supprimer <compte> » : stops tracking only. The saved entry is forgotten
+/// and the folder identity is remembered so detection does not add it back;
+/// the folder and its contents are never touched. The primary stays.
+pub fn remove(
+    home: &Path,
+    config: Option<&Path>,
+    prefs: &AccountPrefs,
+    id: &str,
+) -> Result<AccountPrefs, String> {
+    let found = discover(home, config, prefs);
+    match found.iter().find(|a| a.profile.id == id) {
+        Some(a) if a.primary => {
+            return Err("Le compte Claude principal ne peut pas être supprimé.".into())
+        }
+        Some(_) => {}
+        None => return Err("Ce compte Claude n’est plus suivi.".into()),
+    }
+    let mut next = prefs.clone();
+    next.profiles.retain(|p| p.id != id);
+    next.exclude(id);
+    if next.selected_id.as_deref() == Some(id) {
+        next.selected_id = None;
+    }
+    if !found.iter().any(|a| !a.primary && a.profile.id != id) {
+        next.mode = "single".into();
+        next.selected_id = None;
+    }
+    next.validate()?;
+    Ok(next)
+}
+
 pub fn discover(home: &Path, config: Option<&Path>, prefs: &AccountPrefs) -> Vec<Discovered> {
     let primary = normalized(
         &config
@@ -262,9 +334,15 @@ pub fn discover(home: &Path, config: Option<&Path>, prefs: &AccountPrefs) -> Vec
     let mut seen = std::collections::HashSet::new();
     let selected = prefs.selected_id.as_deref().unwrap_or("");
     let selected_exists = paths.iter().any(|p| identity(&normalized(p)) == selected);
+    let multi = prefs.mode == "multi";
     paths
         .into_iter()
         .filter(|raw| seen.insert(normalized(raw)))
+        // A removed folder is not detected again (the primary cannot be removed).
+        .filter(|raw| {
+            let p = normalized(raw);
+            p == primary || !prefs.excluded.contains(&identity(&p))
+        })
         .map(|raw| {
             let p = normalized(&raw);
             let id = identity(&p);
@@ -291,7 +369,9 @@ pub fn discover(home: &Path, config: Option<&Path>, prefs: &AccountPrefs) -> Vec
                             .to_string()
                     }
                 }),
-                visible: saved.map(|s| s.visible).unwrap_or(is_primary),
+                // Automatically added folders follow the current mode: shown in
+                // Multi, kept aside in Unique (which shows the selected one).
+                visible: saved.map(|s| s.visible).unwrap_or(is_primary || multi),
             };
             let visible = if prefs.mode == "multi" {
                 profile.visible
@@ -655,6 +735,44 @@ mod tests {
             visible_ids(&home, &after),
             vec![ids[0].clone(), ids[1].clone()]
         );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn removing_a_detected_profile_excludes_it_without_touching_files_and_plus_restores_it() {
+        let home = root("remove");
+        for d in [".claude", ".claude-a", ".claude-b"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::write(home.join(".claude-a/sentinel"), "kept").unwrap();
+        let found = discover(&home, None, &AccountPrefs::default());
+        let ids: Vec<_> = found.iter().map(|a| a.profile.id.clone()).collect();
+        // Auto-added: Unique keeps only the principal displayed, Multi shows all.
+        assert_eq!(visible_ids(&home, &AccountPrefs::default()), vec![ids[0].clone()]);
+        let multi = AccountPrefs { mode: "multi".into(), ..AccountPrefs::default() };
+        assert_eq!(visible_ids(&home, &multi).len(), 3);
+        assert!(remove(&home, None, &multi, &ids[0]).is_err(), "principal stays");
+        assert!(remove(&home, None, &multi, "profile:00").is_err());
+        let next = remove(&home, None, &multi, &ids[1]).unwrap();
+        assert_eq!(next.excluded, vec![ids[1].clone()]);
+        for _ in 0..2 {
+            let again = discover(&home, None, &next);
+            assert_eq!(again.len(), 2, "the next scan does not add it back");
+        }
+        assert_eq!(std::fs::read_to_string(home.join(".claude-a/sentinel")).unwrap(), "kept");
+        // Removing the last extra returns to the historical single account.
+        let alone = remove(&home, None, &next, &ids[2]).unwrap();
+        assert_eq!((alone.mode.as_str(), alone.selected_id.as_ref()), ("single", None));
+        // The + restores a removed folder (and forgets the exclusion).
+        let back = follow(&home, None, &next, FollowTarget::Path(home.join(".claude-a").to_str().unwrap())).unwrap();
+        assert!(back.excluded.is_empty());
+        assert!(visible_ids(&home, &back).contains(&ids[1]));
+        // Old prefs without `excluded` still load; a bad list is refused.
+        let old: AccountPrefs = serde_json::from_str(r#"{"mode":"multi","selectedId":null,"profiles":[]}"#).unwrap();
+        assert!(old.excluded.is_empty() && old.validate().is_ok());
+        let mut bad = next.clone();
+        bad.excluded.push("x".into());
+        assert!(bad.validate().is_err());
         std::fs::remove_dir_all(home).unwrap();
     }
 }

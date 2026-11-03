@@ -147,7 +147,7 @@ test('dashboard: Multi with every Codex account hidden shows the empty message; 
 
 // --- Réglages -----------------------------------------------------------------
 const accountsProps = (overrides = {}) => ({ prefs: multi('compact'), accounts: [principal, travail, detected], busy: false,
-  onUpdate: async () => true, onAdd: async () => true, onFollow: async () => true, onUntrack: async () => true, ...overrides });
+  onUpdate: async () => true, onAdd: async () => true, onUntrack: async () => true, ...overrides });
 const codexUx = (props, states = []) => {
   // The wrapper only binds the Codex wording/state; render the shared list it returns.
   const element = component('../settings/ClaudeAccountsSettings.tsx', accountsProps(props), [], 'CodexAccountsSettings');
@@ -155,7 +155,7 @@ const codexUx = (props, states = []) => {
   return component('../settings/ClaudeAccountsSettings.tsx', element.props, states);
 };
 
-test('Codex settings reuse the Claude list: Unique/Multi, visibility switches, detected folder with « Suivre »', () => {
+test('Codex settings reuse the Claude list: Unique/Multi, visibility switches, an auto-followed folder is a plain account', () => {
   const html = renderToStaticMarkup(codexUx({}));
   assert.match(html, /aria-label="Comptes Codex affichés"/);
   assert.match(html, /name="codex-mode"/);
@@ -163,15 +163,15 @@ test('Codex settings reuse the Claude list: Unique/Multi, visibility switches, d
   assert.match(html, /class="claude-accounts__row"/);
   assert.match(html, /role="switch"[^>]*aria-label="Afficher Codex Principal"|aria-label="Afficher Codex Principal"[^>]*role="switch"/);
   assert.match(html, /aria-label="Afficher Codex Travail"/);
-  assert.doesNotMatch(html, /aria-label="Afficher Codex Detecte"/, 'a detected folder is not displayable before it is followed');
-  assert.match(html, /aria-label="Suivre Detecte"/);
-  assert.match(html, />Détecté</);
-  assert.match(html, />Ajouter un compte<\/button>/);
+  assert.match(html, /aria-label="Afficher Codex Detecte"/, 'a detected folder is followed automatically, so it has its switch');
+  assert.doesNotMatch(html, /Suivre|>Détecté</, 'no Détecté → Suivre step');
+  assert.match(html, /aria-label="Ajouter un compte Codex"/);
+  assert.doesNotMatch(html, />Ajouter un compte</);
   assert.doesNotMatch(html, /claude-mode|claude-selected|Claude Code/);
 });
 
 test('Codex settings: two followed homes are needed for Unique/Multi; states are explicit', () => {
-  const one = renderToStaticMarkup(codexUx({ prefs: basePrefs, accounts: [principal, detected] }));
+  const one = renderToStaticMarkup(codexUx({ prefs: basePrefs, accounts: [principal] }));
   assert.doesNotMatch(one, /codex-mode/);
   const states = renderToStaticMarkup(codexUx({ accounts: [principal, perso, alias, { ...travail, available: false, phase: 'unavailable' }] }));
   assert.match(states, />Non connecté</);
@@ -184,26 +184,24 @@ test('Codex settings: two followed homes are needed for Unique/Multi; states are
   assert.equal(codexAccountState({ ...principal, phase: 'disabled' })[0], 'Désactivé');
 });
 
-test('Codex settings edits only codexAccounts (visibility, selection, rename) and follows/untracks by id', async () => {
+test('Codex settings edits only codexAccounts (visibility, selection, rename) and untracks by id', async () => {
   let patch;
-  const followed = [];
   const untracked = [];
-  const tree = codexUx({ onUpdate: async value => { patch = value; return true; }, onFollow: async id => { followed.push(id); return true; }, onUntrack: async id => { untracked.push(id); return true; } }, ['', null, true, null]);
+  const tree = codexUx({ onUpdate: async value => { patch = value; return true; }, onUntrack: async id => { untracked.push(id); return true; } }, ['', null, true, null]);
   find(tree, node => node.props?.['aria-label'] === 'Afficher Codex Travail').props.onChange({ target: { checked: false } });
   assert.deepEqual(Object.keys(patch), ['codexAccounts']);
   assert.deepEqual(patch.codexAccounts.profiles, [{ id: travail.id, path: travail.path, name: 'Travail', visible: false }]);
   await find(tree, node => node.type?.name === 'AccountName').props.onSave('Maison');
   assert.deepEqual(Object.keys(patch), ['codexAccounts']);
   assert.equal(patch.codexAccounts.profiles[0].name, 'Maison');
-  find(tree, node => node.props?.['aria-label'] === 'Suivre Detecte').props.onClick();
-  assert.deepEqual(followed, [detected.id]);
-  // Secondary area (open): paths plus « Ne plus suivre » for followed extra homes only.
+  // Secondary area (open) keeps only the manual path field; paths and Supprimer live in each detail.
   const html = renderToStaticMarkup(tree);
-  assert.match(html, /\/fixtures\/\.codex-Travail/);
-  assert.match(html, /aria-label="Ne plus suivre Travail"/);
-  assert.doesNotMatch(html, /aria-label="Ne plus suivre Principal"|aria-label="Ne plus suivre Detecte"/);
+  assert.doesNotMatch(html, /Ne plus suivre|Suivre/);
   assert.match(html, /placeholder="\/Users\/nom\/\.codex-travail"/);
-  find(tree, node => node.props?.['aria-label'] === 'Ne plus suivre Travail').props.onClick();
+  const detail = codexUx({ onUntrack: async id => { untracked.push(id); return true; } }, ['', null, false, travail.id]);
+  global.window = { requestAnimationFrame: () => 0 };
+  await find(detail, node => String(node.props?.className).includes('claude-accounts__remove')).props.onClick();
+  delete global.window;
   assert.deepEqual(untracked, [travail.id]);
   // Unique selection.
   const single = codexUx({ prefs: basePrefs, onUpdate: async value => { patch = value; return true; } });
@@ -224,13 +222,12 @@ test('Settings: Codex accounts block uses explicit Codex commands; old prefs wit
   assert.deepEqual(block.props.prefs.codexAccounts ?? { mode: 'single', selectedId: null, profiles: [] }, { mode: 'single', selectedId: null, profiles: [] });
   invokeResult = basePrefs;
   assert.equal(await block.props.onAdd('/fixtures/.codex-new'), true);
-  assert.equal(await block.props.onFollow(detected.id), true);
+  assert.equal(block.props.onFollow, undefined, 'detected homes are followed by the backend, no Follow step');
   assert.equal(await block.props.onUntrack(travail.id), true);
   invokeResult = '/fixtures/.codex-picked';
   assert.equal(await block.props.onChooseFolder(), '/fixtures/.codex-picked');
   assert.deepEqual(invokeCalls.map(c => [c.command, c.payload]), [
     ['add_codex_profile', { path: '/fixtures/.codex-new' }],
-    ['follow_codex_profile', { id: detected.id }],
     ['untrack_codex_profile', { id: travail.id }],
     ['choose_codex_profile_folder', undefined],
   ]);

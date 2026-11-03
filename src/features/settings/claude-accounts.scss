@@ -13,7 +13,16 @@
   }
   &__label { min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
   .prefs &__rename { flex: 1; width: auto; min-width: 0; margin: 0; padding: 2px 6px; }
-  &__detail { flex-basis: 100%; margin: 0 0 2px !important; font-size: 11px !important; overflow-wrap: anywhere; }
+  // Detail of one account (opened by its chevron): its folder and « Supprimer » only.
+  &__detail {
+    flex-basis: 100%; display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0 0 2px !important; font-size: 11px !important;
+  }
+  // Read-only, selectable and copyable; the full path is in the tooltip.
+  &__path {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--desktop-muted); user-select: text; -webkit-user-select: text; cursor: text;
+  }
+  .prefs &__remove { flex: none; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   &__glyph { flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
   .prefs &__icon {
     display: inline-grid; place-items: center; flex: none; width: 22px; height: 22px; padding: 0;
@@ -30,26 +39,14 @@
     input:focus-visible + span { outline: 2px solid var(--desktop-accent); outline-offset: 2px; }
     input:disabled + span { opacity: 0.5; }
   }
-  &__actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-  .prefs &__add { display: inline-flex; align-items: center; gap: 5px; }
+  // Advanced chevron at the left, the + (manual add) at the bottom right.
+  &__actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+  .prefs &__actions .prefs-more { margin-left: 0; }
+  .prefs &__add { margin-left: auto; }
   &__advanced { .prefs-actions { margin-bottom: 0; } }
-  &__paths {
-    margin: 0 0 6px; font-size: 11px;
-    div { display: flex; gap: 8px; align-items: baseline; padding: 1px 0; }
-    dt { flex: none; font-weight: 600; }
-    dd { margin: 0; min-width: 0; color: var(--desktop-muted); }
-  }
   &__manual {
     display: flex; gap: 8px; align-items: center;
     .prefs & input { flex: 1; min-width: 0; margin: 0; }
     button { flex: none; }
   }
-}
-
-// Detail of one account (opened by its chevron): its own windows and resets.
-.claude-accounts__windows {
-  list-style: none; margin: 4px 0 0; padding: 0;
-  li { display: grid; grid-template-columns: 1fr auto; column-gap: 8px; padding: 2px 0; font-size: 11px; }
-  strong { font-weight: 600; text-align: right; }
-  small { grid-column: 1 / -1; color: var(--desktop-muted); font-size: 11px; }
 }

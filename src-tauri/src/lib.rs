@@ -3295,6 +3295,7 @@ pub fn run() {
             claude::get_claude_accounts,
             claude::add_claude_profile,
             claude::follow_claude_profile,
+            claude::untrack_claude_profile,
             choose_claude_profile_folder,
             choose_codex_profile_folder,
             codex::get_codex_accounts,

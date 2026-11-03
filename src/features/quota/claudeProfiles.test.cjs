@@ -112,7 +112,8 @@ test('settings discovers profiles, offers Unique/Multi and selects principal wit
   assert.match(html, /aria-label="Afficher Travail"/);
   assert.doesNotMatch(html, /<details|<select|Compte Claude affiché|Gérer les comptes/);
   assert.equal((html.match(/class="claude-accounts__label">Travail</g) || []).length, 1);
-  assert.match(html, />Ajouter un compte<\/button>/);
+  assert.match(html, /aria-label="Ajouter un compte Claude"/);
+  assert.doesNotMatch(html, />\s*Ajouter un compte\s*</, 'a + icon, no text line');
 });
 test('dashboard multi mode shows every visible profile, independent of selected account', () => {
   const tree = component('../../pages/Dashboard/Dashboard.tsx', {}, [[], null, snapshot, { ...prefs, claudeAccounts: { ...prefs.claudeAccounts, mode: 'multi', selectedId: 'Travail' } }, false, null, null, null, false, 0, accounts]);
@@ -309,11 +310,11 @@ test('settings discovery remains available with provider off and reports discove
 // ---- Fournisseurs → Claude : liste plate, ajout direct ---------------------
 const accountsUx = (props, states = []) => component('../settings/ClaudeAccountsSettings.tsx', settingsProps(props), states);
 const signedOut = { ...snapshot, state: 'error', errorKind: 'not_signed_in', planType: null, message: 'Profil non connecté : CLAUDE_CONFIG_DIR=/fixtures/x claude auth login.' };
-const addButton = (tree) => find(tree, node => node.props?.className === 'claude-accounts__add');
+const addButton = (tree) => find(tree, node => String(node.props?.className).includes('claude-accounts__add'));
 test('zero or one profile: the Add action is there at once, no panel, prose or disclosure', () => {
   for (const list of [[], [accounts[0]]]) {
     const html = renderToStaticMarkup(accountsUx({ accounts: list }));
-    assert.match(html, /class="claude-accounts__add"[^>]*>.*Ajouter un compte<\/button>/);
+    assert.match(html, /class="claude-accounts__icon claude-accounts__add"[^>]*aria-label="Ajouter un compte Claude"[^>]*><svg/);
     assert.doesNotMatch(html, /claude-mode|<details|Suivre un autre|profil existant|Chemin absolu|role="switch"/);
     assert.doesNotMatch(html, /<p[ >]/);
   }
@@ -342,7 +343,7 @@ test('without a native chooser « Ajouter » opens the single secondary area wit
   delete global.window;
   const open = renderToStaticMarkup(accountsUx({}, ['', null, true]));
   assert.match(open, /aria-label="Chemin absolu d’un profil Claude Code"/);
-  assert.match(open, /<code>\/fixtures\/Travail<\/code>/);
+  assert.doesNotMatch(open, /<dl|<code>|Ne plus suivre/, 'paths live in each account detail now');
   assert.doesNotMatch(open, /<details/);
 });
 test('add errors stay concise next to the action; busy disables add/rename, switches keep focus', () => {
@@ -351,7 +352,7 @@ test('add errors stay concise next to the action; busy disables add/rename, swit
   const current = { ...prefs, claudeAccounts: { mode: 'multi', selectedId: null, profiles: [] } };
   const busy = renderToStaticMarkup(accountsUx({ prefs: current, busy: true, onChooseFolder: async () => null }, ['/x', null, true]));
   assert.match(busy, /aria-busy="true"/);
-  assert.match(busy, /class="claude-accounts__add" disabled=""/);
+  assert.match(busy, /class="claude-accounts__icon claude-accounts__add" disabled=""/);
   assert.match(busy, /disabled=""[^>]*aria-label="Renommer Travail"/);
   // Switches/radios stay enabled so keyboard focus survives a save; the
   // Settings `mutation` guard serialises writes instead.
@@ -369,10 +370,11 @@ test('Multi: one flat list (name, plan, state, info, visibility switch), then th
   assert.match(html, /prefs-pill--neutral" title="[^"]*">Indisponible/);
   assert.equal((html.match(/aria-label="Renommer /g) || []).length, 3);
   assert.equal((html.match(/aria-label="Détail /g) || []).length, 3, 'every account has its detail chevron');
-  assert.ok(html.indexOf('Ajouter un compte') > html.lastIndexOf('role="switch"'));
+  assert.ok(html.indexOf('claude-accounts__add') > html.lastIndexOf('role="switch"'));
   // The chevron opens the account's detail inline (one level, no sub-panel).
   const open = renderToStaticMarkup(accountsUx({ prefs: current, accounts: list }, ['', null, false, 'Travail']));
-  assert.match(open, /aria-expanded="true"[^>]*><svg[\s\S]*<div id="claude-detail-Travail" class="claude-accounts__detail" role="group" aria-label="Détail Travail"><p>Profil non connecté : CLAUDE_CONFIG_DIR=\/fixtures\/x claude auth login\.<\/p><\/div>/);
+  assert.match(open, /aria-expanded="true"[^>]*><svg[\s\S]*<div id="claude-detail-Travail" class="claude-accounts__detail" role="group" aria-label="Détail Travail"><code class="claude-accounts__path" title="([^"]+)">\1<\/code><\/div>/);
+  assert.doesNotMatch(open.match(/<div id="claude-detail-Travail"[\s\S]*?<\/div>/)[0], /<p>|claude auth login|Non connecté/, 'the state is on the row, not repeated in the detail');
   assert.equal((open.match(/class="claude-accounts__detail"/g) || []).length, 1, 'only that account');
 });
 test('inline rename: pencil swaps in a field, Enter saves the trimmed name, Escape cancels', async () => {
