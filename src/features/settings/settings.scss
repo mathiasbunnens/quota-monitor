@@ -12,13 +12,23 @@ html:has(.prefs), html:has(.prefs) body { background: var(--desktop-bg); }
   button:disabled { opacity: 0.5; cursor: default; }
   button.primary { background: var(--desktop-accent); color: #fff; border-color: var(--desktop-accent); }
   :focus-visible { outline: 2px solid var(--desktop-accent); outline-offset: 2px; }
-  label { font-size: 12px; }
+  label { font-size: 12px; font-weight: 500; line-height: 1.45; }
   select, input:not([type="checkbox"]):not([type="radio"]) { display: block; width: 100%; padding: 5px 8px; margin: 6px 0; border: 1px solid var(--desktop-border); border-radius: 7px; background: var(--desktop-card); color: var(--desktop-ink); font: inherit; font-size: 12px; }
 }
 .prefs-loading { padding: 24px; }
 .ntfy-fields { border: 0; padding: 0; margin: 12px 0; min-width: 0; }
 .ntfy-fields > label { display: block; margin: 10px 0; }
-.prefs #ntfy-heading { font-size: 13px; margin: 0 0 8px; }
+// One heading hierarchy for every tab. The native window title is the page
+// title; group headings/legends and option labels share these two levels.
+.prefs .prefs-group__title {
+  margin: 0; padding: 0; font: inherit; font-size: 13px; font-weight: 600;
+  line-height: 1.45; text-transform: none; letter-spacing: normal; color: var(--desktop-ink);
+}
+.prefs .prefs-option__title {
+  margin: 0; font: inherit; font-size: 12px; font-weight: 500;
+  line-height: 1.45; text-transform: none; letter-spacing: normal; color: var(--desktop-ink);
+}
+.prefs-group > .prefs-group__title, .prefs-group > .prefs-group__head { margin-bottom: 10px; }
 
 // Toolbar tabs: icon above label, like a native Settings scene.
 .prefs-toolbar {
@@ -41,9 +51,8 @@ html:has(.prefs), html:has(.prefs) body { background: var(--desktop-bg); }
   margin: 0 0 12px; padding: 12px 14px; min-width: 0; border: 1px solid var(--desktop-border); border-radius: 10px; background: var(--desktop-card);
   &__head { display: flex; align-items: center; gap: 10px; min-height: 24px;
     > div { flex: 1; display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-    h2 { margin: 0; font-size: 13px; font-weight: 600; }
   }
-  &__legend { float: left; width: 100%; padding: 0; margin: 0 0 10px; font-size: 13px; font-weight: 600; }
+  &__legend { float: left; width: 100%; }
   &__legend + * { clear: both; }
 }
 .prefs-plan { font-size: 11px; color: var(--desktop-muted); text-transform: capitalize; }
@@ -54,7 +63,6 @@ html:has(.prefs), html:has(.prefs) body { background: var(--desktop-bg); }
 .prefs-fable {
   margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--desktop-border);
   > div { display: block; }
-  h3 { margin: 0; font-size: 12px; font-weight: 600; }
 }
 .prefs-actions, .prefs .settings-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 6px; }
 .prefs .prefs-external { display: inline-flex; align-items: center; gap: 4px; margin: 6px 0 0 -4px; }
@@ -112,7 +120,7 @@ html:has(.prefs), html:has(.prefs) body { background: var(--desktop-bg); }
   summary { cursor: pointer; font-size: 12px; color: var(--desktop-accent); }
   .codex-connection { margin-top: 8px; padding-top: 0; border-top: 0; }
 }
-.prefs .codex-connection { margin-top: 10px; padding-top: 10px; font-size: 12px; h2 { font-size: 12px; margin: 0; } }
+.prefs .codex-connection { margin-top: 10px; padding-top: 10px; font-size: 12px; }
 
 .prefs #panel-notifications { overflow-wrap: anywhere; }
 @media (max-width: 440px) {

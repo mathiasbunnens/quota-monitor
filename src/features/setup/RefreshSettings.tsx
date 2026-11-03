@@ -19,7 +19,7 @@ export default function RefreshSettings({ status, onChange }: {
     finally { setSaving(false); }
   };
   return <div className="settings-form">
-    <label htmlFor="refresh-frequency">Fréquence de lecture des quotas</label>
+    <label htmlFor="refresh-frequency" className="prefs-option__title">Fréquence</label>
     <select id="refresh-frequency" value={value} disabled={saving} onChange={(event) => void save(event.target.value)}>
       <option value="auto">Automatique (selon l’activité)</option>
       <option value="30">Toutes les 30 secondes</option><option value="60">Toutes les minutes</option>

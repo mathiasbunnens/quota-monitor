@@ -79,7 +79,7 @@ function Choices<T extends string>({ legend, label, name, options, value, tiles 
   legend: string; label: string; name: string; options: Choice<T>[]; value: T; tiles?: boolean; onChange: (value: T) => void;
 }) {
   return <>
-    <legend className="prefs-group__legend">{legend}</legend>
+    <legend className="prefs-group__title prefs-group__legend">{legend}</legend>
     <div className={"prefs-segmented prefs-choices" + (tiles ? " prefs-choices--tiles" : "")} role="radiogroup" aria-label={label}>
       {options.map((option) => <label key={option.value} className={value === option.value ? "is-selected" : ""} title={option.title}>
         <input type="radio" name={name} value={option.value} checked={value === option.value} onChange={() => onChange(option.value)} />
@@ -274,7 +274,7 @@ export default function Settings() {
   const extra = claude?.extraUsage;
   const layout = claudeLayoutOf(prefs);
 
-  return <main className="prefs" ref={root}>
+  return <main className="prefs" ref={root} aria-label="Réglages">
     <nav role="tablist" aria-label="Catégories de réglages" className="prefs-toolbar">
       {tabs.map((item, index) => <button key={item.id} type="button" role="tab" id={"tab-" + item.id}
         ref={(node) => { tabRefs.current[item.id] = node; }}
@@ -294,7 +294,7 @@ export default function Settings() {
       {tab === "providers" && <div role="tabpanel" id="panel-providers" aria-labelledby="tab-providers">
         <section className="prefs-group" aria-labelledby="codex-heading">
           <header className="prefs-group__head">
-            <div><h2 id="codex-heading">Codex</h2>{status?.planType && prefs.codexEnabled && <span className="prefs-plan">{status.planType}</span>}</div>
+            <div><h2 id="codex-heading" className="prefs-group__title">Codex</h2>{status?.planType && prefs.codexEnabled && <span className="prefs-plan">{status.planType}</span>}</div>
             {prefs.codexEnabled && codexReady && <ResetCredits compact status={status} onChange={reload} />}
             <Pill tone={codexTone}>{codexPill}</Pill>
             <Switch label="Activer Codex" checked={prefs.codexEnabled} disabled={busy}
@@ -311,7 +311,7 @@ export default function Settings() {
 
         <section className="prefs-group" aria-labelledby="claude-heading">
           <header className="prefs-group__head">
-            <div><h2 id="claude-heading">Claude</h2>{claude?.planType && prefs.claudeEnabled && !accounts.length && <span className="prefs-plan">{claude.planType}</span>}</div>
+            <div><h2 id="claude-heading" className="prefs-group__title">Claude</h2>{claude?.planType && prefs.claudeEnabled && !accounts.length && <span className="prefs-plan">{claude.planType}</span>}</div>
             {prefs.claudeEnabled && extra?.enabled && <button type="button" className="reset-chip"
               onClick={() => void invoke("open_claude_usage").catch(() => undefined)}
               title="Usage supplémentaire payant activé" aria-label="Usage supplémentaire Claude">
@@ -323,7 +323,7 @@ export default function Settings() {
           </header>
           {(!prefs.claudeEnabled || !claudeReady) && <p className={"prefs-state prefs-state--" + claudeTone} role="status">{claudeMessage}</p>}
           <div className="prefs-group__head prefs-fable">
-            <div><h3>Quota Fable</h3></div>
+            <div><h3 className="prefs-option__title">Quota Fable</h3></div>
             <Switch label="Afficher le quota Fable et ses alertes" checked={prefs.fableEnabled} disabled={busy || !prefs.claudeEnabled}
               onChange={(value) => void update({ fableEnabled: value })} />
           </div>
@@ -364,7 +364,8 @@ export default function Settings() {
       </div>}
 
       {tab === "refresh" && <div role="tabpanel" id="panel-refresh" aria-labelledby="tab-refresh">
-        <section className="prefs-group">
+        <section className="prefs-group" aria-labelledby="refresh-heading">
+          <h2 id="refresh-heading" className="prefs-group__title">Actualisation des quotas</h2>
           <RefreshSettings key={String(status?.refreshSettings.customSeconds ?? "auto")} status={status} onChange={reload} />
         </section>
       </div>}

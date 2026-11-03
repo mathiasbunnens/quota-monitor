@@ -157,6 +157,6 @@ test("native Fable styling preserves the normal quota label font", () => {
 test("Settings keeps the Fable switch label but no help text", () => {
   const settings = fs.readFileSync(new URL("../src/features/settings/Settings.tsx", import.meta.url), "utf8");
   assert.match(settings, /<Switch label="Afficher le quota Fable et ses alertes"/);
-  assert.match(settings, /<h3>Quota Fable<\/h3>/);
+  assert.match(settings, /<h3 className="prefs-option__title">Quota Fable<\/h3>/);
   assert.doesNotMatch(settings, /si Claude Code le communique|Ne modifie pas votre forfait/);
 });

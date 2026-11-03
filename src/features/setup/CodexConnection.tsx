@@ -15,7 +15,7 @@ export default function CodexConnection({ status, onChange }: Props) {
     finally { setBusy(false); }
   };
   return <section className="connection-setup codex-connection" aria-labelledby="codex-title">
-    <h2 id="codex-title">Connexion directe à Codex</h2>
+    <h2 id="codex-title" className="prefs-option__title">Connexion directe à Codex</h2>
     <p>Les quotas sont lus automatiquement depuis Codex. Aucune extension ni page ouverte n’est nécessaire après connexion.</p>
     <p role="status">{status?.message || "Recherche de Codex…"}</p>
     {error && <p role="alert">{error}</p>}
