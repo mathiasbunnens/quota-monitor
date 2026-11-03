@@ -78,7 +78,8 @@
   .dashboard__quota-heading { font-size: 11px; gap: 6px; }
   strong { font-size: 15px; letter-spacing: -0.2px; }
 }
-.provider-card__paired-bars { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+// Explicit slots: a lone weekly bar keeps its y offset (7 px short slot + 2 px gap), nothing is drawn for the absent window.
+.provider-card__paired-bars { display: grid; grid-template-rows: 7px 3px; gap: 2px; margin-top: 8px; }
 // 5 h: inherit the exact Unique track/fill thickness and radius (.dashboard__progress).
 .provider-card__window--short { margin-top: 0; }
 .provider-card__window--week { height: 3px; margin-top: 0; }

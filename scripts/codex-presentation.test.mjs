@@ -37,6 +37,7 @@ test('real Codex IDs pair only windows of the same bucket, never invent missing 
  assert.match(html,/Épuisé/);assert.equal((html.match(/role="progressbar"/g)||[]).length,4);
  const weekly=render([input[1],input[2]]);
  assert.doesNotMatch(weekly,/provider-card__window--short/);assert.match(weekly,/provider-card__window--week/);
+ assert.match(weekly,/grid-row:2/); // weekly-only keeps its native y slot, no fictitious short track
  assert.equal((weekly.match(/role="progressbar"/g)||[]).length,2);
  const empty=render([]);assert.doesNotMatch(empty,/role="progressbar"/);
  const crossed=providers.codexRows([input[0],input[2]]);

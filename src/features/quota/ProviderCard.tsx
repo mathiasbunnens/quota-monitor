@@ -51,11 +51,12 @@ function PairedHeading({ row, now }: { row: QuotaRow; now: number }) {
 }
 
 /** Same progressbar markup/classes as the Unique row; height comes from CSS. */
-function PairedProgress({ row, className }: { row: QuotaRow; className: string }) {
+function PairedProgress({ row, className, slot }: { row: QuotaRow; className: string; slot: 1 | 2 }) {
   const known = row.remaining !== null;
   const state = known ? level(row.remaining as number) : "low";
   return <div className={"dashboard__progress dashboard__progress--" + state + " " + className
     + (row.modelLabel ? " provider-row--model provider-row--" + state : "")}
+    style={{ gridRow: slot }}
     title={row.label + " · réinitialisation : " + row.resetText}
     role="progressbar" aria-label={row.label} aria-valuemin={0} aria-valuemax={100}
     aria-valuenow={known ? (row.remaining as number) : undefined}
@@ -136,8 +137,8 @@ export default function ProviderCard({ name, badge, rows, status, error, compact
         {[paired.short, paired.week].map((row) => row && <PairedHeading key={row.id} row={row} now={now} />)}
       </div>
       <div className="provider-card__paired-bars">
-        {paired.short && <PairedProgress row={paired.short} className="provider-card__window--short" />}
-        {paired.week && <PairedProgress row={paired.week} className="provider-card__window--week" />}
+        {paired.short && <PairedProgress row={paired.short} className="provider-card__window--short" slot={1} />}
+        {paired.week && <PairedProgress row={paired.week} className="provider-card__window--week" slot={2} />}
       </div>
       {/* Fable and any other limit stay visible: nothing is dropped to fit. */}
       {paired.others.map((row) => <Row key={row.id} row={row} />)}
