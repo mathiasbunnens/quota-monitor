@@ -1,8 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
+import ExternalIcon from "../ui/ExternalIcon";
 import { CompactPanel } from "./CompactPanel";
-import type { CompactPanelModel } from "./types";
+import type { CompactPanelModel, ProviderKind } from "./types";
 import "./compact.scss";
 
 /** The menu-bar item refreshes on every open; the window does it on focus. */
@@ -70,6 +71,17 @@ export default function CompactWindow() {
   const checkUpdates = useCallback(() => void run("update", "start_update_check"), [run]);
   const connect = useCallback(() => void run("connect", "connect_codex_account"), [run]);
 
+  // Provider ↗, account chevron and +: the same pages and Réglages focus as the app and the native menu.
+  const openUsage = useCallback((kind: ProviderKind) => {
+    void invoke(kind === "codex" ? "open_usage_details" : "open_claude_usage").catch((cause) => setError(String(cause)));
+  }, []);
+  const openAccount = useCallback((kind: ProviderKind, accountId: string) => {
+    void invoke("open_settings_focus", { provider: kind, accountId }).catch((cause) => setError(String(cause)));
+  }, []);
+  const addAccount = useCallback((kind: ProviderKind) => {
+    void invoke("open_settings_focus", { provider: kind, add: true }).catch((cause) => setError(String(cause)));
+  }, []);
+
   // Cmd+, opens Réglages, like the key equivalent of the menu item.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -83,5 +95,6 @@ export default function CompactWindow() {
   }, [openSettings]);
 
   return <CompactPanel panel={panel} error={error ?? readError} pending={pending}
-    onSettings={openSettings} onUpdate={checkUpdates} onConnect={connect} />;
+    onSettings={openSettings} onUpdate={checkUpdates} onConnect={connect}
+    onUsage={openUsage} onAccount={openAccount} onAdd={addAccount} usageIcon={<ExternalIcon />} />;
 }

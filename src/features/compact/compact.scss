@@ -173,6 +173,35 @@ html:has(.compact) body {
 
 .compact-provider__badge { font-weight: 400; }
 
+// Provider header « CODEX ↗ »: the caption of the former section, now the link to the detailed usage.
+.compact-group__head { margin: 0; padding: 2px 16px 0; height: 20px; font-size: 10px; font-weight: 600; line-height: 14px; }
+.compact .compact-group__usage {
+  display: inline-flex; align-items: center; gap: 4px; height: 16px; margin: 0 -3px; padding: 0 3px; border: 0; border-radius: 4px;
+  background: transparent; color: var(--compact-secondary); font: inherit; letter-spacing: 0; cursor: pointer;
+  .external-icon { flex: none; color: var(--compact-focus); }
+  &:hover { background: color-mix(in srgb, var(--compact-gray) 16%, transparent); }
+}
+
+// Account card header: name, plan beside it, state, then the chevron of its detail.
+.compact-group .compact-provider__head:not(.compact-provider__head--section) {
+  align-items: center; height: 24px; padding: 4px 16px 0; font-size: 11px;
+  .compact-provider__name { color: var(--compact-label); font-weight: 600; }
+  .compact-provider__state { margin-left: auto; flex: none; font-size: 10px; }
+}
+.compact .compact-provider__chevron {
+  display: inline-grid; place-items: center; flex: none; width: 18px; height: 18px; margin: 0 -4px 0 0; padding: 0; border: 0; border-radius: 5px;
+  background: transparent; color: var(--compact-secondary); cursor: pointer;
+  svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  &:hover { background: color-mix(in srgb, var(--compact-gray) 16%, transparent); color: var(--compact-label); }
+}
+.compact-group__footer { display: flex; justify-content: flex-end; padding: 0 16px 6px; margin-top: -4px; }
+.compact .compact-group__add {
+  display: inline-grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px;
+  background: transparent; color: var(--compact-secondary); cursor: pointer;
+  svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  &:hover { background: color-mix(in srgb, var(--compact-gray) 16%, transparent); color: var(--compact-label); }
+}
+
 .compact-card {
   margin: 0 10px 10px;
   padding: 8px 10px;

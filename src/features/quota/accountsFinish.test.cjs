@@ -93,3 +93,41 @@ test('A: the embedded connection keeps login and executable path, without the in
   const full = renderToStaticMarkup(component('../setup/CodexConnection.tsx', { status, onChange() {} }, [null, '', false]));
   assert.match(full, /Connexion directe à Codex/);
 });
+
+// ---- Réglages focus from the native menu / compact window (volet C) ----------------------
+const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('C: an account list unfolds the detail of the account it is pointed at, or opens its add flow', () => {
+  global.window = { requestAnimationFrame: fn => { fn(); return 1; } };
+  const run = (focus) => {
+    env.changes = [];
+    list({ focus }, ['', null, false, null]);
+    env.effects.forEach(effect => effect());
+    return env.changes.map(c => [c.index, c.value]);
+  };
+  assert.deepEqual(run({ accountId: 'profile:Travail', add: false, nonce: 1 }), [[3, 'profile:Travail']]);
+  assert.deepEqual(run({ accountId: null, add: true, nonce: 2 }), [[2, true]]);
+  assert.deepEqual(run({ accountId: 'unknown', add: false, nonce: 3 }), [], 'an unknown account changes nothing');
+  assert.deepEqual(run(null), []);
+  delete global.window;
+});
+
+test('C: Settings hands the pending focus to the list of its provider only', () => {
+  const focus = { provider: 'codex', accountId: 'profile:Travail', add: false, nonce: 7 };
+  const tree = component('../settings/Settings.tsx', {}, ['providers', prefs, status, null, null, false, 0, [], null, true, null, [principal, travail], null, null, focus]);
+  assert.deepEqual(find(tree, n => n.type?.name === 'CodexAccountsSettings').props.focus, focus);
+  assert.equal(find(tree, n => n.type?.name === 'ClaudeAccountsSettings').props.focus ?? null, null);
+});
+
+test('C: Settings takes the pending focus when it opens and when it is woken, and lands on Fournisseurs', async () => {
+  env.calls = []; env.changes = []; env.failure = null;
+  env.result = (command) => command === 'take_settings_focus' ? { provider: 'claude', accountId: 'primary', add: false } : null;
+  global.window = { setTimeout: () => 1, clearTimeout() {} };
+  component('../settings/Settings.tsx', {}, ['notifications', prefs, status, null, null, false, 0, [], null, true, null, [principal], null, null]);
+  env.effects.forEach(effect => effect());
+  await tick(); await tick();
+  delete global.window;
+  assert.ok(env.calls.some(c => c.command === 'take_settings_focus'));
+  assert.ok(env.changes.some(c => c.index === 0 && c.value === 'providers'), 'the Fournisseurs tab is selected');
+  assert.ok(env.changes.some(c => c.index === 14 && c.value?.provider === 'claude' && c.value.accountId === 'primary' && typeof c.value.nonce === 'number'));
+});

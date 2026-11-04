@@ -221,3 +221,70 @@ test("compact window thickness: 5 h inherits the 5 px Unique track, 7 j is 3 px 
   assert.match(css, /\.compact-pair__track--week\s*\{[^}]*height: 3px[^}]*border-radius: 1\.5px/);
   assert.match(css, /\.compact-pair__bars\s*\{[^}]*gap: 2px/);
 });
+
+// --- Provider header ↗, account state + chevron, + (same logic as the Dashboard) ---------
+const account = (kind, id, name, badge, state, tone = "good", rows = [multiRow("Limite sur 3h30", 73, "3h30"), multiRow("Limite sur 3j 8h", 86, "3j 8h")]) => ({
+  kind, accountId: id, accountName: name, state: { label: state, tone },
+  name: `${kind === "codex" ? "Codex" : "Claude"} · ${name}`, section: `${kind.toUpperCase()} · ${name.toUpperCase()}`, compact: true, badge, note: null, rows,
+});
+const groupedPanel = {
+  ...panel,
+  addable: ["codex", "claude"],
+  providers: [
+    account("codex", "primary", "Principal", "Plus", "Connecté"),
+    account("codex", "profile:travail", "Travail", "Pro", "Non connecté", "warning", []),
+    account("claude", "primary", "Personnel", "Pro", "Connecté"),
+  ],
+};
+const calls = [];
+const handlers = { onUsage: (kind) => calls.push(["usage", kind]), onAccount: (kind, id) => calls.push(["account", kind, id]), onAdd: (kind) => calls.push(["add", kind]) };
+const groupedProps = (extra = {}) => props({ panel: groupedPanel, usageIcon: createElement("svg", { className: "external-icon" }), ...handlers, ...extra });
+
+test("one header « CODEX ↗ » per provider before its account cards, then its +", () => {
+  const markup = renderToStaticMarkup(createElement(CompactPanel, groupedProps()));
+  const groups = markup.split('<section class="compact-group"').slice(1);
+  assert.equal(groups.length, 2);
+  assert.match(groups[0], /^[^>]*aria-label="Codex"[\s\S]*<h2 class="compact-group__head"><button[^>]*aria-label="Codex : usage détaillé"[^>]*>CODEX<svg class="external-icon"/);
+  assert.match(groups[1], /<button[^>]*aria-label="Claude : usage détaillé"[^>]*>CLAUDE<svg class="external-icon"/);
+  assert.equal((markup.match(/compact-group__usage/g) ?? []).length, 2, "once per provider, not per card");
+  assert.equal((groups[0].match(/<section class="compact-provider"/g) ?? []).length, 2);
+  assert.ok(groups[0].indexOf("compact-group__usage") < groups[0].indexOf('class="compact-provider"'));
+  assert.ok(groups[0].lastIndexOf('class="compact-provider"') < groups[0].indexOf("Ajouter un compte Codex"));
+  assert.match(groups[1], /aria-label="Ajouter un compte Claude"/);
+  assert.doesNotMatch(groups[0], /Ajouter un compte Claude/);
+});
+
+test("each card: account name, plan beside it, state, then the chevron of THAT account", () => {
+  const markup = renderToStaticMarkup(createElement(CompactPanel, groupedProps()));
+  const cards = markup.split('<section class="compact-provider"').slice(1);
+  assert.match(cards[0], /<span class="compact-provider__name">Principal<\/span><span class="compact-provider__badge">Plus<\/span><span class="compact-provider__state compact-tone--good">Connecté<\/span><button[^>]*aria-label="Détail Codex Principal"/);
+  assert.match(cards[1], /compact-tone--warning">Non connecté<\/span><button[^>]*aria-label="Détail Codex Travail"/);
+  assert.match(cards[2], /aria-label="Détail Claude Personnel"/);
+  assert.doesNotMatch(markup, /Détails<|>Détails/);
+});
+
+test("header ↗, chevron and + route to their own provider and account", () => {
+  calls.length = 0;
+  const tree = CompactPanel(groupedProps());
+  const buttons = find(tree, (n) => n.type === "button");
+  const click = (label) => buttons.find((b) => b.props["aria-label"] === label).props.onClick();
+  click("Codex : usage détaillé"); click("Claude : usage détaillé");
+  click("Détail Codex Travail"); click("Détail Claude Personnel");
+  click("Ajouter un compte Claude"); click("Ajouter un compte Codex");
+  assert.deepEqual(calls, [["usage", "codex"], ["usage", "claude"], ["account", "codex", "profile:travail"], ["account", "claude", "primary"], ["add", "claude"], ["add", "codex"]]);
+});
+
+test("an enabled provider without a visible card still offers its header and its +; a disabled one has none", () => {
+  const onlyClaude = { ...groupedPanel, addable: ["codex", "claude"], providers: groupedPanel.providers.filter((p) => p.kind === "claude") };
+  const markup = renderToStaticMarkup(createElement(CompactPanel, groupedProps({ panel: onlyClaude })));
+  assert.match(markup, /aria-label="Codex : usage détaillé"/);
+  assert.match(markup, /aria-label="Ajouter un compte Codex"/);
+  const off = { ...onlyClaude, addable: ["claude"] };
+  const without = renderToStaticMarkup(createElement(CompactPanel, groupedProps({ panel: off })));
+  assert.doesNotMatch(without, /Codex/);
+});
+
+test("models without provider information (older fixtures) render as before, without header, chevron or +", () => {
+  const markup = html();
+  assert.doesNotMatch(markup, /compact-group|compact-provider__state|Ajouter un compte|usage détaillé/);
+});

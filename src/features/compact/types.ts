@@ -31,7 +31,17 @@ export type CompactRow = {
   fill: CompactFill;
 };
 
+export type ProviderKind = "codex" | "claude";
+
 export type CompactProvider = {
+  /** Groups the cards under one provider header; absent in older models. */
+  kind?: ProviderKind;
+  /** Account of this card: routes its chevron to its detail in Réglages. */
+  accountId?: string | null;
+  /** Account name, the card title under the provider header. */
+  accountName?: string | null;
+  /** Connection state of that account (Connecté, Non connecté, Même compte…). */
+  state?: { label: string; tone: CompactTone } | null;
   name: string;
   section: string;
   /** Claude multi-account card: 5 h and 7 j paired, like the menu. */
@@ -61,6 +71,8 @@ export type CompactUpdate = {
 export type CompactPanelModel = {
   header: { title: string; subtitle: string; status: string; tone: CompactTone };
   providers: CompactProvider[];
+  /** Enabled providers: each gets its header (↗) and its + even without a card. */
+  addable?: ProviderKind[];
   connection: { label: string; loggingIn: boolean } | null;
   version: string;
   /** Last updater state; null while no check has reported anything. */

@@ -25,7 +25,7 @@ try{
  const key=async(k,code,vk,text)=>{await cdp('Input.dispatchKeyEvent',{type:'keyDown',key:k,code,text,windowsVirtualKeyCode:vk});await cdp('Input.dispatchKeyEvent',{type:'keyUp',key:k,code,windowsVirtualKeyCode:vk});await sleep(150);};
  await cdp('Page.enable');await cdp('Runtime.enable');
  const open=async(which,query,scheme='light',width=480)=>{await cdp('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:scheme},{name:'prefers-reduced-motion',value:'reduce'}]});await cdp('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:2,mobile:false});await cdp('Page.navigate',{url:`http://127.0.0.1:${ports[which]}/?${query}`});await sleep(700);await ev(`document.getElementById('tab-providers').click()`);await sleep(300);};
- const calls=()=>ev(`window.__fixture.calls.filter(c=>!c.command.startsWith('get_')&&!c.command.startsWith('choose_')&&c.command!=='fit_settings_window').map(c=>[c.command,c.payload])`);
+ const calls=()=>ev(`window.__fixture.calls.filter(c=>!c.command.startsWith('get_')&&!c.command.startsWith('choose_')&&c.command!=='fit_settings_window'&&c.command!=='take_settings_focus').map(c=>[c.command,c.payload])`);
  // helpers evaluated in the page: one provider section
  const sec=p=>`document.getElementById('${p}-heading').closest('section')`;
  const rows=p=>ev(`[...${sec(p)}.querySelectorAll('.claude-accounts__row')].map(r=>r.innerText.replace(/\\s+/g,' ').trim())`);
@@ -133,6 +133,21 @@ try{
  // not connected: the full panel sits above the list, never a second one inside the detail
  await open('after',base+'&codexPhase=signed_out');await click('[aria-label="Détail Codex Principal"]');await sleep(150);
  assert.deepEqual(await ev(`({full:document.querySelectorAll('#codex-title').length,embedded:document.querySelectorAll('.codex-connection--embedded').length})`),{full:1,embedded:0});
+ // 11. pointed at from the native menu / compact window: Réglages lands on that provider's account or add flow
+ const landing=async q=>{await open('after',base+q);return ev(`({open:[...document.querySelectorAll('.claude-accounts__detail')].map(d=>d.id),flows:[...document.querySelectorAll('.add-account__flow')].map(f=>f.closest('section').getAttribute('aria-labelledby')),tab:document.querySelector('[role=tab][aria-selected=true]').id,taken:window.__fixture.calls.filter(c=>c.command==='take_settings_focus').length>0})`);};
+ report.landing={
+  codexAccount:await landing('&focus=codex|profile:travail'),
+  claudeAccount:await landing('&focus=claude|work'),
+  claudeAdd:await landing('&focus=claude&focusAdd=1'),
+  codexAdd:await landing('&focus=codex&focusAdd=1'),
+  none:await landing(''),
+ };
+ assert.deepEqual(report.landing.codexAccount.open,['codex-detail-profile:travail']);assert.deepEqual(report.landing.codexAccount.flows,[]);
+ assert.deepEqual(report.landing.claudeAccount.open,['claude-detail-work']);
+ assert.deepEqual(report.landing.claudeAdd.flows,['claude-heading']);assert.deepEqual(report.landing.claudeAdd.open,[]);
+ assert.deepEqual(report.landing.codexAdd.flows,['codex-heading']);
+ assert.deepEqual(report.landing.none,{open:[],flows:[],tab:'tab-providers',taken:true});
+ assert.ok(Object.values(report.landing).every(l=>l.tab==='tab-providers'&&l.taken));
  assert.deepEqual(errors,[]);
  fs.writeFileSync(path.join(out,'report.json'),JSON.stringify(report,null,2));console.log('ACCOUNTS_DETAIL_PASS',Object.keys(report).length);
 }finally{clearTimeout(kill);ws?.close();chrome.kill();servers.forEach(s=>s.close());}

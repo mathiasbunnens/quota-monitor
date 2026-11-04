@@ -5,7 +5,7 @@ import ExternalIcon from "../ui/ExternalIcon";
 import CodexConnection from "../setup/CodexConnection";
 import RefreshSettings from "../setup/RefreshSettings";
 import NtfySettings from "./NtfySettings";
-import ClaudeAccountsSettings, { CodexAccountsSettings } from "./ClaudeAccountsSettings";
+import ClaudeAccountsSettings, { CodexAccountsSettings, type SettingsFocusRequest } from "./ClaudeAccountsSettings";
 import ResetCredits from "../quota/ResetCredits";
 import type { ClaudeAccount, ClaudeLayout, ClaudeSnapshot, CodexAccount, CodexStatus, DisplayMode, IndicatorChoice, Preferences } from "../quota/types";
 import { layoutOf } from "../quota/providers";
@@ -182,6 +182,8 @@ export default function Settings() {
   const [codexAccounts, setCodexAccounts] = useState<CodexAccount[]>([]);
   const [codexAccountsError, setCodexAccountsError] = useState<string | null>(null);
   const [codexActionError, setCodexActionError] = useState<string | null>(null);
+  // Asked to land on one provider/account (native menu, compact window).
+  const [focus, setFocus] = useState<(SettingsFocusRequest & { provider: string }) | null>(null);
   useFitWindow(root, [tab, prefs !== null].join());
   const reload = useCallback(() => setRevision((value) => value + 1), []);
 
@@ -197,6 +199,20 @@ export default function Settings() {
     const quotas = listen("quota-updated", reload).catch(() => () => {});
     return () => { void quotas.then((unlisten) => unlisten()); };
   }, [reload]);
+
+  // The backend keeps the pending request until a window takes it (a window still loading has no listener yet).
+  useEffect(() => {
+    let disposed = false;
+    const take = async () => {
+      const next = await invoke<{ provider?: string; accountId?: string | null; add?: boolean } | null>("take_settings_focus").catch(() => null);
+      if (disposed || !next || (next.provider !== "codex" && next.provider !== "claude")) return;
+      setTab("providers");
+      setFocus({ provider: next.provider, accountId: next.accountId ?? null, add: !!next.add, nonce: Date.now() });
+    };
+    void take();
+    const woken = listen("settings-focus", () => void take()).catch(() => () => {});
+    return () => { disposed = true; void woken.then((unlisten) => unlisten()); };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -307,7 +323,7 @@ export default function Settings() {
           </header>
           {!prefs.codexEnabled && <p className="prefs-state">{codexMessage}</p>}
           {prefs.codexEnabled && !codexReady && <CodexConnection status={status} onChange={reload} />}
-          <CodexAccountsSettings prefs={prefs} accounts={codexAccounts} busy={busy} onUpdate={update}
+          <CodexAccountsSettings prefs={prefs} accounts={codexAccounts} busy={busy} onUpdate={update} focus={focus?.provider === "codex" ? focus : null}
             // Reset and detail act on the account of their own row (never the primary by default).
             accessory={(account) => account.tracked && account.phase === "ready" && !account.duplicateOf
               ? <ResetCredits accountId={account.id} accountName={account.name} primary={account.primary}
@@ -334,7 +350,7 @@ export default function Settings() {
             <Switch label="Afficher le quota Fable et ses alertes" checked={prefs.fableEnabled} disabled={busy || !prefs.claudeEnabled}
               onChange={(value) => void update({ fableEnabled: value })} />
           </div>
-          <ClaudeAccountsSettings prefs={prefs} accounts={accounts} busy={busy} onUpdate={update} onAdd={(path) => profileAction("add_claude_profile", { path })}
+          <ClaudeAccountsSettings prefs={prefs} accounts={accounts} busy={busy} onUpdate={update} focus={focus?.provider === "claude" ? focus : null} onAdd={(path) => profileAction("add_claude_profile", { path })}
             // Paid extra usage is reported per account: it moves onto its row.
             accessory={(account) => prefs.claudeEnabled && account.snapshot.extraUsage?.enabled
               ? <button type="button" className="reset-chip"

@@ -58,7 +58,7 @@ const codexHomes=query.get('codexAccounts')?[
  codexHome('detecte',{name:'detecte',path:'/fixtures/.codex-detecte',phase:'ready',rows:codexRow(52,71,300),availableResets:null}),
 ]:[];
 if(query.get('codexAccounts')==='one') codexHomes.splice(1,4);
-const removedHomes=[];const removedProfiles=[];
+const removedHomes=[];const removedProfiles=[];let focusTaken=false;
 if(codexHomes.length) prefs.codexAccounts={mode:query.get('codexAccounts')==='multi'?'multi':'single',selectedId:null,profiles:[],excluded:[]};
 const codexAccounts=()=>codexHomes.map(h=>{const saved=prefs.codexAccounts?.profiles.find(p=>p.id===h.id);const multi=prefs.codexAccounts?.mode==='multi';return {...h,name:saved?.name||h.name,visible:prefs.codexEnabled&&(multi?(h.primary?prefs.codexAccounts.primaryVisible!==false:saved?.visible??true):h.id===(prefs.codexAccounts?.selectedId||'primary'))};});
 const emit = () => { for(const listener of listeners) listener(); };
@@ -79,6 +79,8 @@ export async function invoke(command, payload) {
  case 'add_claude_profile':{const back=removedProfiles.find(p=>p.path===payload.path);if(!back&&payload.path!=='/fixtures/.claude-work')throw new Error('Fixture: dossier inexistant');if(back){removedProfiles.splice(removedProfiles.indexOf(back),1);profiles.push(back);}prefs={...prefs,claudeAccounts:{...prefs.claudeAccounts,mode:'multi',excluded:(prefs.claudeAccounts.excluded||[]).filter(id=>id!==back?.id),profiles:profiles.map(({id,path,name})=>({id,path,name,visible:true}))}};emit();return structuredClone(prefs);}
  case 'untrack_claude_profile':{const gone=profiles.find(p=>p.id===payload.id);if(!gone||profiles[0]===gone)throw new Error('Fixture: compte principal');profiles.splice(profiles.indexOf(gone),1);removedProfiles.push(gone);prefs={...prefs,claudeAccounts:{...prefs.claudeAccounts,excluded:[...(prefs.claudeAccounts.excluded||[]),gone.id],profiles:prefs.claudeAccounts.profiles.filter(p=>p.id!==gone.id)}};emit();return structuredClone(prefs);}
  case 'follow_claude_profile':if(scenario==='add-error')throw new Error('« Travail » est déjà affiché. Choisissez un autre profil Claude Code.');prefs={...prefs,claudeAccounts:{...prefs.claudeAccounts,mode:'multi',profiles:profiles.map(({id,path,name})=>({id,path,name,visible:true}))}};emit();return structuredClone(prefs);
+ case 'take_settings_focus':{const f=query.get('focus');if(!f||focusTaken)return null;focusTaken=true;const [provider,accountId]=f.split('|');return {provider,accountId:accountId||null,add:query.get('focusAdd')==='1'};}
+ case 'open_settings_focus':return null;
  case 'get_codex_accounts':return structuredClone(codexAccounts());
  case 'follow_codex_profile':case 'add_codex_profile':{const back=removedHomes.find(h=>h.path===payload.path);if(back){removedHomes.splice(removedHomes.indexOf(back),1);codexHomes.push(back);}else if(payload.path)codexHomes.push(codexHome('manuel',{name:'manuel',path:payload.path}));prefs={...prefs,codexAccounts:{...prefs.codexAccounts,mode:'multi',excluded:(prefs.codexAccounts?.excluded||[]).filter(id=>id!==back?.id)}};emit();return structuredClone(prefs);}
  case 'untrack_codex_profile':{const gone=codexHomes.find(h=>h.id===payload.id);if(!gone||gone.primary)throw new Error('Fixture: compte principal');codexHomes.splice(codexHomes.indexOf(gone),1);removedHomes.push(gone);prefs={...prefs,codexAccounts:{...prefs.codexAccounts,excluded:[...(prefs.codexAccounts?.excluded||[]),gone.id],profiles:(prefs.codexAccounts?.profiles||[]).filter(p=>p.id!==payload.id)}};emit();return structuredClone(prefs);}

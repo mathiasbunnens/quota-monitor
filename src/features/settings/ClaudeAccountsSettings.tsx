@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ClaudeAccount, ClaudeAccountsPreferences, ClaudeProfile, CodexAccount, Preferences } from "../quota/types";
 import { accountState, codexAccountState, type Tone } from "../quota/accountState";
 import AddAccountFlow, { ABSOLUTE_PATH, ABSOLUTE_PATH_ERROR } from "../accounts/AddAccountFlow";
@@ -29,7 +29,12 @@ type Props<A extends ListedAccount = ClaudeAccount> = {
   accessory?: (account: A) => ReactNode;
   /** Extra content under the folder in the detail of an account (Codex: connection of the primary). */
   detailExtra?: (account: A) => ReactNode;
+  /** Pointed at from the menu bar or the compact window: unfold this account or open the add flow. `nonce` re-arms a repeated request. */
+  focus?: SettingsFocusRequest | null;
 };
+
+/** Where the Settings window was asked to land (see `settings_focus.rs`). */
+export type SettingsFocusRequest = { accountId: string | null; add: boolean; nonce: number };
 
 export { accountState, codexAccountState };
 
@@ -70,13 +75,14 @@ export function AccountName({ account, disabled, onSave }: { account: { name: st
 }
 
 export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeAccount>({ prefs, accounts, busy, onUpdate, onAdd, onChooseFolder, actionError = null,
-  provider = "Claude", stateOf, planOf, onUntrack, accessory, detailExtra }: Props<A>) {
+  provider = "Claude", stateOf, planOf, onUntrack, accessory, detailExtra, focus = null }: Props<A>) {
   const [path, setPath] = useState("");
   const [pathError, setPathError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [details, setDetails] = useState<string | null>(null);
   const pathInput = useRef<HTMLInputElement>(null);
   const addButton = useRef<HTMLButtonElement>(null);
+  const root = useRef<HTMLDivElement>(null);
   const codex = provider === "Codex";
   const key = codex ? "codexAccounts" : "claudeAccounts";
   const slug = codex ? "codex" : "claude";
@@ -127,7 +133,21 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
     if (await onAdd(path)) { setPath(""); setOpen(false); }
   };
 
-  return <div className="claude-accounts" aria-busy={busy || undefined}>
+  // Applied once per request; a request that arrives before the list has loaded waits for it.
+  const applied = useRef<number | null>(null);
+  useEffect(() => {
+    if (!focus || applied.current === focus.nonce) return;
+    if (focus.add) {
+      setOpen(true);
+      window.requestAnimationFrame(() => pathInput.current?.focus());
+    } else if (focus.accountId && listed.some((account) => account.id === focus.accountId)) {
+      setDetails(focus.accountId);
+    } else return;
+    applied.current = focus.nonce;
+    root.current?.scrollIntoView?.({ block: "nearest" });
+  }, [focus?.nonce, listed.length]);
+
+  return <div className="claude-accounts" ref={root} aria-busy={busy || undefined}>
     {several && <div className="prefs-segmented" role="radiogroup" aria-label={"Comptes " + provider + " affichés"}>
       {([["single", "Unique"], ["multi", "Multi"]] as const).map(([mode, label]) => <label key={mode} className={settings.mode === mode ? "is-selected" : ""}>
         <input type="radio" name={slug + "-mode"} checked={settings.mode === mode}

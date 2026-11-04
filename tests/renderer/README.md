@@ -92,3 +92,22 @@ file). Asserts the inline detail (folder + « Supprimer <compte> » only, no
 Supprimer on the principal), Escape/focus handling, the + button per provider,
 removal routed to `untrack_*_profile` and re-add through the +, and takes
 light/dark captures.
+
+## Accounts: Dashboard, compact window, Settings landing
+
+    node scripts/claude-renderer-fixture.mjs node_modules/.cache/qm-b
+    AFTER_SITE=node_modules/.cache/qm-b/site [BEFORE_SITE=<older site>] [SHOTS=<dir>] node scripts/dashboard-accounts-check.mjs
+    AFTER_SITE=node_modules/.cache/qm-b/site node scripts/accounts-detail-check.mjs
+    node scripts/compact-accounts-check.mjs        # models from --quota-ui-smoke (evidence/t_5b604e15/native)
+
+Same offline approach as above (mocked IPC, headless Chrome over CDP, no real
+account or folder). `dashboard-accounts-check` asserts one « Codex ↗ » / « Claude ↗ »
+header per provider, name + plan on one line, state then chevron, the chevron
+opening only that account's detail, the + routed to its own provider (folder
+chooser then `add_*_profile`) and Compacte/Classique. `compact-accounts-check`
+does the same for the standalone window on the JSON emitted by the native smoke
+and records the handlers (`usage`, `account`, `add`). `accounts-detail-check`
+also covers Réglages landing on an account or on an add flow
+(`take_settings_focus`), the single +, one « Principal » and the Codex connection
+in the primary detail. Native entries (header ↗, account submenus, + routes)
+are asserted by `--quota-ui-smoke` (`NATIVE_ACCOUNT_MENU_PASS`).
