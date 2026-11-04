@@ -33,6 +33,8 @@ html:has(.compact) body {
   background: var(--desktop-bg);
 }
 
+.compact-fit { display: flow-root; }
+
 .compact {
   max-width: 420px;
   margin: 0 auto;
@@ -173,6 +175,29 @@ html:has(.compact) body {
 
 .compact-provider__badge { font-weight: 400; }
 
+// Provider header « CODEX ↗ »: the caption of the former section, now the link to the detailed usage.
+.compact-group__head { margin: 0; padding: 2px 16px 0; height: 20px; font-size: 10px; font-weight: 600; line-height: 14px; }
+.compact .compact-group__usage {
+  display: inline-flex; align-items: center; gap: 4px; height: 16px; margin: 0 -3px; padding: 0 3px; border: 0; border-radius: 4px;
+  background: transparent; color: var(--compact-secondary); font: inherit; letter-spacing: 0; cursor: pointer;
+  .external-icon { flex: none; color: var(--compact-focus); }
+  &:hover { background: color-mix(in srgb, var(--compact-gray) 16%, transparent); }
+}
+
+// Account card header: name, plan beside it, then its state.
+.compact-group .compact-provider__head:not(.compact-provider__head--section) {
+  align-items: center; height: 24px; padding: 4px 16px 0; font-size: 11px;
+  .compact-provider__name { color: var(--compact-label); font-weight: 600; }
+  .compact-provider__state { margin-left: auto; flex: none; font-size: 10px; }
+}
+.compact-group__footer { display: flex; justify-content: flex-end; padding: 0 16px 6px; margin-top: -4px; }
+.compact .compact-group__add {
+  display: inline-grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px;
+  background: transparent; color: var(--compact-secondary); cursor: pointer;
+  svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  &:hover { background: color-mix(in srgb, var(--compact-gray) 16%, transparent); color: var(--compact-label); }
+}
+
 .compact-card {
   margin: 0 10px 10px;
   padding: 8px 10px;
@@ -238,6 +263,57 @@ html:has(.compact) body {
   text-overflow: ellipsis;
 }
 
+// Compacte card: same 60 pt base block as the menu (heading at +2, 5 h track at +24 with
+// the Unique 5 px thickness, 7 j 3 px, 2 px gap, then the reset of each window).
+.compact-pair {
+  height: 60px;
+  padding-top: 2px;
+}
+
+.compact-pair__values {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+
+  span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .is-low { color: var(--compact-red); }
+}
+
+.compact-pair__bars {
+  display: grid;
+  grid-template-rows: 5px 3px;
+  gap: 2px;
+  margin-top: 6px;
+
+  .compact-row__track { margin-top: 0; }
+}
+
+.compact-pair__resets {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  margin-top: 5px;
+  color: var(--compact-secondary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 13px;
+
+  span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+}
+
+.compact-pair__track--week {
+  height: 3px;
+  border-radius: 1.5px;
+
+  .compact-row__fill { border-radius: 1.5px; }
+}
+
 .compact-card__note {
   font-size: 11px;
   line-height: 14px;
@@ -276,3 +352,7 @@ html:has(.compact) body {
   .compact-icon { transition: none; }
   .compact-icon.is-busy svg { animation: none; }
 }
+
+.compact-pair.has-fable { height: 65px; }
+.compact-pair.has-fable .compact-pair__bars { grid-template-rows: 5px 3px 3px; }
+.compact-pair__track--fable { grid-row: 3; }

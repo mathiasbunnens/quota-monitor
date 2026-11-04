@@ -10,6 +10,7 @@ export type QuotaSnapshot = {
   confidence: "low" | "medium" | "high";
   period: QuotaPeriod;
   label?: string | null;
+  windowMinutes?: number | null;
 };
 export type CodexStatus = {
   phase: "starting" | "disabled" | "missing" | "signed_out" | "ready" | "error" | "logging_in";
@@ -27,14 +28,57 @@ export type CodexStatus = {
 
 export type IndicatorChoice = "codex" | "claude" | "both";
 export type DisplayMode = "menubar" | "app";
+/** Presentation of the visible Claude account(s), one or several (Réglages → Affichage). */
+export type ClaudeLayout = "compact" | "classic";
 export type NtfyConfig = { enabled: boolean; serverUrl: string; topic: string };
+export type ClaudeProfile = { id: string; path: string; name: string; visible: boolean };
+export type ClaudeAccountsPreferences = {
+  mode: "single" | "multi";
+  selectedId: string | null;
+  profiles: ClaudeProfile[];
+  /** Detected folders the user removed: not added back by detection (absent in old preferences). */
+  excluded?: string[];
+};
+export type ClaudeAccount = ClaudeProfile & {
+  primary: boolean;
+  available: boolean;
+  refreshing: boolean;
+  snapshot: ClaudeSnapshot;
+};
+/** One Codex environment (CODEX_HOME folder) from `get_codex_accounts`.
+ *  `visible` already applies Unique/Multi and the enable switch. Never a
+ *  token: `duplicateOf` only names an earlier home returning the same account. */
+export type CodexAccount = ClaudeProfile & {
+  primary: boolean;
+  /** Followed (collected): detected `~/.codex-*` folders are followed automatically. */
+  tracked: boolean;
+  available: boolean;
+  refreshing: boolean;
+  phase: CodexStatus["phase"] | "unavailable";
+  message: string;
+  planType: string | null;
+  lastChecked: string | null;
+  rows: QuotaSnapshot[];
+  duplicateOf: string | null;
+  /** Earned resets of this account only (null: unknown or not connected). */
+  availableResets: number | null;
+};
 export type Preferences = {
+  claudeAccounts: ClaudeAccountsPreferences;
+  /** Codex homes followed besides the primary. Absent in older files: Unique, primary only. */
+  codexAccounts?: ClaudeAccountsPreferences;
   codexEnabled: boolean;
   claudeEnabled: boolean;
   fableEnabled: boolean;
   indicator: IndicatorChoice;
   displayMode: DisplayMode;
   ntfy: NtfyConfig;
+  /** Single Compacte/Classique choice for Claude and Codex. Absent in older
+   *  files: see `layoutOf` (same migration as Rust). */
+  layout?: ClaudeLayout;
+  /** Legacy keys, kept in sync by Rust for older builds; read-only here. */
+  claudeLayout?: ClaudeLayout;
+  codexLayout?: ClaudeLayout;
 };
 
 export type ClaudeMetric = {

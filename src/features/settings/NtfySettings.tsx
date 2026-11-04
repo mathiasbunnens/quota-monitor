@@ -23,7 +23,7 @@ export default function NtfySettings({ config, onSave }: {
     finally { setBusy(false); }
   };
   return <section className="prefs-group" aria-labelledby="ntfy-heading">
-    <h2 id="ntfy-heading">Alertes téléphone · ntfy</h2>
+    <h2 id="ntfy-heading" className="prefs-group__title">Alertes téléphone · ntfy</h2>
     <p>Codex et Claude : alerte au retour à 100 % restant. L’application doit rester ouverte et connectée.</p>
     <fieldset disabled={busy} className="ntfy-fields">
       <label><input type="checkbox" checked={draft.enabled}

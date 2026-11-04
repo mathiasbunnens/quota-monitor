@@ -1,6 +1,7 @@
 // Pure layout of the menu-bar panel for the standalone window. No IPC here:
 // CompactWindow supplies the model and the real handlers (tested with mocks).
-import type { CompactFill, CompactPanelModel, CompactRow, CompactUpdate, GaugeColor } from "./types";
+import type { ReactNode } from "react";
+import type { CompactFill, CompactPanelModel, CompactProvider, CompactRow, CompactUpdate, GaugeColor, ProviderKind } from "./types";
 
 export type UpdateIndicator = {
   state: "idle" | "busy" | "available" | "ready" | "error";
@@ -55,6 +56,71 @@ function RowLabel({ row }: { row: CompactRow }) {
   return <span className="compact-row__label">{row.label}</span>;
 }
 
+/** Same text as the native compact_heading: countdown · value (+ Fable name). */
+export function pairHeading(row: CompactRow): string {
+  const text = row.countdown && row.countdown !== "—" ? `${row.countdown} · ${row.value}` : row.value;
+  return row.model ? `Fable · ${text}` : text;
+}
+
+/** Same short reset line as the native paired block: « Réinit. à 14h30 ». */
+export function pairReset(row: CompactRow): string {
+  return row.reset.replace("Réinitialisation", "Réinit.");
+}
+
+/** Compacte block: 5 h + 7 j and an optional third fine Fable track. */
+function Pair({ rows, fable }: { rows: CompactRow[]; fable?: CompactRow }) {
+  const windows = ["Limite 5 heures", "Limite hebdomadaire"];
+  const fableDescription = fable ? `${fable.label} · ${fable.value}${fable.remaining === null ? "" : " restants"} · ${fable.reset}` : undefined;
+  return <div className={"compact-pair" + (fable ? " has-fable" : "")}>
+    <div className="compact-pair__values">
+      {rows.map((row, index) => <span key={index} className={row.low ? "is-low" : undefined}
+        style={{ marginLeft: row.pairSlot === 1 ? "auto" : undefined }}
+        title={`${windows[row.pairSlot ?? index]} · ${row.label} · ${row.reset}`}>{pairHeading(row)}</span>)}
+    </div>
+    <div className="compact-pair__bars">
+      {rows.map((row, index) => {
+        const slot = row.pairSlot ?? index;
+        const week = slot === 1;
+        // A fill narrower than its own track height only shows the track.
+        const visible = row.fill.ratio * 276 >= (week ? 3 : 5);
+        return <div key={index} className={"compact-row__track compact-pair__track--" + (week ? "week" : "short")}
+          style={{ gridRow: slot + 1 }}
+          role="meter" aria-label={`${windows[slot]} : ${row.label} · ${row.remaining === null ? row.value : `${row.value} restant`}`}
+          aria-valuemin={0} aria-valuemax={100} aria-valuenow={row.remaining ?? undefined}
+          aria-valuetext={row.remaining === null ? row.value : `${row.value} restant`}>
+          {visible && <span className="compact-row__fill"
+            style={{ width: `${row.fill.ratio * 100}%`, background: fillColor(row.fill, row.model) }} />}
+        </div>;
+      })}
+      {fable && <div className="compact-row__track compact-pair__track--week compact-pair__track--fable"
+        role="meter" aria-label={fableDescription} aria-valuemin={0} aria-valuemax={100}
+        aria-valuenow={fable.remaining ?? undefined} aria-valuetext={fable.value} title={fableDescription}>
+        {fable.fill.ratio * 276 >= 3 && <span className="compact-row__fill" style={{ width: `${fable.fill.ratio * 100}%`, background: fillColor(fable.fill, true) }} />}
+      </div>}
+    </div>
+    <div className="compact-pair__resets">
+      {rows.map((row, index) => <span key={index} style={{ marginLeft: row.pairSlot === 1 ? "auto" : undefined }}
+        title={`${windows[row.pairSlot ?? index]} · ${row.label} · ${row.reset}`}>{pairReset(row)}</span>)}
+    </div>
+  </div>;
+}
+
+function Row({ row }: { row: CompactRow }) {
+  return <div className="compact-row">
+    <div className="compact-row__line">
+      <RowLabel row={row} />
+      <span className={"compact-row__value" + (row.low ? " is-low" : "")}>{row.value}</span>
+    </div>
+    <div className="compact-row__track" role="meter" aria-label={`${row.label} : quota restant`}
+      aria-valuemin={0} aria-valuemax={100} aria-valuenow={row.remaining ?? undefined}
+      aria-valuetext={row.remaining === null ? row.value : `${row.value} restant`}>
+      {row.fill.visible && <span className="compact-row__fill"
+        style={{ width: `${row.fill.ratio * 100}%`, background: fillColor(row.fill, row.model) }} />}
+    </div>
+    <span className="compact-row__reset">{row.reset}</span>
+  </div>;
+}
+
 function GearIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
     <circle cx="12" cy="12" r="3" />
@@ -69,6 +135,28 @@ function UpdateIcon() {
   </svg>;
 }
 
+const PROVIDER_TITLES: Record<ProviderKind, string> = { codex: "Codex", claude: "Claude" };
+
+/** Cards grouped under their provider, in model order; an enabled provider
+ *  without a card still gets its (empty) group for its header and its +. */
+export type CompactGroup = { kind: ProviderKind; providers: CompactProvider[]; addable: boolean };
+export function compactGroups(panel: CompactPanelModel): CompactGroup[] {
+  const groups: CompactGroup[] = [];
+  const addable = panel.addable ?? [];
+  for (const provider of panel.providers) {
+    if (!provider.kind) continue;
+    let group = groups.find((item) => item.kind === provider.kind);
+    if (!group) { group = { kind: provider.kind, providers: [], addable: addable.includes(provider.kind) }; groups.push(group); }
+    group.providers.push(provider);
+  }
+  for (const kind of addable) if (!groups.some((group) => group.kind === kind)) groups.push({ kind, providers: [], addable: true });
+  return groups;
+}
+
+function PlusIcon() {
+  return <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 3.5v9M3.5 8h9" /></svg>;
+}
+
 export type CompactPanelProps = {
   panel: CompactPanelModel | null;
   error: string | null;
@@ -76,9 +164,37 @@ export type CompactPanelProps = {
   onSettings: () => void;
   onUpdate: () => void;
   onConnect: () => void;
+  /** « CODEX ↗ »: detailed usage of the provider. */
+  onUsage?: (kind: ProviderKind) => void;
+  /** + of a provider: its add-account flow (Réglages → Fournisseurs). */
+  onAdd?: (kind: ProviderKind) => void;
+  /** The app's external arrow (ExternalIcon), passed in to keep this view import-free. */
+  usageIcon?: ReactNode;
 };
 
-export function CompactPanel({ panel, error, pending, onSettings, onUpdate, onConnect }: CompactPanelProps) {
+function Card({ provider }: { provider: CompactProvider }) {
+  const pair = pairRowsOf(provider);
+  const fable = pair.length ? provider.rows.find((row) => row.model && row.label.endsWith(" Fable")) : undefined;
+  return <>
+    {pair.length > 0 && <Pair rows={pair} fable={fable} />}
+    {provider.rows.filter((row) => !pair.includes(row) && row !== fable)
+      .map((row, index) => <Row key={`${row.label}-${index}`} row={row} />)}
+    {provider.note && <p className={`compact-card__note compact-tone--${provider.note.tone}`
+      + (provider.rows.length ? " has-rows" : "")}>{provider.note.text}</p>}
+  </>;
+}
+
+function pairRowsOf(provider: CompactProvider) {
+  if (!provider.compact) return [];
+  // Compatibility for historical Claude fixture models without pairSlot.
+  if (provider.name !== "Codex" && provider.rows.every((r) => r.pairSlot === undefined)) {
+    const windows = provider.rows.filter((r) => !r.model).slice(0, 2);
+    return windows.length >= 2 ? windows : [];
+  }
+  return provider.rows.filter((r) => r.pairSlot === 0 || r.pairSlot === 1).sort((a, b) => a.pairSlot! - b.pairSlot!);
+}
+
+export function CompactPanel({ panel, error, pending, onSettings, onUpdate, onConnect, onUsage, onAdd, usageIcon }: CompactPanelProps) {
   const update = updateIndicator(panel?.update ?? null);
   const updateTitle = update.state === "idle"
     ? "Vérifier les mises à jour…"
@@ -112,29 +228,38 @@ export function CompactPanel({ panel, error, pending, onSettings, onUpdate, onCo
       </div>
     </header>
     {error && <p className="compact__alert" role="alert">{error}</p>}
-    {panel?.providers.map((provider) => <section key={provider.name} className="compact-provider"
+    {panel && compactGroups(panel).map((group) => {
+      const title = PROVIDER_TITLES[group.kind];
+      return <section key={group.kind} className="compact-group" aria-label={title}>
+        <h2 className="compact-group__head">
+          <button type="button" className="compact-group__usage" aria-label={`${title} : usage détaillé`} title="Usage détaillé"
+            onClick={() => onUsage?.(group.kind)}>{title.toUpperCase()}{usageIcon ?? " ↗"}</button>
+        </h2>
+        {group.providers.map((provider, index) => {
+          const name = provider.accountName ?? provider.section;
+          return <section key={`${provider.name}-${index}`} className="compact-provider"
+            aria-label={provider.badge ? `${provider.name} (${provider.badge})` : provider.name}>
+            <div className="compact-provider__head">
+              <span className="compact-provider__name">{name}</span>
+              {provider.badge && <span className="compact-provider__badge">{provider.badge}</span>}
+              {provider.state && <span className={`compact-provider__state compact-tone--${provider.state.tone}`}>{provider.state.label}</span>}
+            </div>
+            <div className="compact-card"><Card provider={provider} /></div>
+          </section>;
+        })}
+        {group.addable && <div className="compact-group__footer">
+          <button type="button" className="compact-group__add" aria-label={`Ajouter un compte ${title}`} title={`Ajouter un compte ${title}`}
+            onClick={() => onAdd?.(group.kind)}><PlusIcon /></button>
+        </div>}
+      </section>;
+    })}
+    {panel?.providers.filter((provider) => !provider.kind).map((provider, providerIndex) => <section key={`${provider.name}-${providerIndex}`} className="compact-provider"
       aria-label={provider.badge ? `${provider.name} (${provider.badge})` : provider.name}>
-      <div className="compact-provider__head" aria-hidden="true">
+      <div className="compact-provider__head compact-provider__head--section" aria-hidden="true">
         <span>{provider.section}</span>
         {provider.badge && <span className="compact-provider__badge">{provider.badge}</span>}
       </div>
-      <div className="compact-card">
-        {provider.rows.map((row, index) => <div key={`${row.label}-${index}`} className="compact-row">
-          <div className="compact-row__line">
-            <RowLabel row={row} />
-            <span className={"compact-row__value" + (row.low ? " is-low" : "")}>{row.value}</span>
-          </div>
-          <div className="compact-row__track" role="meter" aria-label={`${row.label} : quota restant`}
-            aria-valuemin={0} aria-valuemax={100} aria-valuenow={row.remaining ?? undefined}
-            aria-valuetext={row.remaining === null ? row.value : `${row.value} restant`}>
-            {row.fill.visible && <span className="compact-row__fill"
-              style={{ width: `${row.fill.ratio * 100}%`, background: fillColor(row.fill, row.model) }} />}
-          </div>
-          <span className="compact-row__reset">{row.reset}</span>
-        </div>)}
-        {provider.note && <p className={`compact-card__note compact-tone--${provider.note.tone}`
-          + (provider.rows.length ? " has-rows" : "")}>{provider.note.text}</p>}
-      </div>
+      <div className="compact-card"><Card provider={provider} /></div>
     </section>)}
     {panel?.connection && <div className="compact__connect">
       <button type="button" onClick={onConnect} disabled={panel.connection.loggingIn || pending === "connect"}>

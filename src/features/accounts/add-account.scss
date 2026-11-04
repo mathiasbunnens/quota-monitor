@@ -1,0 +1,37 @@
+// The add-account flow shared by Settings → Fournisseurs and the Dashboard.
+// Override the general .prefs input rule (margin: 6px 0; width: 100%).
+// Both hosts use the same bounded inline row; long paths must not resize it.
+.add-account__flow .add-account__manual input:not([type=checkbox]):not([type=radio]) {
+  box-sizing: border-box; width: 100%; height: 32px; margin: 0; padding: 6px 8px;
+}
+.add-account__flow .add-account__manual .has-chooser input:not([type=checkbox]):not([type=radio]) {
+  padding-right: 36px;
+}
+
+.add-account {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 8px; margin-top: 8px;
+  &__glyph { flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  .dashboard &__button {
+    display: inline-grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px;
+    background: transparent; box-shadow: none; color: var(--desktop-muted);
+    &:hover:not(:disabled) { background: color-mix(in srgb, var(--desktop-ink) 7%, transparent); color: var(--desktop-ink); }
+    &[aria-expanded="true"] { color: var(--desktop-accent); }
+  }
+  &__flow {
+    display: flex; flex-direction: column; align-items: stretch; gap: 8px; width: 100%; box-sizing: border-box; padding: 10px;
+    border: 1px solid var(--desktop-border); border-radius: 10px; background: color-mix(in srgb, var(--desktop-ink) 3%, transparent);
+  }
+  &__path { position: relative; flex: 1; min-width: 0; height: 32px; }
+  &__manual &__choose { position: absolute; right: 1px; top: 1px; display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 7px; background: transparent; box-shadow: none; color: inherit; }
+  &__manual button { height: 32px; box-sizing: border-box; }
+  &__manual button:focus-visible { outline: 2px solid var(--desktop-accent); outline-offset: 2px; }
+  &__manual {
+    display: flex; gap: 8px; align-items: center;
+    input {
+      flex: 1; min-width: 0; margin: 0; padding: 6px 8px; font: inherit; font-size: 12px; color: inherit;
+      border: 1px solid var(--desktop-border); border-radius: 8px; background: var(--desktop-card);
+    }
+    button { flex: none; }
+  }
+  &__error { margin: 0; font-size: 11px; color: #e5484d; }
+}

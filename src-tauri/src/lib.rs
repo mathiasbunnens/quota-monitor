@@ -1,11 +1,20 @@
+#[cfg(target_os = "macos")]
+mod account_menu;
 mod activity;
 mod claude;
+mod claude_accounts;
 mod claude_cli;
 mod codex;
+mod codex_accounts;
 mod display_mode;
 mod indicator;
+#[cfg(target_os = "macos")]
+mod menu_fixture;
+#[cfg(target_os = "macos")]
+pub use menu_fixture::menu_tracking_fixture;
 mod ntfy;
 mod prefs;
+mod settings_focus;
 #[cfg(target_os = "macos")]
 mod settings_smoke;
 #[cfg(target_os = "macos")]
@@ -438,12 +447,22 @@ define_class!(
         #[unsafe(method(menuWillOpen:))]
         fn menu_will_open(&self, _menu: &NSMenu) {
             MENU_OPEN.store(true, Ordering::Release);
-            if let Some(app) = APP_HANDLE.get() { request_quota_refresh(app.clone()); }
+            if let Some(app) = APP_HANDLE.get() {
+                // Countdowns are computed at render time: redraw on open.
+                render_native_menu(app);
+                request_quota_refresh(app.clone());
+            }
         }
 
         #[unsafe(method(menuDidClose:))]
         fn menu_did_close(&self, _menu: &NSMenu) {
             MENU_OPEN.store(false, Ordering::Release);
+            // Catch up on a panel resize deferred while an action was highlighted.
+            if PANEL_DEFERRED.swap(false, Ordering::AcqRel) {
+                if let Some(app) = APP_HANDLE.get() {
+                    render_native_menu(app);
+                }
+            }
         }
     }
 
@@ -659,6 +678,62 @@ fn fit_settings_window(window: tauri::WebviewWindow, height: f64) -> Result<(), 
         .map_err(|e| e.to_string())
 }
 
+/// Smallest standalone window height (logical px, title bar included).
+const MAIN_WINDOW_MIN_HEIGHT: f64 = 160.0;
+
+/// Fits the standalone window height to the panel content (logical px),
+/// bounded by the visible screen. Width is untouched; the top edge stays put.
+#[tauri::command]
+fn fit_main_window(
+    window: tauri::WebviewWindow,
+    height: f64,
+    viewport_height: f64,
+) -> Result<(), String> {
+    if window.label() != "main"
+        || !height.is_finite()
+        || !viewport_height.is_finite()
+        || viewport_height <= 0.0
+    {
+        return Ok(());
+    }
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let inner = window
+        .inner_size()
+        .map_err(|e| e.to_string())?
+        .to_logical::<f64>(scale);
+    let monitor = window.current_monitor().map_err(|e| e.to_string())?;
+    let max = monitor
+        .as_ref()
+        .map(|m| m.work_area().size.to_logical::<f64>(scale).height - 40.0)
+        .unwrap_or(900.0)
+        .max(MAIN_WINDOW_MIN_HEIGHT);
+    let wanted = update_window_height(height, viewport_height, inner.height, max)
+        .max(MAIN_WINDOW_MIN_HEIGHT);
+    if (inner.height - wanted).abs() <= 1.0 {
+        return Ok(());
+    }
+    let before = window.outer_position().map_err(|e| e.to_string())?;
+    window
+        .set_size(tauri::LogicalSize::new(inner.width, wanted))
+        .map_err(|e| e.to_string())?;
+    // Keep the top edge where it was (AppKit resizes from the bottom-left),
+    // then keep the window on the visible area if it now overflows.
+    let mut y = before.y;
+    if let Some(monitor) = monitor {
+        let area = monitor.work_area();
+        let size = window.outer_size().map_err(|e| e.to_string())?;
+        let bottom = area.position.y + area.size.height as i32;
+        y = y.min(bottom - size.height as i32).max(area.position.y);
+    }
+    let after = window.outer_position().map_err(|e| e.to_string())?;
+    if after.x != before.x || after.y != y {
+        window
+            .set_position(tauri::PhysicalPosition::new(before.x, y))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Fits intrinsic updater content, bounded by the monitor; overflow scrolls.
 #[tauri::command]
 fn fit_update_window(
@@ -807,18 +882,38 @@ enum Tone {
 #[cfg(target_os = "macos")]
 #[derive(Clone, Debug, PartialEq)]
 struct PanelRow {
+    pair_slot: Option<usize>,
     /// Model-scoped row (Fable): normal-size model name matching the fill, full opacity.
     model: bool,
     label: String,
     remaining: Option<u32>,
     value: String,
     reset: String,
+    /// Time left before the reset ("3h30", "42 min", "3j 8h"), computed from
+    /// the structured reset and the local clock; "—" when absent or passed.
+    countdown: String,
+}
+
+/// Provider, account id and connection state of a card (display only).
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq)]
+struct PanelAccount {
+    /// "codex" | "claude"
+    kind: &'static str,
+    id: String,
+    name: String,
+    state: String,
+    tone: Tone,
 }
 
 #[cfg(target_os = "macos")]
 #[derive(Clone, Debug, PartialEq)]
 struct PanelProvider {
-    name: &'static str,
+    /// Which account this card shows (menu/compact routing); `None` for fixtures.
+    account: Option<PanelAccount>,
+    name: String,
+    /// Multi-account card: 5 h and 7 j paired with visible countdowns.
+    compact: bool,
     badge: Option<String>,
     rows: Vec<PanelRow>,
     note: Option<(String, Tone)>,
@@ -880,6 +975,77 @@ fn limit_label(reset_at: Option<&str>, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn codex_compact_countdown_uses_real_reset() {
+    let reset = (Local::now() + chrono::Duration::minutes(90)).to_rfc3339();
+    let rows = [demo_payload(
+        "Limite 5 heures",
+        "five-hour",
+        63,
+        &reset,
+        Some(300),
+    )];
+    let panel = codex_panel(&rows, "ready", "", Some("plus".into()));
+    assert_eq!(panel.rows[0].countdown, "1h30");
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn codex_layout_pairs_real_same_bucket_and_preserves_extra_windows() {
+    let result = serde_json::json!({"rateLimitsByLimitId":{
+        "codex":{"primary":{"usedPercent":100,"windowDurationMins":300},"secondary":{"usedPercent":15,"windowDurationMins":10080}},
+        "review":{"secondary":{"usedPercent":73,"windowDurationMins":10080}}
+    }});
+    let rows = codex::normalize(&result).unwrap();
+    let p = codex_presentation(&rows, "ready", "", Some("plus".into()), "compact");
+    assert!(p.compact);
+    assert_eq!(paired_panel_rows(&p).len(), 2);
+    assert_eq!(p.rows.len(), 3);
+    assert_eq!(p.rows[0].remaining, Some(0));
+    let classic = codex_presentation(&rows, "ready", "", None, "classic");
+    assert!(!classic.compact);
+    assert_eq!(
+        card_height(&classic) - card_height(&p),
+        2.0 * PANEL_ROW_HEIGHT - PAIR_BLOCK_HEIGHT
+    );
+    let weekly = codex_presentation(&rows[1..], "ready", "", None, "compact");
+    assert_eq!(paired_panel_rows(&weekly).len(), 1);
+    assert_eq!(paired_panel_rows(&weekly)[0].pair_slot, Some(1));
+    let model = PanelModel {
+        addable: Vec::new(),
+        header: panel_header(&[p.clone()], None),
+        providers: vec![p],
+        connection: None,
+    };
+    let compact = compact_panel(&model, "fixture", None);
+    assert_eq!(
+        compact.providers[0]
+            .rows
+            .iter()
+            .filter(|r| r.pair_slot.is_some())
+            .count(),
+        2
+    );
+    assert_eq!(compact.providers[0].rows.len(), 3);
+    for phase in ["ready", "error", "starting"] {
+        let empty = codex_presentation(&[], phase, "", None, "compact");
+        assert!(empty.rows.is_empty());
+        assert!(paired_panel_rows(&empty).is_empty());
+        assert!(empty.note.is_some());
+    }
+    let crossed = codex_presentation(
+        &[rows[0].clone(), rows[2].clone()],
+        "error",
+        "Lecture impossible",
+        None,
+        "compact",
+    );
+    assert_eq!(paired_panel_rows(&crossed).len(), 1);
+    assert_eq!(crossed.rows.len(), 2);
+    assert_eq!(crossed.note.unwrap().1, Tone::Error);
+}
+
 #[cfg(target_os = "macos")]
 fn codex_panel(
     rows: &[QuotaPayload],
@@ -887,6 +1053,13 @@ fn codex_panel(
     message: &str,
     plan: Option<String>,
 ) -> PanelProvider {
+    let windows: Vec<_> = rows.iter().filter_map(codex_window).collect();
+    let bucket = windows
+        .iter()
+        .find(|(bucket, _)| bucket.starts_with("codex:codex:"))
+        .or_else(|| windows.first())
+        .map(|(bucket, _)| bucket);
+    let mut slots = [false; 2];
     // Same vocabulary and order for every provider: 5 heures, hebdomadaire, réserve.
     let rank = |p: &QuotaPayload| -> u8 {
         if is_reserve(p) {
@@ -907,6 +1080,14 @@ fn codex_panel(
             let short = rank(p) == 0;
             let remaining = p.remaining.min(100);
             PanelRow {
+                pair_slot: codex_window(p).and_then(|(key, slot)| {
+                    if Some(&key) == bucket && !slots[slot] {
+                        slots[slot] = true;
+                        Some(slot)
+                    } else {
+                        None
+                    }
+                }),
                 model: false,
                 label: match rank(p) {
                     0 => limit_label(Some(&p.reset_at), "Limite 5 heures"),
@@ -916,6 +1097,7 @@ fn codex_panel(
                 },
                 remaining: Some(remaining),
                 value: value_text(Some(remaining), false, ""),
+                countdown: reset_countdown(Some(&p.reset_at), Local::now().timestamp()),
                 reset: reset_phrase(&p.reset_at, short)
                     .or_else(|| {
                         p.reset_label
@@ -938,10 +1120,71 @@ fn codex_panel(
         _ => Some((non_empty(message, "Connexion à Codex…"), Tone::Warning)),
     };
     PanelProvider {
-        name: "Codex",
+        account: None,
+        name: "Codex".into(),
+        compact: false,
         badge: plan,
         rows,
         note,
+    }
+}
+
+/// Only windows from one rate-limit bucket/model enter the paired block.
+/// Extra buckets and unknown durations stay as complete historical rows.
+#[cfg(target_os = "macos")]
+fn codex_window(p: &QuotaPayload) -> Option<(String, usize)> {
+    if is_reserve(p) {
+        return None;
+    }
+    if p.period == "five-hour" || p.period == "weekly" {
+        return Some(("legacy".into(), usize::from(p.period == "weekly")));
+    }
+    let (bucket, slot) = p.period.rsplit_once(':')?;
+    if !bucket.starts_with("codex:") || !matches!(slot, "primary" | "secondary") {
+        return None;
+    }
+    let index = match p.window_minutes {
+        Some(300) => 0,
+        Some(10080) => 1,
+        _ => return None,
+    };
+    Some((format!("{bucket}:{}", p.model), index))
+}
+
+#[cfg(target_os = "macos")]
+fn codex_presentation(
+    rows: &[QuotaPayload],
+    phase: &str,
+    message: &str,
+    plan: Option<String>,
+    layout: &str,
+) -> PanelProvider {
+    let mut panel = codex_panel(rows, phase, message, plan);
+    panel.compact = layout == "compact";
+    panel
+}
+
+#[cfg(target_os = "macos")]
+fn paired_panel_rows(provider: &PanelProvider) -> Vec<&PanelRow> {
+    if !provider.compact {
+        return vec![];
+    }
+    if provider.name == "Codex" || provider.name.starts_with("Codex · ") {
+        let mut rows: Vec<_> = provider
+            .rows
+            .iter()
+            .filter(|r| r.pair_slot.is_some())
+            .collect();
+        rows.sort_by_key(|r| r.pair_slot);
+        rows
+    } else {
+        // Claude: the 5 h and 7 j windows (the Fable row never takes a slot).
+        let windows: Vec<_> = provider.rows.iter().filter(|r| !r.model).take(2).collect();
+        if windows.len() >= 2 {
+            windows
+        } else {
+            vec![]
+        }
     }
 }
 
@@ -960,6 +1203,7 @@ fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
                 "—"
             };
             PanelRow {
+                pair_slot: None,
                 model: m.id == "claude:weekly_fable",
                 label: if m.id == "claude:weekly_fable" {
                     "Limite Fable".into()
@@ -970,6 +1214,7 @@ fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
                 },
                 remaining,
                 value: value_text(remaining, m.exhausted, missing),
+                countdown: reset_countdown(m.reset_at.as_deref(), Local::now().timestamp()),
                 reset: m
                     .reset_at
                     .as_deref()
@@ -998,10 +1243,146 @@ fn claude_panel(snapshot: &claude::ClaudeSnapshot) -> PanelProvider {
         _ => None,
     };
     PanelProvider {
-        name: "Claude",
+        account: None,
+        name: "Claude".into(),
+        compact: false,
         badge: snapshot.plan_type.clone(),
         rows,
         note,
+    }
+}
+
+/// `classic`: Réglages → Affichage « Classique » = the historical separated
+/// rows (5 h, hebdo, Fable, resets, percentages); otherwise « Compacte » pairs
+/// the 5 h / 7 j bars. The choice applies to one or several visible accounts
+/// (Unique, Multi, one visible or more). Never an aggregate. A sole card keeps
+/// the plain "Claude" name and no added note.
+#[cfg(target_os = "macos")]
+fn claude_account_panels(
+    accounts: &[claude::AccountSnapshot],
+    classic: bool,
+) -> Vec<PanelProvider> {
+    let visible: Vec<_> = accounts.iter().filter(|a| a.profile.visible).collect();
+    let several = visible.len() > 1;
+    visible
+        .into_iter()
+        .map(|a| {
+            let mut panel = claude_panel(&a.snapshot);
+            panel.compact = !classic;
+            let (state, tone) = account_menu::claude_state(a);
+            panel.account = Some(PanelAccount {
+                kind: "claude",
+                id: a.profile.id.clone(),
+                name: a.profile.name.clone(),
+                state,
+                tone,
+            });
+            if !several {
+                return panel;
+            }
+            panel.name = format!("Claude · {}", a.profile.name);
+            if let Some(extra) = &a.snapshot.extra_usage {
+                if extra.enabled {
+                    let extra_text = if extra.limit_reached {
+                        "Usage supplémentaire : plafond atteint"
+                    } else {
+                        "Usage supplémentaire activé"
+                    };
+                    panel.note = Some(match panel.note {
+                        Some((text, tone)) => (format!("{text} · {extra_text}"), tone),
+                        None => (
+                            extra_text.into(),
+                            if extra.limit_reached {
+                                Tone::Warning
+                            } else {
+                                Tone::Neutral
+                            },
+                        ),
+                    });
+                }
+            }
+            panel
+        })
+        .collect()
+}
+#[cfg(target_os = "macos")]
+fn compact_tracks() -> ((f64, f64), (f64, f64)) {
+    (
+        (24.0, PANEL_TRACK_HEIGHT),
+        (24.0 + PANEL_TRACK_HEIGHT + 2.0, 3.0),
+    )
+}
+
+/// Paired 5 h / 7 j block with room for resets; Fable adds only a fine track.
+#[cfg(target_os = "macos")]
+const PAIR_BLOCK_HEIGHT: f64 = 60.0;
+
+#[cfg(target_os = "macos")]
+fn compact_fable(provider: &PanelProvider) -> Option<&PanelRow> {
+    if paired_panel_rows(provider).is_empty() {
+        return None;
+    }
+    provider
+        .rows
+        .iter()
+        .find(|row| row.model && row.label.ends_with(" Fable"))
+}
+
+#[cfg(target_os = "macos")]
+fn pair_block_height(provider: &PanelProvider) -> f64 {
+    PAIR_BLOCK_HEIGHT
+        + if compact_fable(provider).is_some() {
+            5.0
+        } else {
+            0.0
+        }
+}
+
+/// Short reset line of a paired window: « Réinit. à 14h30 » / « Réinit. le 03/11 à 19h00 ».
+#[cfg(target_os = "macos")]
+fn compact_reset(reset: &str) -> String {
+    reset.replacen("Réinitialisation", "Réinit.", 1)
+}
+
+/// Track/fill thickness of a Unique quota row, measured on v3.1.0 (5 pt,
+/// radius 2.5 in make_panel_view).
+#[cfg(target_os = "macos")]
+const PANEL_TRACK_HEIGHT: f64 = 5.0;
+
+/// Same rounded-up format as `remaining_span`; "—" for absent, invalid or
+/// passed resets (never negative, never invented).
+#[cfg(target_os = "macos")]
+fn reset_countdown(reset_at: Option<&str>, now: i64) -> String {
+    reset_at
+        .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| at.timestamp() - now)
+        .filter(|left| *left > 0)
+        .map(remaining_span)
+        .unwrap_or_else(|| "—".into())
+}
+
+/// Visible compact text: live countdown + provider value ("27 %", "Épuisé",
+/// missing text). Without a usable reset, only the value is shown.
+#[cfg(target_os = "macos")]
+fn compact_heading(row: &PanelRow) -> String {
+    let text = if row.countdown == "—" {
+        row.value.clone()
+    } else {
+        format!("{} · {}", row.countdown, row.value)
+    };
+    if row.model {
+        format!("Fable · {text}")
+    } else {
+        text
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn compact_value(row: &PanelRow) -> String {
+    match row.remaining {
+        Some(0) => "0 % · épuisé".into(),
+        Some(n) => format!("{n} % restants"),
+        None => row.value.clone(),
     }
 }
 
@@ -1093,11 +1474,13 @@ struct CompactFill {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CompactRow {
+    pair_slot: Option<usize>,
     model: bool,
     label: String,
     remaining: Option<u32>,
     value: String,
     reset: String,
+    countdown: String,
     low: bool,
     fill: CompactFill,
 }
@@ -1113,9 +1496,24 @@ struct CompactNote {
 #[cfg(target_os = "macos")]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CompactState {
+    label: String,
+    tone: &'static str,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CompactProvider {
-    name: &'static str,
+    /// "codex" | "claude": groups the cards under one provider header.
+    kind: &'static str,
+    /// Name of that account (the card title under the provider header).
+    account_name: Option<String>,
+    state: Option<CompactState>,
+    name: String,
     section: String,
+    /// Same Multi pairing as the native menu card.
+    compact: bool,
     badge: Option<String>,
     rows: Vec<CompactRow>,
     note: Option<CompactNote>,
@@ -1145,6 +1543,8 @@ struct CompactConnection {
 struct CompactPanel {
     header: CompactHeader,
     providers: Vec<CompactProvider>,
+    /// Enabled providers, in order: each gets its header (↗) and its +.
+    addable: Vec<&'static str>,
     connection: Option<CompactConnection>,
     version: String,
     /// Last updater state; `None` while no check has reported anything.
@@ -1174,11 +1574,13 @@ fn connection_label(logging_in: bool) -> &'static str {
 fn compact_row(row: &PanelRow) -> CompactRow {
     let (from, to, fraction) = quota_color_transition(row.remaining.unwrap_or(0));
     CompactRow {
+        pair_slot: row.pair_slot,
         model: row.model,
         label: row.label.clone(),
         remaining: row.remaining,
         value: row.value.clone(),
         reset: row.reset.clone(),
+        countdown: row.countdown.clone(),
         low: row_is_low(row),
         fill: CompactFill {
             from,
@@ -1203,16 +1605,44 @@ fn compact_panel(model: &PanelModel, version: &str, update: Option<UpdateStatus>
             .providers
             .iter()
             .map(|p| CompactProvider {
-                name: p.name,
+                kind: p.account.as_ref().map_or_else(
+                    || {
+                        if p.name.starts_with("Claude") {
+                            "claude"
+                        } else {
+                            "codex"
+                        }
+                    },
+                    |a| a.kind,
+                ),
+                account_name: p.account.as_ref().map(|a| a.name.clone()),
+                state: p.account.as_ref().map(|a| CompactState {
+                    label: a.state.clone(),
+                    tone: tone_name(a.tone),
+                }),
+                name: p.name.clone(),
                 section: p.name.to_uppercase(),
+                compact: p.compact,
                 badge: p.badge.as_deref().map(pretty_badge),
-                rows: p.rows.iter().map(compact_row).collect(),
+                rows: p
+                    .rows
+                    .iter()
+                    .map(|r| {
+                        let mut row = compact_row(r);
+                        row.pair_slot = paired_panel_rows(p)
+                            .iter()
+                            .position(|paired| std::ptr::eq(*paired, r))
+                            .map(|index| r.pair_slot.unwrap_or(index));
+                        row
+                    })
+                    .collect(),
                 note: p.note.as_ref().map(|(text, tone)| CompactNote {
                     text: text.clone(),
                     tone: tone_name(*tone),
                 }),
             })
             .collect(),
+        addable: model.addable.clone(),
         connection: model.connection.map(|logging_in| CompactConnection {
             label: connection_label(logging_in),
             logging_in,
@@ -1222,21 +1652,107 @@ fn compact_panel(model: &PanelModel, version: &str, update: Option<UpdateStatus>
     }
 }
 
+/// Fixtures (smoke, tracking): the providers that have a card offer their +.
+#[cfg(target_os = "macos")]
+fn addable_from_panels(providers: &[PanelProvider]) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for p in providers {
+        let kind = p.account.as_ref().map_or_else(
+            || {
+                if p.name.starts_with("Claude") {
+                    "claude"
+                } else {
+                    "codex"
+                }
+            },
+            |a| a.kind,
+        );
+        if !out.contains(&kind) {
+            out.push(kind);
+        }
+    }
+    out
+}
+
 /// Everything the menu-bar panel shows, computed once for both surfaces.
 #[cfg(target_os = "macos")]
 struct PanelModel {
+    /// Providers offering the + of the compact window (the native menu has none).
+    addable: Vec<&'static str>,
     header: PanelHeader,
     providers: Vec<PanelProvider>,
     /// `Some(logging_in)` when the Codex connection action is offered.
     connection: Option<bool>,
 }
 
+/// Native menu / compact window providers: the ONE saved Compacte/Classique
+/// choice (`prefs.layout`) drives every visible Codex and Claude account.
+#[cfg(target_os = "macos")]
+fn quota_providers(
+    prefs: &prefs::Prefs,
+    codex: &[codex::CodexAccount],
+    accounts: &[claude::AccountSnapshot],
+) -> Vec<PanelProvider> {
+    let mut providers = Vec::new();
+    if prefs.codex_enabled {
+        providers.extend(codex_account_panels(codex, &prefs.layout));
+    }
+    providers.extend(claude_account_panels(
+        accounts,
+        prefs.classic_claude_layout(),
+    ));
+    providers
+}
+
+/// Same contract as `claude_account_panels`: one card per visible Codex
+/// environment, drawn with the saved layout. A sole card keeps the plain
+/// historical "Codex" name (and is the exact historical card for the
+/// primary); several are named « Codex · {compte} ». Never an aggregate: a
+/// home returning the same account as an earlier one is only flagged.
+#[cfg(target_os = "macos")]
+fn codex_account_panels(accounts: &[codex::CodexAccount], layout: &str) -> Vec<PanelProvider> {
+    let visible: Vec<_> = accounts.iter().filter(|a| a.profile.visible).collect();
+    let several = visible.len() > 1;
+    visible
+        .into_iter()
+        .map(|a| {
+            let mut panel =
+                codex_presentation(&a.rows, &a.phase, &a.message, a.plan_type.clone(), layout);
+            let (state, tone) = account_menu::codex_state(a);
+            panel.account = Some(PanelAccount {
+                kind: "codex",
+                id: a.profile.id.clone(),
+                name: a.profile.name.clone(),
+                state,
+                tone,
+            });
+            if several {
+                panel.name = format!("Codex · {}", a.profile.name);
+            }
+            if let Some(other) = &a.duplicate_of {
+                let text = format!("Même compte que « {other} » : quotas non additionnés.");
+                panel.note = Some(match panel.note {
+                    Some((note, tone)) => (format!("{note} · {text}"), tone),
+                    None => (text, Tone::Neutral),
+                });
+            }
+            panel
+        })
+        .collect()
+}
+
 #[cfg(target_os = "macos")]
 fn panel_model(app: &tauri::AppHandle) -> PanelModel {
-    let snapshots = get_quota_snapshots(app.clone());
     let prefs = prefs::current(app);
-    let claude_snap = claude::snapshot(app);
-    let claude_visible = claude_is_visible(&claude_snap);
+    // Every visible Claude profile, drawn with the saved Compacte/Classique choice.
+    let claude_all = claude::accounts(app);
+    let accounts: Vec<_> = claude_all
+        .iter()
+        .filter(|a| a.profile.visible && claude_is_visible(&a.snapshot))
+        .cloned()
+        .collect();
+    // Every visible Codex environment (primary = historical collector).
+    let codex_accounts = codex::accounts(app);
     let codex_status = app
         .try_state::<codex::Provider>()
         .map(|provider| provider.status());
@@ -1244,26 +1760,16 @@ fn panel_model(app: &tauri::AppHandle) -> PanelModel {
         .as_ref()
         .map(|status| status.phase.clone())
         .unwrap_or_else(|| "starting".into());
-    let mut providers = Vec::new();
-    if prefs.codex_enabled {
-        providers.push(codex_panel(
-            &snapshots,
-            &connection_phase,
-            codex_status
-                .as_ref()
-                .map(|s| s.message.as_str())
-                .unwrap_or(""),
-            codex_status.as_ref().and_then(|s| s.plan_type.clone()),
-        ));
-    }
-    if claude_visible {
-        providers.push(claude_panel(&claude_snap));
-    }
-    let header = panel_header(
-        &providers,
-        latest_refresh(&snapshots, claude_visible.then_some(&claude_snap)),
-    );
+    let providers = quota_providers(&prefs, &codex_accounts, &accounts);
+    let shown_rows: Vec<QuotaPayload> = codex_accounts
+        .iter()
+        .filter(|a| prefs.codex_enabled && a.profile.visible)
+        .flat_map(|a| a.rows.iter().cloned())
+        .collect();
+    let claude_snaps: Vec<_> = accounts.iter().map(|a| &a.snapshot).collect();
+    let header = panel_header(&providers, latest_refresh(&shown_rows, &claude_snaps));
     PanelModel {
+        addable: account_menu::addable_providers(&prefs),
         header,
         providers,
         connection: (prefs.codex_enabled && connection_phase != "ready")
@@ -1293,6 +1799,91 @@ fn get_compact_panel() -> Result<(), String> {
     Err("La fenêtre compacte n’existe que sur macOS.".into())
 }
 
+/// Native folder chooser for « Suivre un autre compte Claude ». Bounded to the
+/// one folder the user picks: returns its path only (no content read, no
+/// login, no folder created). The add itself goes through add_claude_profile.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn choose_claude_profile_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let mtm = MainThreadMarker::new().expect("folder picker runs on main thread");
+        let _ = tx.send(pick_profile_folder(
+            mtm,
+            "Choisissez le dossier d’un profil Claude Code déjà connecté (par exemple .claude-travail). Aucun compte n’est créé.",
+            "Suivre ce profil",
+        ));
+    })
+    .map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || rx.recv())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|_| "Sélecteur de dossier interrompu.".to_string())
+}
+
+/// Same chooser for « Ajouter un compte » Codex: one existing CODEX_HOME
+/// folder, path only (no content read, no login, no folder created).
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn choose_codex_profile_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let mtm = MainThreadMarker::new().expect("folder picker runs on main thread");
+        let _ = tx.send(pick_profile_folder(
+            mtm,
+            "Choisissez un dossier CODEX_HOME existant (par exemple .codex-travail). Aucun compte n’est créé ni connecté.",
+            "Suivre ce dossier",
+        ));
+    })
+    .map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || rx.recv())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|_| "Sélecteur de dossier interrompu.".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn choose_codex_profile_folder() -> Result<Option<String>, String> {
+    Err(
+        "Sélecteur de dossier indisponible : indiquez le chemin absolu du dossier CODEX_HOME."
+            .into(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn pick_profile_folder(mtm: MainThreadMarker, message: &str, prompt: &str) -> Option<String> {
+    use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseDirectories(true);
+    panel.setCanChooseFiles(false);
+    panel.setAllowsMultipleSelection(false);
+    panel.setCanCreateDirectories(false);
+    // Profiles are usually hidden folders (~/.claude-travail, ~/.codex-travail).
+    panel.setShowsHiddenFiles(true);
+    panel.setMessage(Some(&NSString::from_str(message)));
+    panel.setPrompt(Some(&NSString::from_str(prompt)));
+    if let Some(home) = std::env::var_os("HOME") {
+        let url =
+            objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&home.to_string_lossy()));
+        panel.setDirectoryURL(Some(&url));
+    }
+    NSApplication::sharedApplication(mtm).activate();
+    if panel.runModal() != NSModalResponseOK {
+        return None;
+    }
+    panel
+        .URL()
+        .and_then(|url| url.path())
+        .map(|p| p.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn choose_claude_profile_folder() -> Result<Option<String>, String> {
+    Err("Sélecteur de dossier indisponible : indiquez le chemin absolu du profil.".into())
+}
+
 /// Same action as the menu's "Se connecter à Codex…" item.
 #[tauri::command]
 fn connect_codex_account(app: tauri::AppHandle) -> Result<(), String> {
@@ -1314,7 +1905,15 @@ fn note_lines(text: &str) -> f64 {
 
 #[cfg(target_os = "macos")]
 fn card_height(provider: &PanelProvider) -> f64 {
-    let rows = provider.rows.len() as f64 * PANEL_ROW_HEIGHT;
+    let paired_count = paired_panel_rows(provider).len();
+    let rows = if paired_count > 0 {
+        pair_block_height(provider)
+            + (provider.rows.len() - paired_count - usize::from(compact_fable(provider).is_some()))
+                as f64
+                * PANEL_ROW_HEIGHT
+    } else {
+        provider.rows.len() as f64 * PANEL_ROW_HEIGHT
+    };
     let note = provider
         .note
         .as_ref()
@@ -1481,7 +2080,135 @@ fn make_panel_view(
         place(&card, 10.0, top, PANEL_WIDTH - 20.0, card_h);
 
         let mut row_top = top + 8.0;
-        for row in &provider.rows {
+        // Compacte card: 5 h and 7 j share one block with their countdowns above
+        // and their reset line below, independent of any Fable row; the 5 h track/fill keeps the Unique thickness.
+        let paired_rows = paired_panel_rows(provider);
+        let fable = compact_fable(provider);
+        let block_height = pair_block_height(provider);
+        if !paired_rows.is_empty() {
+            let group = NSView::initWithFrame(
+                mtm.alloc(),
+                frame(
+                    0.0,
+                    height - row_top - block_height,
+                    PANEL_WIDTH,
+                    block_height,
+                ),
+            );
+            root.addSubview(&group);
+            let place = |view: &NSView, x: f64, top: f64, w: f64, h: f64| {
+                view.setFrame(frame(x, block_height - (top - row_top) - h, w, h));
+                group.addSubview(view);
+            };
+            let tracks = compact_tracks();
+            for (position, row) in paired_rows.iter().enumerate() {
+                let index = row.pair_slot.unwrap_or(position);
+                let window = if index == 0 {
+                    "Limite 5 heures"
+                } else {
+                    "Limite hebdomadaire"
+                };
+                let tooltip = NSString::from_str(&format!(
+                    "{window} · {} · {} · {}",
+                    row.label,
+                    compact_value(row),
+                    row.reset
+                ));
+                let color = if row_is_low(row) {
+                    NSColor::systemRedColor()
+                } else {
+                    NSColor::labelColor()
+                };
+                let label = panel_label(
+                    mtm,
+                    &compact_heading(row),
+                    &NSFont::monospacedDigitSystemFontOfSize_weight(11.0, semibold),
+                    &color,
+                );
+                if index == 1 {
+                    label.setAlignment(NSTextAlignment::Right);
+                }
+                label.setToolTip(Some(&tooltip));
+                place(
+                    &label,
+                    20.0 + index as f64 * 138.0,
+                    row_top + 2.0,
+                    138.0,
+                    16.0,
+                );
+                let (offset, thickness) = if index == 0 { tracks.0 } else { tracks.1 };
+                let track = rounded_box(
+                    mtm,
+                    &NSColor::systemGrayColor().colorWithAlphaComponent(0.28),
+                    thickness / 2.0,
+                );
+                track.setToolTip(Some(&tooltip));
+                place(&track, 22.0, row_top + offset, PANEL_INNER_WIDTH, thickness);
+                // Same rule as Unique: a fill narrower than its own height is a
+                // pinched artefact, so only the track remains.
+                let width = row_fill_width(row);
+                if width >= thickness {
+                    let fill = rounded_box(
+                        mtm,
+                        &quota_color(row.remaining.unwrap_or(0), row.model),
+                        thickness / 2.0,
+                    );
+                    fill.setToolTip(Some(&tooltip));
+                    place(&fill, 22.0, row_top + offset, width, thickness);
+                }
+                // Reset of this window, under its column (7 j right-aligned like its heading).
+                let reset = panel_label(
+                    mtm,
+                    &compact_reset(&row.reset),
+                    &NSFont::systemFontOfSize(10.0),
+                    &NSColor::secondaryLabelColor(),
+                );
+                if index == 1 {
+                    reset.setAlignment(NSTextAlignment::Right);
+                }
+                reset.setToolTip(Some(&tooltip));
+                place(
+                    &reset,
+                    20.0 + index as f64 * 138.0,
+                    row_top + if fable.is_some() { 43.0 } else { 38.0 },
+                    138.0,
+                    13.0,
+                );
+            }
+            if let Some(row) = fable {
+                let tooltip =
+                    NSString::from_str(&format!("{} · {}", compact_heading(row), row.reset));
+                let offset = tracks.1 .0 + tracks.1 .1 + 2.0;
+                let thickness = tracks.1 .1;
+                let track = rounded_box(
+                    mtm,
+                    &NSColor::systemGrayColor().colorWithAlphaComponent(0.28),
+                    thickness / 2.0,
+                );
+                track.setToolTip(Some(&tooltip));
+                {
+                    use objc2_app_kit::NSAccessibility;
+                    track.setAccessibilityElement(true);
+                    track.setAccessibilityLabel(Some(&tooltip));
+                }
+                place(&track, 22.0, row_top + offset, PANEL_INNER_WIDTH, thickness);
+                let width = row_fill_width(row);
+                if width >= thickness {
+                    let fill = rounded_box(
+                        mtm,
+                        &quota_color(row.remaining.unwrap_or(0), true),
+                        thickness / 2.0,
+                    );
+                    fill.setToolTip(Some(&tooltip));
+                    place(&fill, 22.0, row_top + offset, width, thickness);
+                }
+            }
+            row_top += block_height;
+        }
+        for row in provider.rows.iter().filter(|r| {
+            !paired_rows.iter().any(|paired| std::ptr::eq(*paired, *r))
+                && !fable.is_some_and(|f| std::ptr::eq(f, *r))
+        }) {
             // Composite the complete row once: track, fill, value, label and reset.
             let group = NSView::initWithFrame(
                 mtm.alloc(),
@@ -1576,7 +2303,7 @@ fn make_panel_view(
 #[cfg(target_os = "macos")]
 fn latest_refresh(
     rows: &[QuotaPayload],
-    claude_snap: Option<&claude::ClaudeSnapshot>,
+    claude_snaps: &[&claude::ClaudeSnapshot],
 ) -> Option<DateTime<Local>> {
     let parse = |value: &str| {
         DateTime::parse_from_rfc3339(value)
@@ -1584,9 +2311,10 @@ fn latest_refresh(
             .map(|d| d.with_timezone(&Local))
     };
     let codex = rows.iter().filter_map(|r| parse(&r.checked_at)).max();
-    let claude = claude_snap
-        .and_then(|s| s.observed_at.as_deref())
-        .and_then(parse);
+    let claude = claude_snaps
+        .iter()
+        .filter_map(|s| s.observed_at.as_deref().and_then(parse))
+        .max();
     codex.into_iter().chain(claude).max()
 }
 
@@ -1596,6 +2324,9 @@ static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 /// Panel item of the menu currently attached to the status item (main thread only).
 #[cfg(target_os = "macos")]
 static PANEL_ITEM: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// A live panel update was deferred during tracking (see `refresh_open_panel`).
+#[cfg(target_os = "macos")]
+static PANEL_DEFERRED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "macos")]
 fn update_status_button(
@@ -1639,7 +2370,7 @@ fn render_native_menu(app: &tauri::AppHandle) {
         let open_item = PANEL_ITEM.load(Ordering::Acquire);
         if MENU_OPEN.load(Ordering::Acquire) && open_item != 0 {
             // Live update while the user keeps the menu open.
-            unsafe { (&*(open_item as *const NSMenuItem)).setView(Some(&panel_view)) };
+            refresh_open_panel(unsafe { &*(open_item as *const NSMenuItem) }, &panel_view);
             update_status_button(&native, mtm, &indicator);
             return;
         }
@@ -1661,6 +2392,44 @@ fn render_native_menu(app: &tauri::AppHandle) {
     });
 }
 
+/// Live update of the panel of the menu being tracked (main thread).
+/// Returns `false` when the update is deferred.
+///
+/// Keeps the item's view object and moves the freshly built contents into
+/// it. `setView` during tracking makes AppKit rebuild the item's row and
+/// re-place the selection background of the highlighted action (« Réglages… »,
+/// « Vérifier les mises à jour… ») over the top of the quota panel: the stray
+/// blue band. Resizing the panel while an action is highlighted also shifts
+/// that background off its row, so a height change waits until nothing is
+/// highlighted, the menu closes (`menuDidClose:` re-renders) or reopens.
+/// Reproduced by `--menu-tracking-fixture` (menu_fixture.rs).
+#[cfg(target_os = "macos")]
+fn refresh_open_panel(item: &NSMenuItem, next: &NSView) -> bool {
+    let Some(current) = item.view() else {
+        item.setView(Some(next));
+        return true;
+    };
+    let size = next.frame().size;
+    if current.frame().size != size {
+        let highlighted =
+            unsafe { item.menu() }.is_some_and(|menu| menu.highlightedItem().is_some());
+        if highlighted {
+            PANEL_DEFERRED.store(true, Ordering::Release);
+            return false;
+        }
+        current.setFrameSize(size);
+    }
+    for old in current.subviews().iter() {
+        old.removeFromSuperview();
+    }
+    // Subviews are laid out top-down for `next`'s height (= current's now).
+    for sub in next.subviews().iter() {
+        current.addSubview(&sub);
+    }
+    current.setNeedsDisplay(true);
+    true
+}
+
 #[cfg(target_os = "macos")]
 fn make_native_quota_menu(
     mtm: MainThreadMarker,
@@ -1679,7 +2448,8 @@ fn make_native_quota_menu(
     panel.setEnabled(false);
     menu.addItem(&panel);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-
+    // Below the panel: the connection action when needed, then Réglages…, the
+    // updater, Quitter. No provider/account entries (accounts live in Réglages).
     let add_action = |title: &str, action: objc2::runtime::Sel, key: &str, enabled: bool| {
         let item = NSMenuItem::new(mtm);
         item.setTitle(&NSString::from_str(title));
@@ -1729,6 +2499,46 @@ fn claude_status_line(state: &str) -> Option<&'static str> {
         "error" | "unavailable" | "auth_required" => Some("Claude : erreur de lecture"),
         _ => None,
     }
+}
+
+/// Windows/Linux tray lines for the visible Claude accounts. One visible
+/// account keeps the exact v3.1.0 wording; several are prefixed by name.
+#[cfg(any(not(target_os = "macos"), test))]
+fn claude_tray_lines(accounts: &[claude::AccountSnapshot]) -> Vec<String> {
+    let visible: Vec<_> = accounts
+        .iter()
+        .filter(|a| a.profile.visible && claude_is_visible(&a.snapshot))
+        .collect();
+    let named = visible.len() > 1;
+    let mut lines = Vec::new();
+    for account in visible {
+        let snap = &account.snapshot;
+        let name = if named {
+            format!("Claude · {}", account.profile.name)
+        } else {
+            "Claude".to_string()
+        };
+        if snap.metrics.is_empty() {
+            lines.push(format!("{name} · {}", snap.message));
+        }
+        for m in &snap.metrics {
+            let text = match (m.availability, m.used_percent) {
+                ("available", Some(_)) if m.exhausted => "épuisé".to_string(),
+                ("available", Some(u)) => format!("{} % restants", remaining_percent(u)),
+                ("unavailable", _) => "réinitialisée · en attente".to_string(),
+                _ => "non communiquée".to_string(),
+            };
+            lines.push(format!("{name} · {} · {text}", m.label));
+        }
+        if let Some(line) = claude_status_line(snap.state) {
+            lines.push(if named {
+                line.replacen("Claude", &name, 1)
+            } else {
+                line.to_string()
+            });
+        }
+    }
+    lines
 }
 
 fn short_codex_quota(rows: &[QuotaPayload]) -> Option<&QuotaPayload> {
@@ -1912,7 +2722,7 @@ pub fn quota_ui_smoke(directory: &str) {
         ));
         println!("NATIVE_STATUS_PASS {mode}: {}x{}", size.width, size.height);
     }
-    // Exercise the production projection, including the duplicate weekly window.
+    // Exercise the production projection, including a Fable window equal to the weekly one.
     let claude = claude_panel(&claude::usage_snapshot(
         &serde_json::json!({"subscription_type":"pro", "rate_limits":{
             "five_hour":{"utilization":88,"resets_at":soon},
@@ -1921,9 +2731,10 @@ pub fn quota_ui_smoke(directory: &str) {
         }}),
         Local::now().timestamp(),
     ));
-    assert_eq!(claude.rows.len(), 2);
-    assert_eq!(claude.rows[1].label, "Limite Fable");
-    let scenarios: Vec<(&str, Vec<PanelProvider>)> = vec![
+    assert_eq!(claude.rows.len(), 3);
+    assert!(!claude.rows[1].model);
+    assert_eq!(claude.rows[2].label, "Limite Fable");
+    let mut scenarios: Vec<(&str, Vec<PanelProvider>)> = vec![
         (
             "two-providers",
             vec![
@@ -1945,11 +2756,242 @@ pub fn quota_ui_smoke(directory: &str) {
             vec![PanelProvider {
                 rows: vec![],
                 note: Some(("Lecture via Claude Code…".into(), Tone::Warning)),
-                ..claude
+                ..claude.clone()
             }],
         ),
         ("none", vec![]),
     ];
+    // Multi-account fixtures: real projection (usage_snapshot -> AccountSnapshot
+    // -> claude_account_panels), synthetic data only, no Claude process.
+    let fixture = |name: &str,
+                   plan: &str,
+                   used5: Option<f64>,
+                   used7: Option<f64>,
+                   fable: Option<f64>| {
+        let (m5, h7) = if name == "Personnel" {
+            (210, 80)
+        } else {
+            (42, 49)
+        };
+        let at = |d: chrono::Duration| (Local::now() + d).to_rfc3339();
+        let window = |used: Option<f64>, reset: String| {
+            used.map(|u| serde_json::json!({"utilization":u,"resets_at":reset}))
+        };
+        let mut limits = serde_json::json!({
+            "five_hour": window(used5, at(chrono::Duration::minutes(m5))),
+            "seven_day": window(used7, at(chrono::Duration::hours(h7))),
+        });
+        if let Some(f) = fable {
+            limits["model_scoped"] = serde_json::json!([
+                {"display_name":"Fable","utilization":f,"resets_at":at(chrono::Duration::hours(h7 + 20))}
+            ]);
+        }
+        claude::AccountSnapshot {
+            profile: claude_accounts::Profile {
+                id: name.into(),
+                name: name.into(),
+                path: format!("/fixture/{name}"),
+                visible: true,
+            },
+            primary: name == "Personnel",
+            available: true,
+            refreshing: false,
+            snapshot: claude::usage_snapshot(
+                &serde_json::json!({"subscription_type":plan,"rate_limits":limits}),
+                Local::now().timestamp(),
+            ),
+        }
+    };
+    let personal = fixture("Personnel", "pro", Some(27.0), Some(14.0), None);
+    let work = fixture("Travail", "max", Some(65.0), Some(80.0), None);
+    scenarios.push((
+        "single-account",
+        claude_account_panels(&[personal.clone()], false),
+    ));
+    // Classique, one account: the exact historical card.
+    scenarios.push((
+        "single-account-classic",
+        claude_account_panels(&[personal.clone()], true),
+    ));
+    scenarios.push((
+        "multi-accounts",
+        claude_account_panels(&[personal.clone(), work.clone()], false),
+    ));
+    scenarios.push((
+        "multi-accounts-classic",
+        claude_account_panels(&[personal.clone(), work.clone()], true),
+    ));
+    let fable_pair = [
+        fixture("Personnel", "pro", Some(27.0), Some(14.0), Some(40.0)),
+        fixture("Travail", "max", Some(65.0), Some(80.0), Some(91.0)),
+    ];
+    scenarios.push((
+        "single-fable",
+        claude_account_panels(&fable_pair[..1], false),
+    ));
+    scenarios.push(("multi-fable", claude_account_panels(&fable_pair, false)));
+    scenarios.push((
+        "multi-fable-classic",
+        claude_account_panels(&fable_pair, true),
+    ));
+    let mut exhausted = fixture("Épuisé", "max", Some(100.0), None, Some(15.0));
+    exhausted.snapshot.extra_usage = Some(claude::ExtraUsage {
+        enabled: true,
+        limit_reached: true,
+    });
+    let mut failed = work.clone();
+    failed.snapshot =
+        claude::result_snapshot(Err("unsupported_or_auth"), None, Local::now().timestamp());
+    let mut missing = fixture("Absent", "pro", None, None, None);
+    missing.available = false;
+    missing.snapshot.state = "error";
+    missing.snapshot.message = "Dossier de profil Claude indisponible.".into();
+    missing.snapshot.metrics.clear();
+    let edge = [exhausted, failed, missing];
+    scenarios.push(("multi-edge-cases", claude_account_panels(&edge, false)));
+    scenarios.push((
+        "multi-edge-cases-classic",
+        claude_account_panels(&edge, true),
+    ));
+    let mut hidden = work.clone();
+    hidden.profile.visible = false;
+    scenarios.push((
+        "multi-one-visible",
+        claude_account_panels(&[personal.clone(), hidden.clone()], false),
+    ));
+    scenarios.push((
+        "multi-one-visible-classic",
+        claude_account_panels(&[personal, hidden], true),
+    ));
+    let mut native_codex = codex_rows.clone();
+    native_codex[0].period = "codex:codex:primary".into();
+    native_codex[1].period = "codex:codex:secondary".into();
+    for layout in ["classic", "compact"] {
+        let codex = codex_presentation(&native_codex, "ready", "", Some("plus".into()), layout);
+        scenarios.push((
+            if layout == "compact" {
+                "codex-compact"
+            } else {
+                "codex-classic"
+            },
+            vec![codex.clone()],
+        ));
+        scenarios.push((
+            if layout == "compact" {
+                "codex-both-compact"
+            } else {
+                "codex-both-classic"
+            },
+            vec![codex, claude.clone()],
+        ));
+    }
+    scenarios.push((
+        "codex-weekly-only",
+        vec![codex_presentation(
+            &native_codex[1..],
+            "ready",
+            "",
+            None,
+            "compact",
+        )],
+    ));
+    scenarios.push((
+        "codex-empty-error",
+        vec![codex_presentation(
+            &[],
+            "error",
+            "Compte déconnecté",
+            None,
+            "compact",
+        )],
+    ));
+    // Multi-Codex: production projection (account_view -> mark_duplicates ->
+    // codex_account_panels), synthetic rows only, no Codex process.
+    let codex_env = |name: &str,
+                     primary: bool,
+                     phase: &str,
+                     message: &str,
+                     rows: &[QuotaPayload],
+                     identity: Option<u64>| {
+        let found = codex_accounts::Discovered {
+            profile: claude_accounts::Profile {
+                id: format!("profile:{name}"),
+                path: format!("/fixture/.codex-{name}"),
+                name: name.into(),
+                visible: true,
+            },
+            primary,
+            tracked: true,
+            launch: (!primary).then(|| format!("/fixture/.codex-{name}").into()),
+            available: true,
+            visible: true,
+        };
+        let reading = codex::Reading {
+            phase: phase.into(),
+            message: message.into(),
+            // Signed out: account/read returns no account, hence no plan.
+            plan_type: (phase == "ready").then(|| if primary { "plus" } else { "pro" }.into()),
+            rows: (!rows.is_empty()).then(|| rows.to_vec()),
+            identity,
+            last_checked: None,
+            available_resets: None,
+        };
+        let view = codex::PrimaryView {
+            status: codex::Status {
+                phase: phase.into(),
+                message: message.into(),
+                plan_type: Some("plus".into()),
+                ..codex::Status::default()
+            },
+            rows: rows.to_vec(),
+            identity,
+        };
+        codex::account_view(
+            found,
+            true,
+            Some(&view),
+            (!primary).then_some((reading, false)),
+        )
+    };
+    let mut work_codex = native_codex.clone();
+    work_codex[0].remaining = 18;
+    work_codex[0].reset_at = (Local::now() + chrono::Duration::minutes(42)).to_rfc3339();
+    work_codex[1].remaining = 64;
+    let mut codex_envs = vec![
+        codex_env("Principal", true, "ready", "", &native_codex, Some(1)),
+        codex_env("Travail", false, "ready", "", &work_codex[..2], Some(2)),
+        codex_env(
+            "Perso",
+            false,
+            "signed_out",
+            "Non connecté. Connectez ce dossier dans un terminal : CODEX_HOME=/fixture/.codex-Perso codex login",
+            &[],
+            None,
+        ),
+        codex_env("Alias", false, "ready", "", &native_codex[..2], Some(1)),
+    ];
+    codex::mark_duplicates(&mut codex_envs);
+    scenarios.push((
+        "codex-multi-accounts",
+        codex_account_panels(&codex_envs, "compact"),
+    ));
+    scenarios.push((
+        "codex-multi-accounts-classic",
+        codex_account_panels(&codex_envs, "classic"),
+    ));
+    scenarios.push((
+        "codex-and-claude-multi",
+        codex_account_panels(&codex_envs[..2], "compact")
+            .into_iter()
+            .chain(claude_account_panels(
+                &[
+                    fixture("Personnel", "pro", Some(27.0), Some(14.0), None),
+                    work.clone(),
+                ],
+                false,
+            ))
+            .collect(),
+    ));
     let target = QuotaMenuTarget::new(mtm);
     // Main-thread AppKit regression checks use the production builder without
     // starting Tauri, reading preferences, or contacting either quota provider.
@@ -1991,30 +3033,234 @@ pub fn quota_ui_smoke(directory: &str) {
             if let Some(logging_in) = connection {
                 assert_eq!(actions[0].1, !logging_in);
             }
-            // Live refresh replaces only the custom view, never its item or
-            // action siblings. Exercise height/state changes in both directions.
+            // Live refresh keeps the item and its view object, never touching
+            // the action siblings; exercise height/state changes both ways
+            // (nothing highlighted here, so resizes apply at once).
+            let host = panel.view().unwrap();
             for (_, next) in &scenarios {
                 let next_header = panel_header(next, None);
                 let next_view = make_panel_view(mtm, &next_header, next);
-                panel.setView(Some(&next_view));
+                let next_frame = next_view.frame();
+                let next_count = next_view.subviews().count();
+                assert!(refresh_open_panel(&panel, &next_view));
                 assert!(!panel.isEnabled());
                 assert_eq!(
                     menu.numberOfItems(),
                     if connection.is_some() { 8 } else { 7 }
                 );
-                assert_eq!(panel.view().unwrap().frame(), next_view.frame());
+                let shown = panel.view().unwrap();
+                assert!(
+                    std::ptr::eq(Retained::as_ptr(&shown), Retained::as_ptr(&host)),
+                    "panel view replaced"
+                );
+                assert_eq!(shown.frame(), next_frame);
+                assert_eq!(shown.subviews().count(), next_count);
             }
             println!("NATIVE_MENU_STRUCTURE_PASS {name} connection={connection:?}");
         }
     }
+    // Bottom of the menu, below the panel: exactly the historical actions, with
+    // Réglages… first. No provider, account, usage or « + » entry, no submenu.
+    for connection in [None, Some(false), Some(true)] {
+        let providers = &scenarios[scenarios.len() - 1].1;
+        let header = panel_header(providers, Some(Local::now()));
+        let view = make_panel_view(mtm, &header, providers);
+        let (menu, panel) = make_native_quota_menu(mtm, &target, &view, connection, "fixture");
+        let items: Vec<Retained<NSMenuItem>> = menu.itemArray().iter().collect();
+        let titles: Vec<String> = items
+            .iter()
+            .map(|i| {
+                if i.isSeparatorItem() {
+                    "-".to_string()
+                } else {
+                    i.title().to_string()
+                }
+            })
+            .collect();
+        // The panel and the version line are view items (AppKit's default title).
+        let mut expected: Vec<String> = vec!["NSMenuItem".into(), "-".into()];
+        if let Some(logging_in) = connection {
+            expected.push(connection_label(logging_in).to_string());
+        }
+        expected.extend(
+            [
+                "Réglages…",
+                "Vérifier les mises à jour…",
+                "-",
+                "Quitter Quota Monitor",
+            ]
+            .map(String::from),
+        );
+        expected.push("NSMenuItem".into());
+        assert_eq!(titles, expected, "{titles:?}");
+        assert!(
+            items.iter().all(|i| i.submenu().is_none()),
+            "no detail submenu: {titles:?}"
+        );
+        assert!(
+            !titles.iter().any(|t| t.contains('↗')
+                || t.starts_with("Codex")
+                || t.starts_with("Claude")
+                || t.contains("Ajouter")),
+            "{titles:?}"
+        );
+        // The first action under the panel is Réglages… (the connection action, only
+        // when Codex is not connected, keeps its historical place before it).
+        let first_action = items
+            .iter()
+            .skip(2)
+            .find(|i| !i.isSeparatorItem())
+            .map(|i| i.title().to_string())
+            .unwrap();
+        assert_eq!(
+            first_action,
+            connection.map_or("Réglages…", |l| connection_label(l))
+        );
+        // The live refresh of the open panel is untouched.
+        let host = panel.view().unwrap();
+        let next = make_panel_view(mtm, &header, &scenarios[0].1);
+        assert!(refresh_open_panel(&panel, &next));
+        assert!(std::ptr::eq(
+            Retained::as_ptr(&panel.view().unwrap()),
+            Retained::as_ptr(&host)
+        ));
+        println!("NATIVE_MENU_BOTTOM_PASS connection={connection:?} items={titles:?}");
+    }
     for (name, providers) in scenarios {
         let header = panel_header(&providers, (!providers.is_empty()).then(Local::now));
+        let fixture_model = PanelModel {
+            addable: addable_from_panels(&providers),
+            header: header.clone(),
+            providers: providers.clone(),
+            connection: None,
+        };
+        std::fs::write(
+            format!("{directory}/{name}.json"),
+            serde_json::to_vec_pretty(&compact_panel(&fixture_model, "fixture", None)).unwrap(),
+        )
+        .unwrap();
         for (mode, appearance) in [
             ("light", unsafe { NSAppearanceNameAqua }),
             ("dark", unsafe { NSAppearanceNameDarkAqua }),
         ] {
             let panel = make_panel_view(mtm, &header, &providers);
             let bounds = panel.bounds();
+            if matches!(
+                name,
+                "single-account"
+                    | "single-account-classic"
+                    | "multi-accounts"
+                    | "single-fable"
+                    | "multi-fable"
+                    | "multi-fable-classic"
+                    | "multi-accounts-classic"
+                    | "two-providers"
+                    | "codex-compact"
+                    | "codex-classic"
+            ) {
+                // Measure the real AppKit frames (rows are composited in group
+                // views since v3.1.0): every track/fill at x = 22, in root space.
+                fn bars(root: &NSView, view: &NSView, out: &mut Vec<NSRect>) {
+                    for sub in view.subviews().iter() {
+                        let r = sub.convertRect_toView(sub.bounds(), Some(root));
+                        if (r.origin.x - 22.0).abs() < 0.01 && r.size.height <= 7.0 {
+                            out.push(r);
+                        }
+                        bars(root, &sub, out);
+                    }
+                }
+                let mut found = Vec::new();
+                bars(&panel, &panel, &mut found);
+                // Top-down order (AppKit y grows upwards).
+                found.sort_by(|a, b| {
+                    (b.origin.y + b.size.height)
+                        .partial_cmp(&(a.origin.y + a.size.height))
+                        .unwrap()
+                });
+                let heights: Vec<f64> = found.iter().map(|r| r.size.height).collect();
+                let unique_claude = vec![PANEL_TRACK_HEIGHT; 4];
+                match name {
+                    "single-fable" | "multi-fable" => {
+                        let count = if name == "single-fable" { 1 } else { 2 };
+                        assert_eq!(heights, [5.0, 5.0, 3.0, 3.0, 3.0, 3.0].repeat(count));
+                        for block in found.chunks(6) {
+                            let gap =
+                                block[2].origin.y - (block[4].origin.y + block[4].size.height);
+                            assert!((gap - 2.0).abs() < 0.01, "Fable gap {gap}");
+                        }
+                        for provider in &providers {
+                            assert_eq!(pair_block_height(provider), 65.0);
+                            assert_eq!(card_height(provider), 81.0);
+                        }
+                        fn labels(view: &NSView, out: &mut Vec<String>) {
+                            for sub in view.subviews().iter() {
+                                if let Some(label) = sub.downcast_ref::<NSTextField>() {
+                                    out.push(label.stringValue().to_string());
+                                }
+                                labels(&sub, out);
+                            }
+                        }
+                        let mut texts = Vec::new();
+                        labels(&panel, &mut texts);
+                        assert!(!texts.iter().any(|s| s.contains("Fable")));
+                        fn fable_accessibility(view: &NSView, out: &mut Vec<String>) {
+                            use objc2_app_kit::NSAccessibility;
+                            for sub in view.subviews().iter() {
+                                if sub.isAccessibilityElement() {
+                                    if let Some(label) = sub.accessibilityLabel() {
+                                        let label = label.to_string();
+                                        if label.starts_with("Fable ·") {
+                                            assert!(
+                                                label.contains('%')
+                                                    && label.contains("Réinitialisation")
+                                            );
+                                            assert_eq!(
+                                                sub.toolTip().map(|s| s.to_string()),
+                                                Some(label.clone())
+                                            );
+                                            out.push(label);
+                                        }
+                                    }
+                                }
+                                fable_accessibility(&sub, out);
+                            }
+                        }
+                        let mut accessible = Vec::new();
+                        fable_accessibility(&panel, &mut accessible);
+                        assert_eq!(accessible.len(), count);
+                        println!("NATIVE_FABLE_THIN_PASS {name} {mode}: block=65 gap=2 thickness=3 no-caption");
+                    }
+                    "multi-fable-classic" => assert_eq!(heights, vec![5.0; 12]),
+                    "codex-compact" => {
+                        assert_eq!(heights, vec![5.0, 5.0, 3.0, 3.0, 5.0]);
+                        let gap = found[0].origin.y - (found[2].origin.y + found[2].size.height);
+                        assert!((gap - 2.0).abs() < 0.01);
+                    }
+                    "codex-classic" => assert_eq!(heights, vec![5.0; 5]),
+                    "single-account-classic" => assert_eq!(heights, unique_claude),
+                    // Compacte, one account: one paired 5 h / 7 j block.
+                    "single-account" => assert_eq!(
+                        heights,
+                        vec![PANEL_TRACK_HEIGHT, PANEL_TRACK_HEIGHT, 3.0, 3.0]
+                    ),
+                    // Classique: two separated Unique rows per account, no 3 pt track.
+                    "multi-accounts-classic" => {
+                        assert_eq!(heights, vec![PANEL_TRACK_HEIGHT; 8])
+                    }
+                    "multi-accounts" => {
+                        let pair = [PANEL_TRACK_HEIGHT, PANEL_TRACK_HEIGHT, 3.0, 3.0];
+                        assert_eq!(heights, [pair, pair].concat());
+                        for block in found.chunks(4) {
+                            // 2 pt between the bottom of the 5 h track and the 7 j track.
+                            let gap =
+                                block[0].origin.y - (block[2].origin.y + block[2].size.height);
+                            assert!((gap - 2.0).abs() < 0.01, "gap {gap}");
+                        }
+                    }
+                    _ => assert!(heights.iter().all(|h| *h == PANEL_TRACK_HEIGHT)),
+                }
+                println!("NATIVE_TRACK_PARITY_PASS {name} {mode}: heights={heights:?}");
+            }
             assert_eq!(bounds.size.width, PANEL_WIDTH);
             assert_eq!(bounds.size.height, panel_height(&providers));
             let background = rounded_box(mtm, &NSColor::windowBackgroundColor(), 0.0);
@@ -2226,7 +3472,7 @@ fn show_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
         // icons; the flag is set before any script so the first paint is right.
         .initialization_script(COMPACT_VIEW_SCRIPT)
         .inner_size(360.0, 520.0)
-        .min_inner_size(300.0, 260.0)
+        .min_inner_size(300.0, MAIN_WINDOW_MIN_HEIGHT)
         .center()
         .build()?;
         window.on_window_event({
@@ -2325,32 +3571,8 @@ fn desktop_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri
             None::<&str>,
         )?)?;
     }
-    if claude_is_visible(&claude_snap) {
-        if claude_snap.metrics.is_empty() {
-            menu.append(&MenuItem::new(
-                app,
-                format!("Claude · {}", claude_snap.message),
-                false,
-                None::<&str>,
-            )?)?;
-        }
-        for m in &claude_snap.metrics {
-            let text = match (m.availability, m.used_percent) {
-                ("available", Some(_)) if m.exhausted => "épuisé".to_string(),
-                ("available", Some(u)) => format!("{} % restants", remaining_percent(u)),
-                ("unavailable", _) => "réinitialisée · en attente".to_string(),
-                _ => "non communiquée".to_string(),
-            };
-            menu.append(&MenuItem::new(
-                app,
-                format!("Claude · {} · {text}", m.label),
-                false,
-                None::<&str>,
-            )?)?;
-        }
-        if let Some(line) = claude_status_line(claude_snap.state) {
-            menu.append(&MenuItem::new(app, line, false, None::<&str>)?)?;
-        }
+    for line in claude_tray_lines(&claude::accounts(app)) {
+        menu.append(&MenuItem::new(app, line, false, None::<&str>)?)?;
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     for (id, title) in [
@@ -2446,6 +3668,7 @@ pub fn run() {
         .manage(QuotaState::default())
         .manage(UpdateState::default())
         .manage(prefs::PrefsState::default())
+        .manage(settings_focus::SettingsFocusState::default())
         .invoke_handler(tauri::generate_handler![
             ntfy::test_ntfy,
             get_platform,
@@ -2454,16 +3677,27 @@ pub fn run() {
             connect_codex_account,
             request_quota_refresh,
             open_settings,
+            settings_focus::open_settings_focus,
+            settings_focus::take_settings_focus,
             prefs::get_preferences,
             prefs::set_preferences,
             claude::get_claude_snapshot,
+            claude::get_claude_accounts,
+            claude::add_claude_profile,
+            claude::follow_claude_profile,
+            claude::untrack_claude_profile,
+            choose_claude_profile_folder,
+            choose_codex_profile_folder,
+            codex::get_codex_accounts,
+            codex::add_codex_profile,
+            codex::follow_codex_profile,
+            codex::untrack_codex_profile,
             claude::request_claude_refresh,
-            claude::install_claude_relay,
-            claude::uninstall_claude_relay,
             open_usage_details,
             open_claude_usage,
             fit_settings_window,
             fit_update_window,
+            fit_main_window,
             get_update_status,
             start_update_check,
             start_update_install,
@@ -2480,6 +3714,7 @@ pub fn run() {
         ])
         .setup(|app| {
             *app.state::<prefs::PrefsState>().0.lock().unwrap() = prefs::load(app.handle());
+            claude::migrate_legacy_relay_at_startup(app.handle());
             ntfy::start(app.handle().clone());
             #[cfg(target_os = "macos")]
             let _ = APP_HANDLE.set(app.handle().clone());
@@ -2529,6 +3764,8 @@ pub fn run() {
             build_desktop(app)?;
 
             app.manage(codex::start(app.handle().clone()));
+            // Additional followed CODEX_HOME homes (none by default).
+            app.state::<codex::Provider>().reconcile(app.handle());
             claude::start_watcher(app.handle().clone());
             Ok(())
         })
@@ -2581,13 +3818,16 @@ mod tests {
         ];
         let codex = codex_panel(&rows, "ready", "", Some("plus".into()));
         let claude = PanelProvider {
-            name: "Claude",
+            account: None,
+            name: "Claude".into(),
+            compact: false,
             badge: None,
             rows: vec![],
             note: Some(("Lecture via Claude Code…".into(), Tone::Warning)),
         };
         let providers = vec![codex.clone(), claude];
         let model = PanelModel {
+            addable: Vec::new(),
             header: panel_header(&providers, None),
             providers: providers.clone(),
             connection: Some(false),
@@ -2599,7 +3839,10 @@ mod tests {
         assert_eq!(panel.header.tone, "warning");
         assert_eq!(panel.providers.len(), 2);
         let compact = &panel.providers[0];
-        assert_eq!((compact.name, compact.section.as_str()), ("Codex", "CODEX"));
+        assert_eq!(
+            (compact.name.as_str(), compact.section.as_str()),
+            ("Codex", "CODEX")
+        );
         assert_eq!(compact.badge.as_deref(), Some("Plus"));
         // Same order, labels, values and reset phrases as the tray rows.
         for (tray, row) in codex.rows.iter().zip(&compact.rows) {
@@ -2642,6 +3885,7 @@ mod tests {
         assert!(json["connection"]["loggingIn"].is_boolean());
         let logging = compact_panel(
             &PanelModel {
+                addable: Vec::new(),
                 connection: Some(true),
                 ..model
             },
@@ -2778,14 +4022,83 @@ mod tests {
             now,
         );
         assert_eq!(claude_panel(&unknown).rows[2].label, "Limite Fable");
+        // A Fable window equal to the weekly one is NOT folded into it: the 7 j row
+        // keeps its own label/countdown and Fable stays a separate, model-scoped row.
         let mut duplicate = snap.clone();
         duplicate.metrics[1].used_percent = duplicate.metrics[2].used_percent;
-        let merged = claude_panel(&duplicate);
-        assert_eq!(merged.rows.len(), 2);
-        assert_eq!(merged.rows[1].label, "Limite Fable");
-        assert_eq!(merged.rows[1].value, "70 %");
-        assert!(merged.rows[1].model);
-        assert!(merged.rows[1].reset.contains("Réinitialisation"));
+        let both = claude_panel(&duplicate);
+        assert_eq!(both.rows.len(), 3);
+        assert!(!both.rows[1].model && !both.rows[1].label.contains("Fable"));
+        assert_eq!(both.rows[1].value, "70 %");
+        assert!(both.rows[1].reset.contains("Réinitialisation"));
+        assert_ne!(both.rows[1].countdown, "—");
+        assert_eq!(both.rows[2].label, "Limite Fable");
+        assert_eq!(both.rows[2].value, "70 %");
+        assert!(both.rows[2].model);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compacte_keeps_the_weekly_reset_and_the_fable_bar_independent() {
+        let now = Local::now().timestamp();
+        let soon = (Local::now() + chrono::Duration::minutes(210)).to_rfc3339();
+        let week = (Local::now() + chrono::Duration::hours(80)).to_rfc3339();
+        let limits = |fable: Option<f64>| {
+            let mut v = serde_json::json!({"rate_limits":{
+                "five_hour":{"utilization":27,"resets_at":soon},
+                "seven_day":{"utilization":37,"resets_at":week}
+            }});
+            if let Some(f) = fable {
+                // Same percentage AND reset as the weekly window: still its own row.
+                v["rate_limits"]["model_scoped"] =
+                    serde_json::json!([{"display_name":"Fable","utilization":f,"resets_at":week}]);
+            }
+            v
+        };
+        for fable in [Some(37.0), Some(60.0), None] {
+            let snap = claude::usage_snapshot(&limits(fable), now);
+            let mut panel = claude_panel(&snap);
+            panel.compact = true;
+            assert_eq!(
+                panel.rows.len(),
+                2 + usize::from(fable.is_some()),
+                "{fable:?}"
+            );
+            // The pair is always the 5 h and the 7 j window, never Fable.
+            let pair = paired_panel_rows(&panel);
+            assert_eq!(pair.len(), 2);
+            assert!(pair.iter().all(|r| !r.model));
+            // 7 j keeps its countdown and its own reset line, with or without Fable.
+            assert_eq!(pair[1].countdown, "3j 8h");
+            assert!(compact_reset(&pair[1].reset).starts_with("Réinit. le "));
+            assert!(compact_reset(&pair[0].reset).starts_with("Réinit. à "));
+            // Fable: a real row only when the provider reported it, never invented.
+            let fable_rows: Vec<_> = panel.rows.iter().filter(|r| r.model).collect();
+            assert_eq!(fable_rows.len(), usize::from(fable.is_some()));
+            if let Some(f) = fable {
+                assert_eq!(fable_rows[0].value, format!("{} %", 100.0 - f));
+            } else {
+                assert!(compact_fable(&panel).is_none());
+                assert_eq!(pair_block_height(&panel), 60.0);
+            }
+            // Fable adds 5 pt for a fine track and gap, never a caption or full row.
+            assert_eq!(
+                card_height(&panel),
+                16.0 + PAIR_BLOCK_HEIGHT + if fable.is_some() { 5.0 } else { 0.0 }
+            );
+        }
+        // Weekly window absent: Fable never takes the weekly slot.
+        let only = claude::usage_snapshot(
+            &serde_json::json!({"rate_limits":{
+                "five_hour":{"utilization":27,"resets_at":soon},
+                "model_scoped":[{"display_name":"Fable","utilization":30,"resets_at":week}]
+            }}),
+            now,
+        );
+        let mut panel = claude_panel(&only);
+        panel.compact = true;
+        assert!(paired_panel_rows(&panel).iter().all(|r| !r.model));
+        assert!(panel.rows.iter().any(|r| r.model));
     }
 
     #[cfg(target_os = "macos")]
@@ -2865,6 +4178,639 @@ mod tests {
             PANEL_ROW_HEIGHT
         );
         assert!(panel_height(&[two.clone(), two]) > PANEL_HEADER_HEIGHT * 2.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fixture_account(
+        id: &str,
+        visible: bool,
+        rate_limits: serde_json::Value,
+    ) -> claude::AccountSnapshot {
+        claude::AccountSnapshot {
+            profile: claude_accounts::Profile {
+                id: id.into(),
+                path: format!("/scratch/{id}"),
+                name: id.into(),
+                visible,
+            },
+            primary: id == "Personnel",
+            available: true,
+            refreshing: false,
+            snapshot: claude::usage_snapshot(
+                &serde_json::json!({"subscription_type":"pro","rate_limits":rate_limits}),
+                Local::now().timestamp(),
+            ),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fixture_limits(used5: f64, used7: f64, minutes5: i64, hours7: i64) -> serde_json::Value {
+        let at = |d: chrono::Duration| (Local::now() + d).to_rfc3339();
+        serde_json::json!({
+            "five_hour":{"utilization":used5,"resets_at":at(chrono::Duration::minutes(minutes5))},
+            "seven_day":{"utilization":used7,"resets_at":at(chrono::Duration::hours(hours7))},
+            "model_scoped":[{"display_name":"Fable","utilization":10,"resets_at":at(chrono::Duration::hours(hours7 + 1))}],
+            "extra_usage":{"is_enabled":true,"spend_limit_reached":true}
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn codex_fixture(
+        name: &str,
+        primary: bool,
+        visible: bool,
+        rows: &[QuotaPayload],
+    ) -> codex::CodexAccount {
+        let found = codex_accounts::Discovered {
+            profile: claude_accounts::Profile {
+                id: format!("profile:{name}"),
+                path: format!("/fixture/{name}"),
+                name: name.into(),
+                visible,
+            },
+            primary,
+            tracked: true,
+            launch: (!primary).then(|| format!("/fixture/{name}").into()),
+            available: true,
+            visible,
+        };
+        let status = codex::Status {
+            phase: "ready".into(),
+            message: "Quotas synchronisés directement avec Codex.".into(),
+            ..codex::Status::default()
+        };
+        let reading = codex::Reading {
+            phase: "ready".into(),
+            message: status.message.clone(),
+            rows: Some(rows.to_vec()),
+            ..Default::default()
+        };
+        let view = codex::PrimaryView {
+            status,
+            rows: rows.to_vec(),
+            identity: None,
+        };
+        codex::account_view(
+            found,
+            true,
+            Some(&view),
+            (!primary).then_some((reading, false)),
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn account_states_are_shown_on_each_card_without_a_detail_route() {
+        let rows = [
+            payload("five-hour", 63, Some(300)),
+            payload("weekly", 85, Some(10080)),
+        ];
+        let mut signed_out = codex_fixture("Perso", false, true, &[]);
+        signed_out.phase = "signed_out".into();
+        let mut dup = codex_fixture("Alias", false, true, &rows);
+        dup.duplicate_of = Some("Principal".into());
+        let codex_accounts = vec![
+            codex_fixture("Principal", true, true, &rows),
+            codex_fixture("Travail", false, false, &rows),
+            signed_out,
+            dup,
+        ];
+        let states: Vec<_> = codex_accounts
+            .iter()
+            .map(|a| account_menu::codex_state(a).0)
+            .collect();
+        assert_eq!(
+            states,
+            ["Connecté", "Connecté", "Non connecté", "Même compte"]
+        );
+        let limits = fixture_limits(27.0, 14.0, 210, 80);
+        let mut signed_out_claude = fixture_account("Travail", false, limits.clone());
+        signed_out_claude.snapshot.state = "error";
+        signed_out_claude.snapshot.error_kind = Some("not_signed_in");
+        assert_eq!(
+            account_menu::claude_state(&fixture_account("Personnel", true, limits)).0,
+            "Connecté"
+        );
+        assert_eq!(
+            account_menu::claude_state(&signed_out_claude),
+            ("Non connecté".into(), Tone::Warning)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compact_window_groups_cards_by_provider_with_their_state_and_no_detail_route() {
+        let rows = [
+            payload("five-hour", 63, Some(300)),
+            payload("weekly", 85, Some(10080)),
+        ];
+        let mut signed_out = codex_fixture("Perso", false, true, &[]);
+        signed_out.phase = "signed_out".into();
+        let codex_accounts = vec![
+            codex_fixture("Principal", true, true, &rows),
+            codex_fixture("Travail", false, true, &rows),
+            signed_out,
+        ];
+        let claude_accounts = vec![fixture_account(
+            "Personnel",
+            true,
+            fixture_limits(27.0, 14.0, 210, 80),
+        )];
+        let prefs = prefs::Prefs {
+            claude_enabled: true,
+            ..Default::default()
+        };
+        let providers = quota_providers(&prefs, &codex_accounts, &claude_accounts);
+        let model = PanelModel {
+            addable: account_menu::addable_providers(&prefs),
+            header: panel_header(&providers, None),
+            providers,
+            connection: None,
+        };
+        let panel = compact_panel(&model, "9.9.9", None);
+        let cards: Vec<_> = panel
+            .providers
+            .iter()
+            .map(|p| (p.kind, p.state.as_ref().map(|s| s.label.as_str())))
+            .collect();
+        assert_eq!(
+            cards,
+            [
+                ("codex", Some("Connecté")),
+                ("codex", Some("Connecté")),
+                ("codex", Some("Non connecté")),
+                ("claude", Some("Connecté")),
+            ]
+        );
+        // Each enabled provider gets its header (↗) and its +, once.
+        assert_eq!(panel.addable, ["codex", "claude"]);
+        let json = serde_json::to_value(&panel).unwrap();
+        assert!(
+            json["providers"][1].get("accountId").is_none(),
+            "no account detail route is serialised"
+        );
+        assert_eq!(json["providers"][2]["state"]["tone"], "warning");
+        assert_eq!(json["addable"], serde_json::json!(["codex", "claude"]));
+        // Codex off: its cards and its + disappear together.
+        let off = prefs::Prefs {
+            codex_enabled: false,
+            claude_enabled: true,
+            ..Default::default()
+        };
+        let providers = quota_providers(&off, &codex_accounts, &claude_accounts);
+        let model = PanelModel {
+            addable: account_menu::addable_providers(&off),
+            header: panel_header(&providers, None),
+            providers,
+            connection: None,
+        };
+        let panel = compact_panel(&model, "9.9.9", None);
+        assert_eq!(panel.addable, ["claude"]);
+        assert!(panel.providers.iter().all(|p| p.kind == "claude"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn one_visible_codex_account_is_the_exact_historical_card() {
+        let rows = [
+            payload("five-hour", 63, Some(300)),
+            payload("weekly", 85, Some(10080)),
+        ];
+        for layout in ["compact", "classic"] {
+            let historical = codex_presentation(
+                &rows,
+                "ready",
+                "Quotas synchronisés directement avec Codex.",
+                None,
+                layout,
+            );
+            // Unique (primary only) and Multi with a hidden extra.
+            for accounts in [
+                vec![codex_fixture("Principal", true, true, &rows)],
+                vec![
+                    codex_fixture("Principal", true, true, &rows),
+                    codex_fixture("Travail", false, false, &rows[..1]),
+                ],
+            ] {
+                let mut panels = codex_account_panels(&accounts, layout);
+                // The card only gains the account it belongs to (menu/compact routing).
+                assert_eq!(panels[0].account.as_ref().map(|a| a.kind), Some("codex"));
+                panels[0].account = None;
+                assert_eq!(panels, vec![historical.clone()]);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn several_codex_accounts_get_named_cards_following_the_single_layout() {
+        let rows = [
+            payload("five-hour", 63, Some(300)),
+            payload("weekly", 85, Some(10080)),
+        ];
+        let work_rows = [
+            payload("five-hour", 12, Some(300)),
+            payload("weekly", 40, Some(10080)),
+        ];
+        let mut signed_out = codex_fixture("Perso", false, true, &[]);
+        signed_out.phase = "signed_out".into();
+        signed_out.message = "Non connecté. Connectez ce dossier dans un terminal : CODEX_HOME=/fixture/Perso codex login".into();
+        let mut dup = codex_fixture("Alias", false, true, &rows);
+        dup.duplicate_of = Some("Principal".into());
+        let accounts = vec![
+            codex_fixture("Principal", true, true, &rows),
+            codex_fixture("Travail", false, true, &work_rows),
+            signed_out,
+            dup,
+            codex_fixture("Caché", false, false, &work_rows),
+        ];
+        let compact = codex_account_panels(&accounts, "compact");
+        let classic = codex_account_panels(&accounts, "classic");
+        let names: Vec<_> = compact.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Codex · Principal",
+                "Codex · Travail",
+                "Codex · Perso",
+                "Codex · Alias"
+            ]
+        );
+        assert!(compact.iter().all(|p| p.compact) && classic.iter().all(|p| !p.compact));
+        // Each named card pairs its own real windows (not only the plain "Codex").
+        assert_eq!(paired_panel_rows(&compact[0]).len(), 2);
+        assert_eq!(paired_panel_rows(&compact[1]).len(), 2);
+        // Named card with a weekly-only real window + another bucket: only the
+        // real same-bucket window is paired (Codex rule, not "first two rows").
+        let weekly = [
+            payload("codex:codex:secondary", 40, Some(10080)),
+            payload("codex:review:secondary", 70, Some(10080)),
+        ];
+        let pair = codex_account_panels(
+            &[
+                codex_fixture("Principal", true, true, &rows),
+                codex_fixture("Hebdo", false, true, &weekly),
+            ],
+            "compact",
+        );
+        assert_eq!(pair[1].name, "Codex · Hebdo");
+        let paired = paired_panel_rows(&pair[1]);
+        assert_eq!(paired.len(), 1);
+        assert_eq!(paired[0].pair_slot, Some(1));
+        assert_eq!(compact[0].rows[0].remaining, Some(63));
+        assert_eq!(compact[1].rows[0].remaining, Some(12), "no aggregation");
+        // Signed out: a note, no invented bars.
+        assert!(compact[2].rows.is_empty());
+        let (note, tone) = compact[2].note.clone().unwrap();
+        assert!(note.contains("Non connecté") && tone == Tone::Warning);
+        // Same identity: flagged, values kept apart.
+        assert!(compact[3]
+            .note
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Même compte que « Principal »"));
+        assert_eq!(compact[3].rows[0].remaining, Some(63));
+        // Codex disabled: no card at all; Claude-only providers unaffected.
+        let mut prefs = prefs::Prefs::default();
+        prefs.codex_enabled = false;
+        assert!(quota_providers(&prefs, &accounts, &[]).is_empty());
+        prefs.codex_enabled = true;
+        prefs.layout = "classic".into();
+        assert_eq!(quota_providers(&prefs, &accounts, &[]), classic);
+        // Compact model (React compact window) keeps the pair slots per card.
+        let model = PanelModel {
+            addable: Vec::new(),
+            header: panel_header(&compact, None),
+            providers: compact.clone(),
+            connection: None,
+        };
+        let serialized = compact_panel(&model, "fixture", None);
+        assert_eq!(serialized.providers.len(), 4);
+        assert_eq!(serialized.providers[1].section, "CODEX · TRAVAIL");
+        assert_eq!(
+            serialized.providers[1]
+                .rows
+                .iter()
+                .filter(|r| r.pair_slot.is_some())
+                .count(),
+            2
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn one_saved_layout_switches_codex_and_claude_in_the_native_menu() {
+        let rows = [
+            payload("five-hour", 63, Some(300)),
+            payload("weekly", 85, Some(10080)),
+        ];
+        let personal = fixture_account("Personnel", true, fixture_limits(27.0, 14.0, 210, 80));
+        let build = |layout: &str| {
+            // Same file shape as an older build with only the Codex key.
+            let prefs = prefs::parse(
+                format!(r#"{{"layout":"{layout}","claudeEnabled":true,"codexLayout":"classic"}}"#)
+                    .as_bytes(),
+            );
+            quota_providers(
+                &prefs,
+                &[codex_fixture("Principal", true, true, &rows)],
+                &[personal.clone()],
+            )
+        };
+        let (compact, classic) = (build("compact"), build("classic"));
+        assert_eq!((compact.len(), classic.len()), (2, 2));
+        assert!(compact.iter().all(|p| p.compact), "both providers paired");
+        assert!(
+            classic.iter().all(|p| !p.compact),
+            "both providers separated"
+        );
+        // Presentation only: same rows and values either way.
+        for (c, k) in compact.iter().zip(&classic) {
+            assert_eq!(c.name, k.name);
+            assert_eq!(c.rows, k.rows);
+            assert!(card_height(c) < card_height(k));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn layout_choice_applies_to_a_single_visible_account() {
+        // Unique (one profile) and Multi with one visible: the saved
+        // Compacte/Classique choice always wins over the account count.
+        let personal = fixture_account("Personnel", true, fixture_limits(27.0, 14.0, 210, 80));
+        let hidden = fixture_account("Travail", false, fixture_limits(65.0, 80.0, 42, 49));
+        for accounts in [
+            vec![personal.clone()],
+            vec![personal.clone(), hidden.clone()],
+        ] {
+            let compact = claude_account_panels(&accounts, false);
+            let classic = claude_account_panels(&accounts, true);
+            assert_eq!((compact.len(), classic.len()), (1, 1));
+            // Classique: exactly the historical v3.1.0 card.
+            assert_eq!(classic[0].account.as_ref().map(|a| a.kind), Some("claude"));
+            assert_eq!(
+                PanelProvider {
+                    account: None,
+                    ..classic[0].clone()
+                },
+                claude_panel(&personal.snapshot)
+            );
+            assert!(!classic[0].compact);
+            // Compacte: paired 5 h / 7 j bars, same rows and values; a sole
+            // card gets no account name and no added note.
+            assert!(
+                compact[0].compact,
+                "Compacte must pair a sole account's bars"
+            );
+            assert_eq!(compact[0].name, "Claude");
+            assert_eq!(compact[0].rows, classic[0].rows);
+            assert_eq!(compact[0].note, None);
+            assert!(card_height(&compact[0]) < card_height(&classic[0]));
+        }
+        // Nothing visible: nothing rendered and nothing invented.
+        for classic in [false, true] {
+            assert!(claude_account_panels(&[hidden.clone()], classic).is_empty());
+            assert!(claude_account_panels(&[], classic).is_empty());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn classic_layout_keeps_one_separated_section_per_account_without_aggregation() {
+        let personal = fixture_account("Personnel", true, fixture_limits(27.0, 14.0, 210, 80));
+        let work = fixture_account("Travail", true, fixture_limits(65.0, 80.0, 42, 49));
+        let compact = claude_account_panels(&[personal.clone(), work.clone()], false);
+        let classic = claude_account_panels(&[personal.clone(), work.clone()], true);
+        assert_eq!(classic.len(), 2);
+        for (account, (c, k)) in [&personal, &work].iter().zip(compact.iter().zip(&classic)) {
+            assert!(!k.compact, "classic never pairs bars");
+            assert_eq!(k.name, format!("Claude · {}", account.profile.name));
+            assert_eq!(k.badge, account.snapshot.plan_type);
+            // Same per-account rows as the historical card: 5 h, hebdo, Fable,
+            // each with its own percentage and reset phrase.
+            assert_eq!(k.rows, claude_panel(&account.snapshot).rows);
+            assert_eq!(k.rows, c.rows);
+            assert_eq!(k.note, c.note);
+            assert!(k.rows[0].reset.starts_with("Réinitialisation"));
+            // Separated rows: taller than the paired block by exactly 2 rows - the paired block.
+            assert_eq!(
+                card_height(k) - card_height(c),
+                3.0 * PANEL_ROW_HEIGHT - (PAIR_BLOCK_HEIGHT + 5.0)
+            );
+        }
+        assert_eq!(classic[0].rows[0].value, "73 %");
+        assert_eq!(classic[1].rows[0].value, "35 %");
+        // Compact window serialises the same choice as the menu.
+        let model = PanelModel {
+            addable: Vec::new(),
+            header: panel_header(&classic, None),
+            providers: classic.clone(),
+            connection: None,
+        };
+        let json = serde_json::to_value(compact_panel(&model, "3.1.0", None)).unwrap();
+        assert_eq!(json["providers"][0]["compact"], false);
+        assert_eq!(json["providers"][1]["section"], "CLAUDE · TRAVAIL");
+        assert_eq!(json["providers"][1]["rows"].as_array().unwrap().len(), 3);
+        // Nothing visible: nothing rendered, whatever the layout.
+        let mut hidden = personal.clone();
+        hidden.profile.visible = false;
+        assert!(claude_account_panels(&[hidden], true).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn multi_account_cards_keep_fable_extra_and_countdowns_per_account() {
+        let personal = fixture_account("Personnel", true, fixture_limits(27.0, 14.0, 210, 80));
+        let work = fixture_account("Travail", true, fixture_limits(65.0, 80.0, 42, 49));
+        let multi = claude_account_panels(&[personal, work], false);
+        assert_eq!(multi.len(), 2);
+        assert!(multi.iter().all(|p| p.compact));
+        assert_eq!(multi[0].name, "Claude · Personnel");
+        assert_eq!(multi[1].name, "Claude · Travail");
+        for panel in &multi {
+            // 5 h, hebdomadaire, then the v3.1.0 Fable row: nothing removed.
+            assert_eq!(panel.rows.len(), 3);
+            assert_eq!(panel.rows[2].label, "Limite Fable");
+            assert!(panel.rows[2].model);
+            assert!(panel
+                .note
+                .as_ref()
+                .unwrap()
+                .0
+                .contains("Usage supplémentaire"));
+        }
+        assert_eq!(multi[0].rows[0].countdown, "3h30");
+        assert_eq!(multi[0].rows[1].countdown, "3j 8h");
+        assert_eq!(multi[1].rows[0].countdown, "42 min");
+        assert_eq!(multi[1].rows[1].countdown, "2j 1h");
+        // Fable becomes a third fine bar without caption in the 65 pt compact block.
+        let mut unpaired = multi[0].clone();
+        unpaired.compact = false;
+        assert_eq!(
+            card_height(&unpaired) - card_height(&multi[0]),
+            3.0 * PANEL_ROW_HEIGHT - (PAIR_BLOCK_HEIGHT + 5.0)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compact_window_serialises_the_same_multi_cards_as_the_menu() {
+        let personal = fixture_account("Personnel", true, fixture_limits(27.0, 14.0, 210, 80));
+        let work = fixture_account("Travail", true, fixture_limits(65.0, 80.0, 42, 49));
+        let providers = claude_account_panels(&[personal, work], false);
+        let model = PanelModel {
+            addable: Vec::new(),
+            header: panel_header(&providers, None),
+            providers: providers.clone(),
+            connection: None,
+        };
+        let panel = compact_panel(&model, "3.1.0", None);
+        assert_eq!(panel.providers.len(), 2);
+        for (menu, window) in providers.iter().zip(&panel.providers) {
+            assert_eq!(window.name, menu.name);
+            assert_eq!(window.section, menu.name.to_uppercase());
+            assert_eq!(window.compact, menu.compact);
+            assert_eq!(window.rows.len(), menu.rows.len());
+            for (m, w) in menu.rows.iter().zip(&window.rows) {
+                assert_eq!(w.countdown, m.countdown);
+                assert_eq!(w.value, m.value);
+                assert_eq!(w.label, m.label);
+            }
+        }
+        let json = serde_json::to_value(&panel).unwrap();
+        assert_eq!(json["providers"][1]["compact"], true);
+        assert_eq!(json["providers"][1]["rows"][0]["countdown"], "42 min");
+        assert_eq!(json["providers"][1]["section"], "CLAUDE · TRAVAIL");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn header_freshness_uses_the_newest_visible_claude_account() {
+        let mut older = fixture_account("Personnel", true, fixture_limits(1.0, 1.0, 5, 5)).snapshot;
+        let mut newer = older.clone();
+        older.observed_at = Some("2030-01-01T10:00:00Z".into());
+        newer.observed_at = Some("2030-01-01T10:05:00Z".into());
+        let at = latest_refresh(&[], &[&older, &newer]).unwrap();
+        assert_eq!(
+            at.with_timezone(&chrono::Utc).to_rfc3339(),
+            "2030-01-01T10:05:00+00:00"
+        );
+        assert!(latest_refresh(&[], &[]).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn multi_track_thickness_is_the_measured_unique_thickness() {
+        // The Unique row draws its track/fill at PANEL_TRACK_HEIGHT (5 pt,
+        // radius 2.5 in v3.1.0). Multi 5 h reuses it, weekly is finer, gap 2.
+        assert_eq!(PANEL_TRACK_HEIGHT, 5.0);
+        let ((top5, h5), (top7, h7)) = compact_tracks();
+        assert_eq!(h5, PANEL_TRACK_HEIGHT);
+        assert!(h7 < h5);
+        assert_eq!(h7, 3.0);
+        assert_eq!(top7 - top5 - h5, 2.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compact_heading_shows_countdown_and_honest_fallbacks() {
+        let row = PanelRow {
+            pair_slot: None,
+            model: false,
+            label: "Limite 5 heures".into(),
+            remaining: Some(0),
+            value: "Épuisé".into(),
+            reset: "—".into(),
+            countdown: "—".into(),
+        };
+        assert_eq!(compact_value(&row), "0 % · épuisé");
+        assert_eq!(compact_heading(&row), "Épuisé");
+        let live = PanelRow {
+            countdown: "42 min".into(),
+            ..row.clone()
+        };
+        assert_eq!(compact_heading(&live), "42 min · Épuisé");
+        let missing = PanelRow {
+            remaining: None,
+            value: "—".into(),
+            ..row
+        };
+        assert_eq!(compact_value(&missing), "—");
+        assert_eq!(compact_heading(&missing), "—");
+        // A Fable row keeps its model name in its heading.
+        let fable = PanelRow {
+            pair_slot: None,
+            model: true,
+            label: "Limite Fable".into(),
+            remaining: Some(86),
+            value: "86 %".into(),
+            reset: "—".into(),
+            countdown: "3j 8h".into(),
+        };
+        assert_eq!(compact_heading(&fable), "Fable · 3j 8h · 86 %");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compact_countdown_uses_local_time_and_honest_fallbacks() {
+        let now = 1_800_000_000;
+        let reset = |seconds| {
+            chrono::DateTime::from_timestamp(now + seconds, 0)
+                .unwrap()
+                .to_rfc3339()
+        };
+        let short = reset(210 * 60);
+        let week = reset(80 * 3600);
+        assert_eq!(reset_countdown(Some(&short), now), "3h30");
+        assert_eq!(reset_countdown(Some(&short), now + 60), "3h29");
+        assert_eq!(reset_countdown(Some(&week), now), "3j 8h");
+        assert_eq!(reset_countdown(Some(&reset(42 * 60)), now), "42 min");
+        for at in [None, Some("invalid"), Some("2000-01-01T00:00:00Z")] {
+            assert_eq!(reset_countdown(at, now), "—");
+        }
+    }
+    #[test]
+    fn tray_text_keeps_v310_lines_for_one_account_and_names_multi_accounts() {
+        let snap = |used: f64| {
+            claude::usage_snapshot(
+                &serde_json::json!({"rate_limits":{"five_hour":{"utilization":used}}}),
+                1_700_000_000,
+            )
+        };
+        let account = |name: &str, used: f64, visible: bool| claude::AccountSnapshot {
+            profile: claude_accounts::Profile {
+                id: name.into(),
+                path: format!("/scratch/{name}"),
+                name: name.into(),
+                visible,
+            },
+            primary: name == "Personnel",
+            available: true,
+            refreshing: false,
+            snapshot: snap(used),
+        };
+        let single = claude_tray_lines(&[
+            account("Personnel", 27.0, true),
+            account("Travail", 65.0, false),
+        ]);
+        assert_eq!(single[0], "Claude · Limite 5 heures · 73 % restants");
+        assert!(single
+            .iter()
+            .all(|l| !l.contains("Personnel") && !l.contains("Travail")));
+        let multi = claude_tray_lines(&[
+            account("Personnel", 27.0, true),
+            account("Travail", 65.0, true),
+        ]);
+        assert!(multi.contains(&"Claude · Personnel · Limite 5 heures · 73 % restants".to_string()));
+        assert!(multi.contains(&"Claude · Travail · Limite 5 heures · 35 % restants".to_string()));
+        let mut failed = account("Travail", 65.0, true);
+        failed.snapshot.state = "error";
+        assert!(
+            claude_tray_lines(&[account("Personnel", 27.0, true), failed])
+                .contains(&"Claude · Travail : erreur de lecture".to_string())
+        );
+        assert!(claude_tray_lines(&[account("Personnel", 1.0, false)]).is_empty());
     }
 
     #[test]

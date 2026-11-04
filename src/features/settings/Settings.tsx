@@ -5,8 +5,10 @@ import ExternalIcon from "../ui/ExternalIcon";
 import CodexConnection from "../setup/CodexConnection";
 import RefreshSettings from "../setup/RefreshSettings";
 import NtfySettings from "./NtfySettings";
+import ClaudeAccountsSettings, { CodexAccountsSettings, type SettingsFocusRequest } from "./ClaudeAccountsSettings";
 import ResetCredits from "../quota/ResetCredits";
-import type { ClaudeSnapshot, CodexStatus, DisplayMode, IndicatorChoice, Preferences } from "../quota/types";
+import type { ClaudeAccount, ClaudeLayout, ClaudeSnapshot, CodexAccount, CodexStatus, DisplayMode, IndicatorChoice, Preferences } from "../quota/types";
+import { layoutOf } from "../quota/providers";
 import "../../pages/Dashboard/dashboard.scss";
 import "./settings.scss";
 
@@ -27,16 +29,68 @@ const tabs = [
 ] as const;
 type TabId = (typeof tabs)[number]["id"];
 
-const indicatorOptions: { value: IndicatorChoice; label: string }[] = [
-  { value: "codex", label: "Codex" },
-  { value: "claude", label: "Claude" },
-  { value: "both", label: "Les deux" },
+const glyph = { fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round", strokeLinejoin: "round" } as const;
+const soft = { fill: "currentColor", opacity: 0.22 } as const;
+const solid = { fill: "currentColor" } as const;
+// Provider glyphs (monochrome, currentColor): Codex is a terminal agent,
+// Claude a radiating mark. No new colour, no emoji.
+const codexGlyph = <g {...glyph}><rect x="1.5" y="2.5" width="13" height="11" rx="2.5" /><path d="m4.5 6 2 2-2 2M8.5 10.5H11" /></g>;
+const claudeGlyph = <g {...glyph}><path d="M8 2v12M2 8h12M3.8 3.8l8.4 8.4M12.2 3.8l-8.4 8.4" /></g>;
+
+type Choice<T> = { value: T; label: string; icon: ReactNode; title?: string };
+
+const indicatorOptions: Choice<IndicatorChoice>[] = [
+  { value: "codex", label: "Codex", icon: <svg viewBox="0 0 16 16">{codexGlyph}</svg> },
+  { value: "claude", label: "Claude", icon: <svg viewBox="0 0 16 16">{claudeGlyph}</svg> },
+  { value: "both", label: "Les deux", icon: <svg viewBox="0 0 34 16">{codexGlyph}<g transform="translate(18 0)">{claudeGlyph}</g></svg> },
 ];
 
-const displayModeOptions: { value: DisplayMode; label: string }[] = [
-  { value: "menubar", label: "Barre des menus" },
-  { value: "app", label: "Application" },
+// Schematic pictograms (48 × 32): what the option puts on screen, no figures.
+const displayModeOptions: Choice<DisplayMode>[] = [
+  { value: "menubar", label: "Barre des menus", icon: <svg viewBox="0 0 48 32">
+    <rect x="2" y="3" width="44" height="6" rx="1.5" {...soft} /><circle cx="38" cy="6" r="1.8" {...solid} />
+    <g {...glyph}><rect x="27" y="11.5" width="17" height="17" rx="2.5" /><path d="M30.5 16.5h10M30.5 20.5h7M30.5 24.5h9" /></g>
+  </svg> },
+  { value: "app", label: "Application", icon: <svg viewBox="0 0 48 32">
+    <g {...glyph}><rect x="9" y="2.5" width="30" height="19" rx="2.5" /><path d="M9 7.5h30M14 12.5h16M14 16.5h11" /></g>
+    <rect x="8" y="25" width="32" height="5" rx="2.5" {...soft} /><rect x="21.5" y="26" width="5" height="3" rx="1" {...solid} />
+  </svg> },
 ];
+
+// Compacte: 5 h and 7 j bars stacked tight. Classique: separated rows, each
+// with its label, value and reset line.
+const claudeLayoutOptions: Choice<ClaudeLayout>[] = [
+  { value: "compact", label: "Compacte", icon: <svg viewBox="0 0 48 32">
+    <path d="M6 9h14M34 9h8" {...glyph} />
+    <rect x="6" y="14" width="36" height="4" rx="2" {...soft} /><rect x="6" y="14" width="25" height="4" rx="2" {...solid} />
+    <rect x="6" y="19.5" width="36" height="2" rx="1" {...soft} /><rect x="6" y="19.5" width="31" height="2" rx="1" {...solid} />
+  </svg> },
+  { value: "classic", label: "Classique", icon: <svg viewBox="0 0 48 32">
+    <path d="M6 3.5h12M36 3.5h6M6 22.5h12M36 22.5h6" {...glyph} />
+    <rect x="6" y="7" width="36" height="3" rx="1.5" {...soft} /><rect x="6" y="7" width="25" height="3" rx="1.5" {...solid} />
+    <path d="M6 14h20" {...glyph} opacity="0.45" />
+    <rect x="6" y="26" width="36" height="3" rx="1.5" {...soft} /><rect x="6" y="26" width="31" height="3" rx="1.5" {...solid} />
+  </svg> },
+];
+
+/** One settings row: visible label on the left, the existing segmented
+ *  control on the right (equal segments, one height, small icon before each
+ *  label). Native radios keep arrow keys; `label` is the accessible name and
+ *  contains the visible row label. */
+function Choices<T extends string>({ title, label, name, options, value, onChange }: {
+  title: string; label: string; name: string; options: Choice<T>[]; value: T; onChange: (value: T) => void;
+}) {
+  return <div className="prefs-row">
+    <span className="prefs-option__title prefs-row__label" aria-hidden="true">{title}</span>
+    <div className="prefs-segmented prefs-choices" role="radiogroup" aria-label={label}>
+      {options.map((option) => <label key={option.value} className={value === option.value ? "is-selected" : ""} title={option.title}>
+        <input type="radio" name={name} value={option.value} checked={value === option.value} onChange={() => onChange(option.value)} />
+        <span className="prefs-choices__icon" aria-hidden="true">{option.icon}</span>
+        <span>{option.label}</span>
+      </label>)}
+    </div>
+  </div>;
+}
 
 const claudeStates: Record<ClaudeSnapshot["state"], [string, Tone, string]> = {
   disabled: ["Désactivé", "neutral", "Désactivé : aucune lecture."],
@@ -59,14 +113,12 @@ function codexState(enabled: boolean, status: CodexStatus | null): [string, Tone
   }
 }
 
-function Pill({ tone, children }: { tone: Tone; children: ReactNode }) {
-  return <span className={"prefs-pill prefs-pill--" + tone}>{children}</span>;
-}
-
-function UsageLink({ label, command }: { label: string; command: string }) {
-  return <button type="button" className="prefs-link prefs-external" onClick={() => void invoke(command).catch(() => undefined)}>
-    {label} <ExternalIcon />
-  </button>;
+/** Provider title that doubles as the detailed-usage link: the existing
+ *  external arrow after the name. Plain text while the provider is off. */
+function usageTitle(title: string, label: string, command: string, enabled: boolean) {
+  if (!enabled) return title;
+  return <button type="button" className="prefs-title-link" aria-label={label} title="Usage détaillé"
+    onClick={() => void invoke(command).catch(() => undefined)}>{title} <ExternalIcon /></button>;
 }
 
 /** Fits the Settings window to its content (per tab), then corrects any
@@ -103,12 +155,6 @@ function useFitWindow(content: RefObject<HTMLElement | null>, key: unknown) {
   }, [content, key]);
 }
 
-function More({ label, open, onToggle }: { label: string; open: boolean; onToggle: () => void }) {
-  return <button type="button" className="prefs-more" aria-label={label} title={label} aria-expanded={open} onClick={onToggle}>
-    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
-  </button>;
-}
-
 function Switch({ label, checked, disabled, onChange }: {
   label: string; checked: boolean; disabled: boolean; onChange: (value: boolean) => void;
 }) {
@@ -129,9 +175,17 @@ export default function Settings() {
   const [revision, setRevision] = useState(0);
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const root = useRef<HTMLElement>(null);
-  const [codexMore, setCodexMore] = useState(false);
-  const [claudeMore, setClaudeMore] = useState(false);
+  const [accounts, setAccounts] = useState<ClaudeAccount[]>([]);
+  const [accountsError, setAccountsError] = useState<string | null>(null);
+  const mutation = useRef(false);
   const [canChooseMode, setCanChooseMode] = useState(false);
+  const [accountActionError, setAccountActionError] = useState<string | null>(null);
+  // Codex homes (primary + followed + detected), same flow as Claude.
+  const [codexAccounts, setCodexAccounts] = useState<CodexAccount[]>([]);
+  const [codexAccountsError, setCodexAccountsError] = useState<string | null>(null);
+  const [codexActionError, setCodexActionError] = useState<string | null>(null);
+  // Asked to land on one provider/account (native menu, compact window).
+  const [focus, setFocus] = useState<(SettingsFocusRequest & { provider: string }) | null>(null);
   useFitWindow(root, [tab, prefs !== null].join());
   const reload = useCallback(() => setRevision((value) => value + 1), []);
 
@@ -148,17 +202,37 @@ export default function Settings() {
     return () => { void quotas.then((unlisten) => unlisten()); };
   }, [reload]);
 
+  // The backend keeps the pending request until a window takes it (a window still loading has no listener yet).
+  useEffect(() => {
+    let disposed = false;
+    const take = async () => {
+      const next = await invoke<{ provider?: string; accountId?: string | null; add?: boolean } | null>("take_settings_focus").catch(() => null);
+      if (disposed || !next || (next.provider !== "codex" && next.provider !== "claude")) return;
+      setTab("providers");
+      setFocus({ provider: next.provider, accountId: next.accountId ?? null, add: !!next.add, nonce: Date.now() });
+    };
+    void take();
+    const woken = listen("settings-focus", () => void take()).catch(() => () => {});
+    return () => { disposed = true; void woken.then((unlisten) => unlisten()); };
+  }, []);
+
   useEffect(() => {
     let disposed = false;
     let timer: number;
     const poll = async () => {
-      const [p, s, k] = await Promise.allSettled([
+      const [p, s, k, a, x] = await Promise.allSettled([
         invoke<Preferences>("get_preferences"),
         invoke<CodexStatus>("get_codex_status"),
         invoke<ClaudeSnapshot>("get_claude_snapshot"),
+        invoke<ClaudeAccount[]>("get_claude_accounts"),
+        invoke<CodexAccount[]>("get_codex_accounts"),
       ]);
       if (disposed) return;
-      if (p.status === "fulfilled") setPrefs(p.value);
+      if (p.status === "fulfilled" && !mutation.current) setPrefs(p.value);
+      if (a.status === "fulfilled") setAccounts(a.value);
+      setAccountsError(a.status === "rejected" ? "Impossible de découvrir les comptes Claude. Nouvelle tentative automatique…" : null);
+      if (x.status === "fulfilled" && Array.isArray(x.value)) setCodexAccounts(x.value);
+      setCodexAccountsError(x.status === "rejected" ? "Impossible de découvrir les comptes Codex. Nouvelle tentative automatique…" : null);
       if (s.status === "fulfilled") setStatus(s.value);
       if (k.status === "fulfilled") setClaude(k.value);
       timer = window.setTimeout(() => void poll(), 2000);
@@ -168,16 +242,43 @@ export default function Settings() {
   }, [revision]);
 
   const update = async (patch: Partial<Preferences>) => {
-    if (!prefs) return false;
+    if (!prefs || mutation.current) return false;
+    mutation.current = true;
     setError(null); setBusy(true);
     try { setPrefs(await invoke<Preferences>("set_preferences", { prefs: { ...prefs, ...patch } })); reload(); return true; }
     catch (cause) { setError(String(cause)); return false; }
+    finally { mutation.current = false; setBusy(false); }
+  };
+  // Explicit add (folder chooser or absolute path): the backend validates and
+  // deduplicates, then switches to Multi. Errors stay next to the action.
+  const profileAction = async (command: "add_claude_profile", payload: Record<string, string>) => {
+    if (mutation.current) return false;
+    mutation.current = true; setAccountActionError(null); setBusy(true);
+    try { setPrefs(await invoke<Preferences>(command, payload)); reload(); return true; }
+    catch (cause) { setAccountActionError(String(cause).replace(/^Error: /, "")); return false; }
+    finally { mutation.current = false; setBusy(false); }
+  };
+  const chooseFolder = async () => {
+    if (mutation.current) return null;
+    setAccountActionError(null); setBusy(true);
+    try { return await invoke<string | null>("choose_claude_profile_folder"); }
+    catch (cause) { setAccountActionError(String(cause).replace(/^Error: /, "")); return null; }
     finally { setBusy(false); }
   };
-  const relay = async (command: "install_claude_relay" | "uninstall_claude_relay") => {
-    setError(null); setBusy(true);
-    try { setClaude(await invoke<ClaudeSnapshot>(command)); reload(); }
-    catch (cause) { setError(String(cause)); }
+  // Codex homes: explicit add command (detected homes are followed by the backend), never login/logout.
+  // The backend validates and returns the canonical preferences.
+  const codexAction = async (command: "add_codex_profile", payload: Record<string, string>) => {
+    if (mutation.current) return false;
+    mutation.current = true; setCodexActionError(null); setBusy(true);
+    try { setPrefs(await invoke<Preferences>(command, payload)); reload(); return true; }
+    catch (cause) { setCodexActionError(String(cause).replace(/^Error: /, "")); return false; }
+    finally { mutation.current = false; setBusy(false); }
+  };
+  const chooseCodexFolder = async () => {
+    if (mutation.current) return null;
+    setCodexActionError(null); setBusy(true);
+    try { return await invoke<string | null>("choose_codex_profile_folder"); }
+    catch (cause) { setCodexActionError(String(cause).replace(/^Error: /, "")); return null; }
     finally { setBusy(false); }
   };
 
@@ -190,15 +291,15 @@ export default function Settings() {
   };
 
   if (!prefs) return <main className="prefs"><p className="prefs-loading" role="status">Chargement…</p></main>;
-  const [codexPill, codexTone, codexMessage] = codexState(prefs.codexEnabled, status);
-  const [claudePill, claudeTone, claudeMessage]: [string, Tone, string] = !prefs.claudeEnabled
+  const [, , codexMessage] = codexState(prefs.codexEnabled, status);
+  const [, claudeTone, claudeMessage]: [string, Tone, string] = !prefs.claudeEnabled
     ? claudeStates.disabled
     : claude ? claudeStates[claude.state] : ["Lecture…", "warning", "Lecture…"];
   const codexReady = status?.phase === "ready";
   const claudeReady = claude?.state === "ready";
-  const extra = claude?.extraUsage;
+  const layout = layoutOf(prefs);
 
-  return <main className="prefs" ref={root}>
+  return <main className="prefs" ref={root} aria-label="Réglages">
     <nav role="tablist" aria-label="Catégories de réglages" className="prefs-toolbar">
       {tabs.map((item, index) => <button key={item.id} type="button" role="tab" id={"tab-" + item.id}
         ref={(node) => { tabRefs.current[item.id] = node; }}
@@ -218,78 +319,65 @@ export default function Settings() {
       {tab === "providers" && <div role="tabpanel" id="panel-providers" aria-labelledby="tab-providers">
         <section className="prefs-group" aria-labelledby="codex-heading">
           <header className="prefs-group__head">
-            <div><h2 id="codex-heading">Codex</h2>{status?.planType && prefs.codexEnabled && <span className="prefs-plan">{status.planType}</span>}</div>
-            {prefs.codexEnabled && codexReady && <ResetCredits compact status={status} onChange={reload} />}
-            <Pill tone={codexTone}>{codexPill}</Pill>
+            <div><h2 id="codex-heading" className="prefs-group__title">{usageTitle("Codex", "Codex : usage détaillé sur chatgpt.com", "open_usage_details", prefs.codexEnabled)}</h2></div>
             <Switch label="Activer Codex" checked={prefs.codexEnabled} disabled={busy}
               onChange={(value) => void update({ codexEnabled: value })} />
           </header>
           {!prefs.codexEnabled && <p className="prefs-state">{codexMessage}</p>}
-          {prefs.codexEnabled && codexReady && <div className="prefs-links">
-            <UsageLink label="Usage détaillé sur chatgpt.com" command="open_usage_details" />
-            <More label="Compte Codex" open={codexMore} onToggle={() => setCodexMore((v) => !v)} />
-          </div>}
-          {prefs.codexEnabled && codexReady && codexMore && <CodexConnection status={status} onChange={reload} />}
           {prefs.codexEnabled && !codexReady && <CodexConnection status={status} onChange={reload} />}
+          <CodexAccountsSettings prefs={prefs} accounts={codexAccounts} busy={busy} onUpdate={update} focus={focus?.provider === "codex" ? focus : null}
+            // The reset acts on the account of its own row (never the primary by default).
+            accessory={(account) => account.tracked && account.phase === "ready" && !account.duplicateOf
+              ? <ResetCredits accountId={account.id} accountName={account.name} primary={account.primary}
+                ready={account.available} count={account.availableResets} onChange={reload} />
+              : null}
+            onAdd={(path) => codexAction("add_codex_profile", { path })}
+            onChooseFolder={canChooseMode ? chooseCodexFolder : undefined} actionError={codexActionError} />
+          {codexAccountsError && <p className="prefs-state prefs-state--error" role="alert">{codexAccountsError}</p>}
         </section>
 
         <section className="prefs-group" aria-labelledby="claude-heading">
           <header className="prefs-group__head">
-            <div><h2 id="claude-heading">Claude</h2>{claude?.planType && prefs.claudeEnabled && <span className="prefs-plan">{claude.planType}</span>}</div>
-            {prefs.claudeEnabled && extra?.enabled && <button type="button" className="reset-chip"
-              onClick={() => void invoke("open_claude_usage").catch(() => undefined)}
-              title="Usage supplémentaire payant activé" aria-label="Usage supplémentaire Claude">
-              <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg><span>{extra.limitReached ? "Plafond" : "Extra"}</span>
-            </button>}
-            <Pill tone={claudeTone}>{claudePill}</Pill>
+            <div><h2 id="claude-heading" className="prefs-group__title">{usageTitle("Claude", "Claude : usage détaillé sur claude.ai", "open_claude_usage", prefs.claudeEnabled)}</h2></div>
             <Switch label="Activer Claude" checked={prefs.claudeEnabled} disabled={busy}
               onChange={(value) => void update({ claudeEnabled: value })} />
           </header>
           {(!prefs.claudeEnabled || !claudeReady) && <p className={"prefs-state prefs-state--" + claudeTone} role="status">{claudeMessage}</p>}
           <div className="prefs-group__head prefs-fable">
-            <div><h3>Quota Fable</h3></div>
+            <div><h3 className="prefs-option__title">Quota Fable</h3></div>
             <Switch label="Afficher le quota Fable et ses alertes" checked={prefs.fableEnabled} disabled={busy || !prefs.claudeEnabled}
               onChange={(value) => void update({ fableEnabled: value })} />
           </div>
-          {prefs.claudeEnabled && <div className="prefs-links">
-            <UsageLink label="Usage détaillé sur claude.ai" command="open_claude_usage" />
-            <More label="Avancé" open={claudeMore} onToggle={() => setClaudeMore((v) => !v)} />
-          </div>}
-          {prefs.claudeEnabled && claudeMore && <div className="prefs-advanced">
-              <p className="prefs-footnote">Lu via Claude Code (<code>claude auth login</code>), sans jeton ni requête de modèle.</p>
-              <div className="prefs-actions">
-                <button type="button" disabled={busy} onClick={() => void invoke("request_claude_refresh").then(reload)}>Actualiser</button>
-                <button type="button" className="prefs-link" disabled={busy} onClick={() => void relay("uninstall_claude_relay")}>Retirer l’ancien relais</button>
-              </div>
-          </div>}
+          <ClaudeAccountsSettings prefs={prefs} accounts={accounts} busy={busy} onUpdate={update} focus={focus?.provider === "claude" ? focus : null} onAdd={(path) => profileAction("add_claude_profile", { path })}
+            // Paid extra usage is reported per account: it moves onto its row.
+            accessory={(account) => prefs.claudeEnabled && account.snapshot.extraUsage?.enabled
+              ? <button type="button" className="reset-chip"
+                onClick={() => void invoke("open_claude_usage").catch(() => undefined)}
+                title="Usage supplémentaire payant activé" aria-label={"Usage supplémentaire Claude : " + account.name}>
+                <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg><span>{account.snapshot.extraUsage.limitReached ? "Plafond" : "Extra"}</span>
+              </button>
+              : null}
+            onChooseFolder={canChooseMode ? chooseFolder : undefined} actionError={accountActionError} />
+          {accountsError && <p className="prefs-state prefs-state--error" role="alert">{accountsError}</p>}
         </section>
       </div>}
 
       {tab === "menubar" && <div role="tabpanel" id="panel-menubar" aria-labelledby="tab-menubar">
-        {canChooseMode && <fieldset className="prefs-group" disabled={busy}>
-          <legend className="prefs-group__legend">Mode d’affichage</legend>
-          <div className="prefs-segmented" role="radiogroup" aria-label="Mode d’affichage">
-            {displayModeOptions.map((option) => <label key={option.value} className={prefs.displayMode === option.value ? "is-selected" : ""}>
-              <input type="radio" name="displayMode" value={option.value} checked={prefs.displayMode === option.value}
-                onChange={() => void update({ displayMode: option.value })} />{option.label}
-            </label>)}
-          </div>
-          <p>{prefs.displayMode === "app" ? "Icône dans le Dock, sans icône dans la barre des menus." : "Icône dans la barre des menus, sans icône dans le Dock."}</p>
-        </fieldset>}
-        {(!canChooseMode || prefs.displayMode !== "app") && <fieldset className="prefs-group" disabled={busy}>
-          <legend className="prefs-group__legend">Afficher dans la barre des menus</legend>
-          <div className="prefs-segmented" role="radiogroup" aria-label="Indicateur de la barre des menus">
-            {indicatorOptions.map((option) => <label key={option.value} className={prefs.indicator === option.value ? "is-selected" : ""}>
-              <input type="radio" name="indicator" value={option.value} checked={prefs.indicator === option.value}
-                onChange={() => void update({ indicator: option.value })} />{option.label}
-            </label>)}
-          </div>
-          <p>Quota restant sur la limite 5 heures.</p>
-        </fieldset>}
+        {/* One group, one row per choice: label left, control right. */}
+        <fieldset className="prefs-group prefs-rows" aria-label="Affichage" aria-busy={busy || undefined}>
+          {canChooseMode && <Choices title="Mode" label="Mode d’affichage" name="displayMode" options={displayModeOptions}
+            value={prefs.displayMode} onChange={(displayMode) => void update({ displayMode })} />}
+          {(!canChooseMode || prefs.displayMode !== "app") && <Choices title="Indicateur" label="Indicateur de la barre des menus (quota 5 heures)" name="indicator"
+            options={indicatorOptions} value={prefs.indicator} onChange={(indicator) => void update({ indicator })} />}
+          {/* One presentation for both providers, without quota collection. */}
+          <Choices title="Présentation" label="Présentation" name="layout"
+            options={claudeLayoutOptions} value={layout} onChange={(layout) => void update({ layout })} />
+        </fieldset>
       </div>}
 
       {tab === "refresh" && <div role="tabpanel" id="panel-refresh" aria-labelledby="tab-refresh">
-        <section className="prefs-group">
+        <section className="prefs-group" aria-labelledby="refresh-heading">
+          <h2 id="refresh-heading" className="prefs-group__title">Actualisation des quotas</h2>
           <RefreshSettings key={String(status?.refreshSettings.customSeconds ?? "auto")} status={status} onChange={reload} />
         </section>
       </div>}

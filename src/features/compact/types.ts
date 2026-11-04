@@ -17,19 +17,33 @@ export type CompactFill = {
 };
 
 export type CompactRow = {
+  /** Explicit pair membership from panel_model, never inferred from order. */
+  pairSlot?: 0 | 1 | null;
   model: boolean;
   label: string;
   /** Percentage REMAINING (100 = full quota available), null when unknown. */
   remaining: number | null;
   value: string;
   reset: string;
+  /** Time left before the reset ("3h30", "42 min", "3j 8h"); "—" when unknown. */
+  countdown: string;
   low: boolean;
   fill: CompactFill;
 };
 
+export type ProviderKind = "codex" | "claude";
+
 export type CompactProvider = {
+  /** Groups the cards under one provider header; absent in older models. */
+  kind?: ProviderKind;
+  /** Account name, the card title under the provider header. */
+  accountName?: string | null;
+  /** Connection state of that account (Connecté, Non connecté, Même compte…). */
+  state?: { label: string; tone: CompactTone } | null;
   name: string;
   section: string;
+  /** Claude multi-account card: 5 h and 7 j paired, like the menu. */
+  compact: boolean;
   badge: string | null;
   rows: CompactRow[];
   note: { text: string; tone: CompactTone } | null;
@@ -55,6 +69,8 @@ export type CompactUpdate = {
 export type CompactPanelModel = {
   header: { title: string; subtitle: string; status: string; tone: CompactTone };
   providers: CompactProvider[];
+  /** Enabled providers: each gets its header (↗) and its + even without a card. */
+  addable?: ProviderKind[];
   connection: { label: string; loggingIn: boolean } | null;
   version: string;
   /** Last updater state; null while no check has reported anything. */

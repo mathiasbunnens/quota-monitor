@@ -7,6 +7,30 @@ use tauri::Manager;
 
 pub const INDICATORS: [&str; 3] = ["codex", "claude", "both"];
 
+/// Presentation of the visible Claude account(s) (Réglages → Affichage),
+/// applied whatever the number of accounts and independent of their mode or
+/// visibility. Unknown = "compact". Absent (older file): the look that file
+/// already had — paired bars for a previous Multi build, otherwise the
+/// historical v3.1.0 card ("classic").
+pub const CLAUDE_LAYOUT_COMPACT: &str = "compact";
+pub const CLAUDE_LAYOUT_CLASSIC: &str = "classic";
+
+fn legacy_claude_layout(accounts: &crate::claude_accounts::AccountPrefs) -> &'static str {
+    if accounts.mode == "multi" {
+        CLAUDE_LAYOUT_COMPACT
+    } else {
+        CLAUDE_LAYOUT_CLASSIC
+    }
+}
+
+pub fn normalize_claude_layout(value: &str) -> &'static str {
+    if value == CLAUDE_LAYOUT_CLASSIC {
+        CLAUDE_LAYOUT_CLASSIC
+    } else {
+        CLAUDE_LAYOUT_COMPACT
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Prefs {
@@ -18,6 +42,19 @@ pub struct Prefs {
     /// "menubar" (default) or "app" (standalone Dock application, macOS only).
     pub display_mode: String,
     pub ntfy: crate::ntfy::Config,
+    pub claude_accounts: crate::claude_accounts::AccountPrefs,
+    /// Codex environments (CODEX_HOME folders) followed besides the primary.
+    /// Absent in older files: Unique, primary only (historical behaviour).
+    pub codex_accounts: crate::claude_accounts::AccountPrefs,
+    /// The single presentation for Claude AND Codex: "compact" (paired
+    /// bars) or "classic" (historical separated rows), whatever the number
+    /// of accounts. Display only. Sole effective key.
+    pub layout: String,
+    /// Legacy keys, still written (always equal to `layout`) so an older
+    /// build reading this `prefs.json` sees the same choice. Only read at
+    /// migration time, when `layout` is absent.
+    pub claude_layout: String,
+    pub codex_layout: String,
 }
 
 impl Default for Prefs {
@@ -29,11 +66,44 @@ impl Default for Prefs {
             indicator: "codex".into(),
             display_mode: crate::display_mode::MENUBAR.into(),
             ntfy: crate::ntfy::Config::default(),
+            claude_accounts: crate::claude_accounts::AccountPrefs::default(),
+            codex_accounts: crate::claude_accounts::AccountPrefs::default(),
+            layout: CLAUDE_LAYOUT_CLASSIC.into(),
+            claude_layout: CLAUDE_LAYOUT_CLASSIC.into(),
+            codex_layout: CLAUDE_LAYOUT_CLASSIC.into(),
         }
     }
 }
 
+/// Normalises `layout` and mirrors it into the legacy keys.
+pub fn normalized_for_save(mut prefs: Prefs) -> Prefs {
+    prefs.layout = normalize_claude_layout(&prefs.layout).into();
+    prefs.claude_layout = prefs.layout.clone();
+    prefs.codex_layout = prefs.layout.clone();
+    prefs
+}
+
+/// Migration rule when `layout` is absent: a single legacy key is taken
+/// over; if both exist and differ, the explicit Claude choice wins (keys
+/// carry no date, so "most recent" is unknowable); if neither exists, the
+/// look the file already had (Multi build = compact, otherwise classic).
+fn migrated_layout(raw: &serde_json::Value, prefs: &Prefs) -> &'static str {
+    let key = |name: &str| raw.get(name).map(|v| v.as_str().unwrap_or(""));
+    if let Some(value) = key("layout") {
+        return normalize_claude_layout(value);
+    }
+    match (key("claudeLayout"), key("codexLayout")) {
+        (Some(claude), _) => normalize_claude_layout(claude),
+        (None, Some(codex)) => normalize_claude_layout(codex),
+        (None, None) => legacy_claude_layout(&prefs.claude_accounts),
+    }
+}
+
 impl Prefs {
+    pub fn classic_claude_layout(&self) -> bool {
+        self.layout == CLAUDE_LAYOUT_CLASSIC
+    }
+
     pub fn valid(&self) -> bool {
         INDICATORS.contains(&self.indicator.as_str())
     }
@@ -51,14 +121,20 @@ fn path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 pub fn parse(bytes: &[u8]) -> Prefs {
-    serde_json::from_slice::<Prefs>(bytes)
+    let Ok(raw) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Prefs::default();
+    };
+    serde_json::from_value::<Prefs>(raw.clone())
         .ok()
         .filter(Prefs::valid)
         .map(|mut prefs| {
             // Unknown/absent mode (older file) keeps the menu-bar behaviour
             // without discarding the rest of the preferences.
             prefs.display_mode = crate::display_mode::normalize(&prefs.display_mode).into();
-            prefs
+            // Explicit migration (see `migrated_layout`); once saved, the
+            // single key wins over the account mode/count.
+            prefs.layout = migrated_layout(&raw, &prefs).into();
+            normalized_for_save(prefs)
         })
         .unwrap_or_default()
 }
@@ -89,22 +165,15 @@ pub fn set_preferences(app: tauri::AppHandle, mut prefs: Prefs) -> Result<Prefs,
     } else {
         crate::display_mode::MENUBAR.into()
     };
-    if !prefs.valid() {
-        return Err("Indicateur de barre des menus non pris en charge.".into());
-    }
+    // Presentation only: never a collection, session or cache change.
+    prefs = normalized_for_save(prefs);
+    // Validation (indicator, ntfy, Claude profiles) happens in save_to before
+    // the file or the in-memory state is replaced.
     let file = path(&app)?;
-    prefs.ntfy.validate()?;
-    if let Some(dir) = file.parent() {
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let tmp = file.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_vec(&prefs).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
-
     let previous = {
         let state = app.state::<PrefsState>();
         let mut guard = state.0.lock().map_err(|_| "Préférences indisponibles.")?;
+        save_to(&file, &prefs)?;
         std::mem::replace(&mut *guard, prefs.clone())
     };
     if previous.codex_enabled != prefs.codex_enabled {
@@ -115,8 +184,15 @@ pub fn set_preferences(app: tauri::AppHandle, mut prefs: Prefs) -> Result<Prefs,
             provider.set_enabled(prefs.codex_enabled);
         }
     }
-    if previous.claude_enabled != prefs.claude_enabled {
+    if collection_changed(&previous, &prefs) {
         claude::on_enabled_changed();
+    }
+    if codex_collection_changed(&previous, &prefs) {
+        // Starts/stops only the additional CODEX_HOME children; the primary
+        // collector keeps its own enable/disable path above.
+        if let Some(provider) = app.try_state::<codex::Provider>() {
+            provider.reconcile(&app);
+        }
     }
     if previous.display_mode != prefs.display_mode {
         crate::apply_display_mode(&app);
@@ -125,9 +201,402 @@ pub fn set_preferences(app: tauri::AppHandle, mut prefs: Prefs) -> Result<Prefs,
     Ok(prefs)
 }
 
+fn collection_changed(previous: &Prefs, next: &Prefs) -> bool {
+    let sources = |p: &Prefs| {
+        p.claude_accounts
+            .profiles
+            .iter()
+            .map(|a| (a.id.clone(), a.path.clone()))
+            .chain(
+                p.claude_accounts
+                    .excluded
+                    .iter()
+                    .map(|id| (id.clone(), "excluded".into())),
+            )
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    previous.claude_enabled != next.claude_enabled || sources(previous) != sources(next)
+}
+
+/// Codex: enabling or the set of followed homes (id + raw launch path).
+/// Names, visibility, Unique/Multi and the layout are display only.
+fn codex_collection_changed(previous: &Prefs, next: &Prefs) -> bool {
+    let sources = |p: &Prefs| {
+        p.codex_accounts
+            .profiles
+            .iter()
+            .map(|a| (a.id.clone(), a.path.clone()))
+            .chain(
+                p.codex_accounts
+                    .excluded
+                    .iter()
+                    .map(|id| (id.clone(), "excluded".into())),
+            )
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    previous.codex_enabled != next.codex_enabled || sources(previous) != sources(next)
+}
+
+fn save_to(file: &std::path::Path, prefs: &Prefs) -> Result<(), String> {
+    if !prefs.valid() {
+        return Err("Indicateur de barre des menus non pris en charge.".into());
+    }
+    prefs.ntfy.validate()?;
+    prefs.claude_accounts.validate()?;
+    crate::codex_accounts::validate(&prefs.codex_accounts)?;
+    if let Some(dir) = file.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = file.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec(&prefs).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_codex_layout_key_stays_readable_and_persists_through_the_single_key() {
+        let old = parse(br#"{"claudeLayout":"compact","claudeEnabled":true,"displayMode":"app"}"#);
+        let value = serde_json::to_value(&old).unwrap();
+        assert_eq!(value["codexLayout"], "compact");
+        assert_eq!(value["claudeLayout"], "compact");
+        for (input, expected) in [
+            ("compact", "compact"),
+            ("classic", "classic"),
+            ("odd", "compact"),
+        ] {
+            let p =
+                parse(format!(r#"{{"codexLayout":"{input}","fableEnabled":false}}"#).as_bytes());
+            assert_eq!(serde_json::to_value(&p).unwrap()["layout"], expected);
+            assert_eq!(p.claude_layout, expected);
+            assert!(!p.fable_enabled);
+            assert_eq!(parse(&serde_json::to_vec(&p).unwrap()), p);
+        }
+        let root = std::env::temp_dir().join(format!("qm-codex-layout-{}", std::process::id()));
+        let file = root.join("prefs.json");
+        let mut p = old;
+        p.layout = "classic".into();
+        let p = normalized_for_save(p);
+        save_to(&file, &p).unwrap();
+        assert_eq!(parse(&fs::read(&file).unwrap()), p);
+        assert_eq!(p.codex_layout, "classic");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn single_layout_migrates_from_legacy_keys_with_a_documented_rule() {
+        let l = |json: &str| parse(json.as_bytes()).layout;
+        let multi = r#""claudeAccounts":{"mode":"multi","selectedId":null,"profiles":[]}"#;
+        // No key at all: previous Multi build = Compacte, otherwise historical Classique.
+        assert_eq!(l(r#"{"claudeEnabled":true}"#), "classic");
+        assert_eq!(l(&format!("{{{multi}}}")), "compact");
+        // Only one legacy key: taken over, whatever the account mode.
+        assert_eq!(l(r#"{"claudeLayout":"compact"}"#), "compact");
+        assert_eq!(
+            l(&format!(r#"{{"claudeLayout":"classic",{multi}}}"#)),
+            "classic"
+        );
+        assert_eq!(l(r#"{"codexLayout":"compact"}"#), "compact");
+        assert_eq!(
+            l(&format!(r#"{{"codexLayout":"classic",{multi}}}"#)),
+            "classic"
+        );
+        // Both present and different: the explicit Claude choice wins (no per-key date exists).
+        assert_eq!(
+            l(r#"{"claudeLayout":"classic","codexLayout":"compact"}"#),
+            "classic"
+        );
+        assert_eq!(
+            l(r#"{"claudeLayout":"compact","codexLayout":"classic"}"#),
+            "compact"
+        );
+        // Unknown legacy value: Compacte, like before.
+        assert_eq!(
+            l(r#"{"claudeLayout":"multi","codexLayout":"classic"}"#),
+            "compact"
+        );
+        // The single key wins over both legacy keys; unknown = compact.
+        assert_eq!(
+            l(r#"{"layout":"classic","claudeLayout":"compact","codexLayout":"compact"}"#),
+            "classic"
+        );
+        assert_eq!(
+            l(r#"{"layout":"compact","claudeLayout":"classic","codexLayout":"classic"}"#),
+            "compact"
+        );
+        assert_eq!(l(r#"{"layout":"odd","claudeLayout":"classic"}"#), "compact");
+        // Other preferences are untouched.
+        let p = parse(br#"{"claudeLayout":"compact","codexLayout":"classic","fableEnabled":false,"indicator":"both"}"#);
+        assert!(!p.fable_enabled && p.indicator == "both");
+    }
+
+    #[test]
+    fn single_layout_keeps_legacy_keys_readable_and_mirrored() {
+        let p = parse(br#"{"claudeLayout":"classic","codexLayout":"compact"}"#);
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["layout"], "classic");
+        assert_eq!(v["claudeLayout"], "classic");
+        assert_eq!(v["codexLayout"], "classic");
+        assert_eq!(parse(&serde_json::to_vec(&p).unwrap()), p);
+        let mut changed = p.clone();
+        changed.layout = "compact".into();
+        let changed = normalized_for_save(changed);
+        assert_eq!(
+            (
+                changed.claude_layout.as_str(),
+                changed.codex_layout.as_str()
+            ),
+            ("compact", "compact")
+        );
+        assert!(!collection_changed(&p, &changed));
+        assert_eq!(changed.claude_accounts, p.claude_accounts);
+        assert_eq!(
+            parse(&serde_json::to_vec(&changed).unwrap()).layout,
+            "compact"
+        );
+    }
+
+    #[test]
+    fn v310_preferences_file_loads_without_loss_and_defaults_to_single_primary() {
+        // Shape written by v3.1.0 (display mode, Fable opt-out, ntfy), no
+        // claudeAccounts key yet. Refresh settings live in the Codex file.
+        let bytes = br#"{"codexEnabled":true,"claudeEnabled":true,"fableEnabled":false,"indicator":"both","displayMode":"app","ntfy":{"enabled":true,"serverUrl":"https://ntfy.example.invalid","topic":"fixture-topic_1"}}"#;
+        let p = parse(bytes);
+        assert!(p.codex_enabled && p.claude_enabled && !p.fable_enabled);
+        assert_eq!(p.indicator, "both");
+        assert_eq!(p.display_mode, "app");
+        assert!(p.ntfy.enabled);
+        assert_eq!(p.ntfy.server_url, "https://ntfy.example.invalid");
+        assert_eq!(p.ntfy.topic, "fixture-topic_1");
+        assert_eq!(p.claude_accounts.mode, "single");
+        assert_eq!(p.claude_accounts.selected_id, None);
+        assert!(p.claude_accounts.profiles.is_empty());
+        // Round trip keeps every v3.1.0 key.
+        let v: serde_json::Value = serde_json::to_value(&p).unwrap();
+        for key in [
+            "codexEnabled",
+            "claudeEnabled",
+            "fableEnabled",
+            "indicator",
+            "displayMode",
+            "ntfy",
+        ] {
+            assert!(v.get(key).is_some(), "{key}");
+        }
+        assert_eq!(parse(&serde_json::to_vec(&p).unwrap()), p);
+    }
+    #[test]
+    fn visibility_selection_mode_and_names_do_not_restart_collection() {
+        let before = Prefs::default();
+        let mut after = before.clone();
+        after.claude_accounts.mode = "multi".into();
+        after.claude_accounts.selected_id = Some("display-only".into());
+        assert!(!collection_changed(&before, &after));
+        after.claude_enabled = true;
+        assert!(collection_changed(&before, &after));
+        let before = after.clone();
+        after
+            .claude_accounts
+            .profiles
+            .push(crate::claude_accounts::Profile {
+                id: "profile:a".into(),
+                path: "/fixture/a".into(),
+                name: "A".into(),
+                visible: true,
+            });
+        assert!(collection_changed(&before, &after));
+        let before = after.clone();
+        after.claude_accounts.profiles[0].name = "Personnel".into();
+        after.claude_accounts.profiles[0].visible = false;
+        assert!(!collection_changed(&before, &after));
+    }
+    #[test]
+    fn account_preferences_persist_on_disk_and_invalid_edits_do_not_replace_them() {
+        let root = std::env::temp_dir().join(format!("qm-prefs-profile-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let profile_dir = root.join("profile");
+        fs::create_dir_all(&profile_dir).unwrap();
+        let profile_dir = profile_dir.canonicalize().unwrap();
+        let file = root.join("prefs.json");
+        let mut p = parse(br#"{"claudeEnabled":true,"indicator":"both"}"#);
+        p.claude_accounts.mode = "multi".into();
+        p.claude_accounts
+            .profiles
+            .push(crate::claude_accounts::Profile {
+                id: crate::claude_accounts::identity(&profile_dir),
+                path: profile_dir.to_str().unwrap().into(),
+                name: "Personnel".into(),
+                visible: false,
+            });
+        p.claude_accounts.selected_id = Some(p.claude_accounts.profiles[0].id.clone());
+        save_to(&file, &p).unwrap();
+        assert_eq!(parse(&fs::read(&file).unwrap()), p);
+        let bytes = fs::read(&file).unwrap();
+        p.claude_accounts.profiles[0].name = String::new();
+        assert!(save_to(&file, &p).is_err());
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn claude_layout_migrates_normalises_and_persists_independently() {
+        // v3.1.0 file (no key, no accounts) or no file: historical look = Classique.
+        let v310 = parse(br#"{"codexEnabled":true,"claudeEnabled":true,"fableEnabled":false,"indicator":"both","displayMode":"app"}"#);
+        assert_eq!(v310.claude_layout, "classic");
+        assert!(
+            v310.claude_enabled
+                && !v310.fable_enabled
+                && v310.indicator == "both"
+                && v310.display_mode == "app"
+        );
+        assert_eq!(Prefs::default().claude_layout, "classic");
+        let single = parse(br#"{"claudeEnabled":true,"claudeAccounts":{"mode":"single","selectedId":null,"profiles":[]}}"#);
+        assert_eq!(single.claude_layout, "classic");
+        // Migrated value is written as its own key and survives a round trip.
+        assert_eq!(
+            serde_json::to_value(&v310).unwrap()["claudeLayout"],
+            "classic"
+        );
+        assert_eq!(parse(&serde_json::to_vec(&v310).unwrap()), v310);
+        // An explicit choice wins over the account mode, both ways.
+        let explicit = parse(br#"{"claudeLayout":"compact","claudeAccounts":{"mode":"single","selectedId":null,"profiles":[]}}"#);
+        assert_eq!(explicit.claude_layout, "compact");
+        assert_eq!(parse(&serde_json::to_vec(&explicit).unwrap()), explicit);
+        let explicit = parse(br#"{"claudeLayout":"classic","claudeAccounts":{"mode":"multi","selectedId":null,"profiles":[]}}"#);
+        assert!(explicit.classic_claude_layout());
+        // Previous multi build without the key: its paired bars = Compacte.
+        let old = parse(br#"{"claudeEnabled":true,"indicator":"both","displayMode":"app","claudeAccounts":{"mode":"multi","selectedId":null,"profiles":[]}}"#);
+        assert_eq!(old.claude_layout, "compact");
+        assert!(!old.classic_claude_layout());
+        assert!(old.claude_enabled && old.indicator == "both" && old.display_mode == "app");
+        assert_eq!(old.claude_accounts.mode, "multi");
+        // Unknown value is normalised without resetting other preferences.
+        let odd = parse(br#"{"claudeLayout":"multi","claudeEnabled":true,"fableEnabled":false,"claudeAccounts":{"mode":"multi","selectedId":null,"profiles":[]}}"#);
+        assert_eq!(odd.claude_layout, "compact");
+        assert!(odd.claude_enabled && !odd.fable_enabled);
+        assert_eq!(odd.claude_accounts.mode, "multi");
+        // Classic survives a round trip and is written as its own key.
+        let classic = parse(br#"{"claudeLayout":"classic","claudeAccounts":{"mode":"single","selectedId":null,"profiles":[]}}"#);
+        assert!(classic.classic_claude_layout());
+        assert_eq!(classic.claude_accounts.mode, "single");
+        let v = serde_json::to_value(&classic).unwrap();
+        assert_eq!(v["claudeLayout"], "classic");
+        assert_eq!(parse(&serde_json::to_vec(&classic).unwrap()), classic);
+    }
+    #[test]
+    fn claude_layout_change_does_not_restart_collection_or_touch_accounts() {
+        let mut before = Prefs::default();
+        before.claude_enabled = true;
+        before.claude_accounts.mode = "multi".into();
+        before
+            .claude_accounts
+            .profiles
+            .push(crate::claude_accounts::Profile {
+                id: "profile:a".into(),
+                path: "/fixture/a".into(),
+                name: "A".into(),
+                visible: false,
+            });
+        let mut after = before.clone();
+        after.layout = "classic".into();
+        assert!(!collection_changed(&before, &after));
+        assert_eq!(before.claude_accounts, after.claude_accounts);
+    }
+    #[test]
+    fn layout_preference_is_saved_to_disk_with_other_preferences() {
+        let root = std::env::temp_dir().join(format!("qm-prefs-layout-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("prefs.json");
+        let mut p = parse(br#"{"claudeEnabled":true,"indicator":"both"}"#);
+        p.layout = "classic".into();
+        let p = normalized_for_save(p);
+        save_to(&file, &p).unwrap();
+        let back = parse(&fs::read(&file).unwrap());
+        assert_eq!(back, p);
+        assert!(back.classic_claude_layout() && back.indicator == "both");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_accounts_absent_load_as_unique_primary_and_survive_round_trip() {
+        // Files of 3.1.0 and of the Claude multi-account builds: no key.
+        for bytes in [
+            &br#"{"codexEnabled":true,"claudeEnabled":true,"fableEnabled":false,"indicator":"both","displayMode":"app"}"#[..],
+            &br#"{"claudeAccounts":{"mode":"multi","selectedId":null,"profiles":[]},"layout":"compact","claudeLayout":"compact","codexLayout":"compact"}"#[..],
+        ] {
+            let p = parse(bytes);
+            assert_eq!(p.codex_accounts, crate::claude_accounts::AccountPrefs::default());
+            assert_eq!(p.codex_accounts.mode, "single");
+            let v = serde_json::to_value(&p).unwrap();
+            assert!(v.get("codexAccounts").is_some());
+            assert_eq!(parse(&serde_json::to_vec(&p).unwrap()), p);
+        }
+        // Other preferences untouched.
+        let p = parse(br#"{"codexEnabled":false,"claudeEnabled":true,"indicator":"both"}"#);
+        assert!(!p.codex_enabled && p.claude_enabled && p.indicator == "both");
+        // Saved Codex accounts persist on disk; an invalid edit is refused
+        // before the file is replaced.
+        let root = std::env::temp_dir().join(format!("qm-prefs-codex-{}", std::process::id()));
+        let home = root.join("codex-work");
+        fs::create_dir_all(&home).unwrap();
+        let home = home.canonicalize().unwrap();
+        let file = root.join("prefs.json");
+        let mut p = Prefs::default();
+        p.codex_accounts.mode = "multi".into();
+        p.codex_accounts
+            .profiles
+            .push(crate::claude_accounts::Profile {
+                id: crate::claude_accounts::identity(&home),
+                path: home.to_str().unwrap().into(),
+                name: "Travail".into(),
+                visible: true,
+            });
+        save_to(&file, &p).unwrap();
+        assert_eq!(parse(&fs::read(&file).unwrap()), p);
+        let bytes = fs::read(&file).unwrap();
+        let mut bad = p.clone();
+        bad.codex_accounts.profiles[0].path = "relative".into();
+        assert!(save_to(&file, &bad).is_err());
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        // An unknown mode in a hand-edited file is refused at save time too.
+        bad = p.clone();
+        bad.codex_accounts.mode = "odd".into();
+        assert!(save_to(&file, &bad).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_display_edits_do_not_restart_children_but_followed_homes_do() {
+        let before = Prefs::default();
+        let mut after = before.clone();
+        after.codex_accounts.mode = "multi".into();
+        after.codex_accounts.selected_id = Some("display-only".into());
+        after.layout = "compact".into();
+        assert!(!codex_collection_changed(&before, &after));
+        let before = after.clone();
+        after
+            .codex_accounts
+            .profiles
+            .push(crate::claude_accounts::Profile {
+                id: "profile:a".into(),
+                path: "/fixture/a".into(),
+                name: "A".into(),
+                visible: true,
+            });
+        assert!(codex_collection_changed(&before, &after));
+        // Claude collection is not touched by a Codex change, and vice versa.
+        assert!(!collection_changed(&before, &after));
+        let before = after.clone();
+        after.codex_accounts.profiles[0].name = "Travail".into();
+        after.codex_accounts.profiles[0].visible = false;
+        assert!(!codex_collection_changed(&before, &after));
+        after.codex_enabled = false;
+        assert!(codex_collection_changed(&before, &after));
+    }
 
     #[test]
     fn defaults_keep_codex_only_behaviour() {
@@ -170,6 +639,11 @@ mod tests {
             indicator: "both".into(),
             display_mode: "app".into(),
             ntfy: crate::ntfy::Config::default(),
+            claude_accounts: crate::claude_accounts::AccountPrefs::default(),
+            codex_accounts: crate::claude_accounts::AccountPrefs::default(),
+            layout: "classic".into(),
+            claude_layout: "classic".into(),
+            codex_layout: "classic".into(),
         };
         let bytes = serde_json::to_vec(&saved).unwrap();
         assert_eq!(

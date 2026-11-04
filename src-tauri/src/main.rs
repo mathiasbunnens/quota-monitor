@@ -25,5 +25,13 @@ fn main() {
         chatgpt_quota_monitor_lib::quota_ui_smoke(path);
         return;
     }
+    #[cfg(target_os = "macos")]
+    if let Some(index) = args.iter().position(|a| a == "--menu-tracking-fixture") {
+        let path = args.get(index + 1).expect("PNG directory required");
+        if !chatgpt_quota_monitor_lib::menu_tracking_fixture(path) {
+            std::process::exit(1);
+        }
+        return;
+    }
     chatgpt_quota_monitor_lib::run()
 }

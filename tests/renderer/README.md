@@ -81,3 +81,37 @@ state. Run at 360px light, 300px dark with reduced motion and 420px. Keep the
 tab visible: hidden pages throttle timers. Browser captures are not evidence of
 native window, Dock or activation behaviour. `node --test
 scripts/compact-window.test.mjs` covers the pure view without a browser.
+
+## Settings → Fournisseurs accounts (detail, auto-detection, + button)
+
+    node scripts/claude-renderer-fixture.mjs node_modules/.cache/dac-after
+    AFTER_SITE=node_modules/.cache/dac-after/site [BEFORE_SITE=<older site>] [SHOTS=<dir>] node scripts/accounts-detail-check.mjs
+
+Headless Chrome over CDP on the offline fixture (mocked IPC, no real account or
+file). Asserts account rows without chevron or detail panel (no folder, no Supprimer), the + button per provider,
+removal routed to `untrack_*_profile` and re-add through the +, and takes
+light/dark captures.
+
+## Accounts: Dashboard, compact window, Settings landing
+
+    node scripts/claude-renderer-fixture.mjs node_modules/.cache/qm-b
+    AFTER_SITE=node_modules/.cache/qm-b/site [BEFORE_SITE=<older site>] [SHOTS=<dir>] node scripts/dashboard-accounts-check.mjs
+    AFTER_SITE=node_modules/.cache/qm-b/site node scripts/accounts-detail-check.mjs
+    node scripts/compact-accounts-check.mjs        # models from --quota-ui-smoke (evidence/t_e0f6e24a/native)
+    SITE=node_modules/.cache/qm-b/site node scripts/rename-geometry-check.mjs
+
+Same offline approach as above (mocked IPC, headless Chrome over CDP, no real
+account or folder). `dashboard-accounts-check` asserts one « Codex ↗ » / « Claude ↗ »
+header per provider, name + plan on one line, the state without chevron or detail
+panel, the 5 h / 7 j reset lines (Fable on, off, absent), the + routed to its own
+provider (folder chooser then `add_*_profile`) and Compacte/Classique.
+`compact-accounts-check` does the same for the standalone window on the JSON
+emitted by the native smoke (handlers `usage`, `add`). `accounts-detail-check`
+covers Réglages rows without chevron/detail, the single +, the add flow, one
+« Principal » and the landing on an add flow (`take_settings_focus`).
+`rename-geometry-check` measures the row, the fitted content and the field
+before / while renaming / while typing a very long name (same heights, bounded
+width, state and visibility control still on the line; light/dark, 480/360 px,
+Claude single/multi and Codex). The native menu bottom (Réglages… first, no
+provider/account entries) is asserted by `--quota-ui-smoke`
+(`NATIVE_MENU_BOTTOM_PASS`).

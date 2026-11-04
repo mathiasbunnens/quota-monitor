@@ -13,15 +13,15 @@ const color = (remaining: number): Pick<CompactRow["fill"], "from" | "to" | "fra
     : remaining <= 40 ? { from: "red", to: "orange", fraction: (remaining - 20) / 20 }
       : remaining <= 60 ? { from: "orange", to: "green", fraction: (remaining - 40) / 20 }
         : { from: "green", to: "green", fraction: 0 };
-const row = (label: string, remaining: number | null, reset: string, model = false, value?: string): CompactRow => ({
-  model, label, remaining, reset,
+const row = (label: string, remaining: number | null, reset: string, model = false, value?: string, countdown = "—"): CompactRow => ({
+  model, label, remaining, reset, countdown,
   value: value ?? (remaining === null ? "—" : remaining === 0 ? "Épuisé" : `${remaining} %`),
   low: remaining !== null && remaining <= 20,
   fill: { ...color(remaining ?? 0), visible: (remaining ?? 0) * 276 / 100 >= 5, ratio: (remaining ?? 0) / 100 },
 });
 
 const codex = {
-  name: "Codex", section: "CODEX", badge: "Plus", note: null,
+  name: "Codex", section: "CODEX", compact: false, badge: "Plus", note: null,
   rows: [
     row("Limite sur 1h35", 63, "Réinitialisation à 15h40"),
     row("Limite sur 4j 2h", 85, "Réinitialisation le 29/10 à 09h12"),
@@ -29,12 +29,23 @@ const codex = {
   ],
 };
 const claude = {
-  name: "Claude", section: "CLAUDE", badge: "Pro", note: null,
+  name: "Claude", section: "CLAUDE", compact: false, badge: "Pro", note: null,
   rows: [
     row("Limite sur 1h35", 12, "Réinitialisation à 15h40"),
     row("Limite Fable", 37, "Réinitialisation le 29/10 à 09h12", true),
   ],
 };
+// Claude multi-account cards: same shape as claude_account_panels → compact_panel.
+const account = (name: string, badge: string, rows: CompactRow[], note: CompactPanelModel["providers"][number]["note"] = null) =>
+  ({ name: `Claude · ${name}`, section: `CLAUDE · ${name.toUpperCase()}`, compact: true, badge, note, rows });
+const personnel = account("Personnel", "Pro", [
+  row("Limite sur 3h30", 73, "Réinitialisation à 15h56", false, undefined, "3h30"),
+  row("Limite sur 3j 8h", 86, "Réinitialisation le 03/11 à 20h26", false, undefined, "3j 8h"),
+]);
+const travail = account("Travail", "Max", [
+  row("Limite sur 42 min", 35, "Réinitialisation à 13h12", false, undefined, "42 min"),
+  row("Limite sur 2j 1h", 20, "Réinitialisation le 02/11 à 13h30", false, undefined, "2j 1h"),
+]);
 const header = { title: "Quota Monitor", subtitle: "Actualisé à 14h05", status: "À jour", tone: "good" as const };
 const base = { connection: null, version: "fixture", update: null };
 
@@ -60,6 +71,25 @@ export const scenarios: Record<string, CompactPanelModel> = {
     ...base, header: { title: "Quota Monitor", subtitle: "Activez Codex ou Claude dans les Réglages", status: "Inactif", tone: "neutral" },
     providers: [],
   },
+  "multi-accounts": { ...base, header, providers: [personnel, travail] },
+  "multi-fable": { ...base, header, providers: [
+    { ...personnel, rows: [...personnel.rows, row("Limite Fable", 60, "Réinitialisation le 04/11 à 16h30", true, undefined, "4j 4h")] },
+    { ...travail, rows: [...travail.rows, row("Limite Fable", 9, "Réinitialisation le 03/11 à 09h30", true, undefined, "2j 21h")] },
+  ] },
+  "multi-edge-cases": { ...base, header: { ...header, status: "Erreur", tone: "error" }, providers: [
+    account("Épuisé", "Max", [
+      row("Limite sur 42 min", 0, "Réinitialisation à 13h12", false, "Épuisé", "42 min"),
+      row("Limite hebdomadaire", null, "Réinitialisation non communiquée"),
+      row("Limite Fable", 85, "Réinitialisation le 03/11 à 09h30", true, undefined, "2j 21h"),
+    ], { text: "Usage supplémentaire : plafond atteint", tone: "warning" }),
+    account("Travail", "Max", [], { text: "Lecture Claude impossible : vérifiez la connexion et une version de Claude Code compatible avec get_usage. Dernières valeurs éventuellement conservées, non actualisées.", tone: "error" }),
+    account("Absent", "Pro", [], { text: "Dossier de profil Claude indisponible.", tone: "error" }),
+  ] },
+  // Multi mode with one visible account: the historic v3.1.0 card.
+  "multi-one-visible": { ...base, header, providers: [{ ...claude, rows: [
+    row("Limite sur 3h30", 73, "Réinitialisation à 15h56"),
+    row("Limite sur 3j 8h", 86, "Réinitialisation le 03/11 à 20h26"),
+  ] }] },
 };
 
 let panel: CompactPanelModel = structuredClone(scenarios["two-providers"]);

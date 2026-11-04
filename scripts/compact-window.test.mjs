@@ -12,7 +12,7 @@ const compiled = ts.transpileModule(source, {
 }).outputText;
 const moduleSource = compiled.replace(/from "([^"]+)"/g,
   (_, specifier) => `from ${JSON.stringify(import.meta.resolve(specifier))}`);
-const { CompactPanel, updateIndicator, fillColor } = await import(
+const { CompactPanel, updateIndicator, fillColor, pairReset } = await import(
   "data:text/javascript;base64," + Buffer.from(moduleSource).toString("base64"));
 
 const fill = (from, to, fraction, ratio) => ({ from, to, fraction, visible: ratio * 276 >= 5, ratio });
@@ -46,6 +46,48 @@ function find(node, predicate, out = []) {
   find(node.props?.children, predicate, out);
   return out;
 }
+
+test("Codex paired windows use explicit slots and preserve unknown and additional rows", () => {
+  const row = { ...panel.providers[0].rows[0], countdown: "1h35" };
+  const week = { ...row, pairSlot: 1, label: "7 jours", remaining: 85, value: "85 %" };
+  const render = (rows, compact = true) => html({panel: {...panel, providers:[{...panel.providers[0],compact,rows}]}});
+  const paired = render([{...row,pairSlot:0},week,{...row,label:"Autre modèle",pairSlot:null}]);
+  assert.equal((paired.match(/role="meter"/g)||[]).length,3);
+  assert.match(paired,/compact-pair__track--short/);assert.match(paired,/compact-pair__track--week/);
+  assert.match(paired,/1h35 · 85 %/);assert.match(paired,/Autre modèle/);
+  const only = render([week]);
+  assert.match(only,/grid-row:2/); // no fictitious meter, but retain the native weekly y slot
+  assert.doesNotMatch(only,/compact-pair__track--short/);assert.match(only,/compact-pair__track--week/);
+  assert.equal((only.match(/role="meter"/g)||[]).length,1);
+  assert.doesNotMatch(render([week],false),/class="compact-pair"/);
+  const missing = render([{...week,remaining:null,value:"Non communiquée"}]);
+  assert.doesNotMatch(missing,/aria-valuenow/);assert.match(missing,/Non communiquée/);
+  assert.doesNotMatch(render([]),/role="meter"/);
+});
+
+test("compact Fable is a third thin track without a caption, with accessible reset; Classique unchanged", () => {
+  const base = { ...panel.providers[0].rows[0], countdown: "42 min" };
+  const week = { ...base, pairSlot: 1, label: "7 jours" };
+  const fable = { ...panel.providers[1].rows[0], reset: week.reset };
+  const render = (rows, compact = true) => html({ panel: { ...panel, providers: [{ name: "Claude", section: "CLAUDE", compact, rows }] } });
+  const rows = [{ ...base, pairSlot: 0 }, week, fable];
+  const same = render(rows);
+  assert.match(same, /compact-pair has-fable/);
+  assert.match(same, /compact-pair__track--fable/);
+  assert.equal((same.match(/role="meter"/g) || []).length, 3);
+  assert.doesNotMatch(same, /fable-caption/);
+  assert.doesNotMatch(same.replace(/<[^>]*>/g, ''), /Fable/);
+  assert.match(same, /aria-label="Limite Fable · 50 % restants · Réinitialisation/);
+  const different = render([...rows.slice(0, 2), { ...fable, reset: 'Réinitialisation demain' }]);
+  assert.match(different, /title="Limite Fable · 50 % restants · Réinitialisation demain"/);
+  const absent = render(rows.slice(0, 2));
+  assert.doesNotMatch(absent, /has-fable|fable-caption|track--fable/);
+  const classic = render(rows, false);
+  assert.doesNotMatch(classic, /compact-pair/);
+  assert.equal((classic.match(/compact-row__reset/g) || []).length, 3);
+  const unknown = render([...rows.slice(0, 2), { ...fable, remaining: null, value: 'Non communiquée', fill: fill('red', 'red', 0, 0) }]);
+  assert.match(unknown, /aria-valuetext="Non communiquée"/);
+});
 
 test("header carries exactly two icon buttons, settings then update, after the status", () => {
   const markup = html();
@@ -145,4 +187,136 @@ test("errors are announced and the actions stay reachable without data", () => {
   assert.match(markup, /role="alert">Offline fixture failure</);
   assert.match(markup, /aria-label="Réglages"/);
   assert.match(markup, /aria-label="Vérifier les mises à jour"/);
+});
+
+// --- Claude multi-account cards (same model as the native menu card) -------
+const multiRow = (label, remaining, countdown, extra = {}) => ({
+  model: false, label, remaining, value: remaining === null ? "—" : `${remaining} %`,
+  reset: "Réinitialisation à 15h40", countdown, low: remaining !== null && remaining <= 20,
+  fill: fill("green", "green", 0, (remaining ?? 0) / 100), ...extra,
+});
+const multiPanel = {
+  ...panel,
+  providers: [
+    { name: "Claude · Personnel", section: "CLAUDE · PERSONNEL", compact: true, badge: "Pro", note: null, rows: [
+      multiRow("Limite sur 3h30", 73, "3h30"),
+      multiRow("Limite sur 3j 8h", 86, "3j 8h"),
+      multiRow("Limite Fable", 60, "4j 4h", { model: true }),
+    ] },
+    { name: "Claude · Travail", section: "CLAUDE · TRAVAIL", compact: true, badge: "Max",
+      note: { text: "Usage supplémentaire : plafond atteint", tone: "warning" }, rows: [
+      multiRow("Limite sur 42 min", 0, "42 min", { value: "Épuisé", low: true, fill: fill("red", "red", 0, 0) }),
+      multiRow("Limite sur 2j 1h", 20, "2j 1h", { reset: "Réinitialisation le 02/11 à 12h00" }),
+      multiRow("Limite Fable", 86, "3j 8h", { model: true, reset: "Réinitialisation le 03/11 à 19h00" }),
+    ] },
+  ],
+};
+
+test("multi-account cards pair 5 h and 7 j with countdowns and a third fine Fable bar", () => {
+  const markup = html({ panel: multiPanel });
+  assert.equal((markup.match(/class="compact-pair has-fable"/g) ?? []).length, 2);
+  assert.match(markup, /CLAUDE · PERSONNEL/);
+  assert.match(markup, /CLAUDE · TRAVAIL/);
+  assert.match(markup, />3h30 · 73 %</);
+  assert.match(markup, />3j 8h · 86 %</);
+  assert.match(markup, />42 min · Épuisé</);
+  assert.match(markup, /aria-label="Limite 5 heures : Limite sur 3h30 · 73 % restant"/);
+  // The pair is always 5 h + 7 j, never Fable.
+  assert.match(markup, />2j 1h · 20 %</);
+  assert.doesNotMatch(markup.replace(/<[^>]*>/g, ''), /Fable/);
+  assert.doesNotMatch(markup.replace(/<[^>]*>/g, ''), /Fable ·/);
+  assert.equal((markup.match(/class="compact-pair__resets"/g) ?? []).length, 2);
+  assert.match(markup, /compact-pair__resets"><span title="[^"]*">Réinit\. à 15h40<\/span><span title="[^"]*">Réinit\. à 15h40<\/span>/);
+  assert.match(markup, />Réinit\. le 02\/11 à 12h00</);
+  assert.equal(pairReset({ reset: "Réinitialisation non communiquée" }), "Réinit. non communiquée");
+  assert.equal((markup.match(/compact-row__track compact-pair__track--short/g) ?? []).length, 2);
+  assert.equal((markup.match(/compact-row__track compact-pair__track--week/g) ?? []).length, 4);
+  assert.equal((markup.match(/compact-pair__track--fable/g) ?? []).length, 2);
+  assert.equal((markup.match(/class="compact-row"/g) ?? []).length, 0, "Fable no longer takes a full row");
+  assert.match(markup, /Usage supplémentaire : plafond atteint/);
+});
+
+test("single-account and Codex cards keep the v3.1.0 rows (no pairing)", () => {
+  const markup = html();
+  assert.doesNotMatch(markup, /compact-pair/);
+  assert.equal((markup.match(/class="compact-row"/g) ?? []).length, 3);
+});
+
+test("compact window thickness: 5 h inherits the 5 px Unique track, 7 j is 3 px with a 2 px gap", async () => {
+  const sass = await import("sass");
+  const css = sass.compile(new URL("../src/features/compact/compact.scss", import.meta.url).pathname).css;
+  assert.match(css, /\.compact-row__track\s*\{[^}]*height: 5px/);
+  assert.doesNotMatch(css, /\.compact-pair__track--short\s*\{[^}]*height:/);
+  assert.match(css, /\.compact-pair__track--week\s*\{[^}]*height: 3px[^}]*border-radius: 1\.5px/);
+  assert.match(css, /\.compact-pair__bars\s*\{[^}]*gap: 2px/);
+  assert.match(css, /\.compact-pair\s*\{[^}]*height: 60px/);
+  assert.match(css, /\.compact-pair\.has-fable\s*\{[^}]*height: 65px/);
+  assert.match(css, /\.compact-pair\.has-fable \.compact-pair__bars\s*\{[^}]*grid-template-rows: 5px 3px 3px/);
+  assert.match(css, /\.compact-pair__resets\s*\{[^}]*font-size: 10px/);
+});
+
+// --- Provider header ↗, account state, + (same logic as the Dashboard) ---------
+const account = (kind, id, name, badge, state, tone = "good", rows = [multiRow("Limite sur 3h30", 73, "3h30"), multiRow("Limite sur 3j 8h", 86, "3j 8h")]) => ({
+  kind, accountName: name, state: { label: state, tone },
+  name: `${kind === "codex" ? "Codex" : "Claude"} · ${name}`, section: `${kind.toUpperCase()} · ${name.toUpperCase()}`, compact: true, badge, note: null, rows,
+});
+const groupedPanel = {
+  ...panel,
+  addable: ["codex", "claude"],
+  providers: [
+    account("codex", "primary", "Principal", "Plus", "Connecté"),
+    account("codex", "profile:travail", "Travail", "Pro", "Non connecté", "warning", []),
+    account("claude", "primary", "Personnel", "Pro", "Connecté"),
+  ],
+};
+const calls = [];
+const handlers = { onUsage: (kind) => calls.push(["usage", kind]), onAdd: (kind) => calls.push(["add", kind]) };
+const groupedProps = (extra = {}) => props({ panel: groupedPanel, usageIcon: createElement("svg", { className: "external-icon" }), ...handlers, ...extra });
+
+test("one header « CODEX ↗ » per provider before its account cards, then its +", () => {
+  const markup = renderToStaticMarkup(createElement(CompactPanel, groupedProps()));
+  const groups = markup.split('<section class="compact-group"').slice(1);
+  assert.equal(groups.length, 2);
+  assert.match(groups[0], /^[^>]*aria-label="Codex"[\s\S]*<h2 class="compact-group__head"><button[^>]*aria-label="Codex : usage détaillé"[^>]*>CODEX<svg class="external-icon"/);
+  assert.match(groups[1], /<button[^>]*aria-label="Claude : usage détaillé"[^>]*>CLAUDE<svg class="external-icon"/);
+  assert.equal((markup.match(/compact-group__usage/g) ?? []).length, 2, "once per provider, not per card");
+  assert.equal((groups[0].match(/<section class="compact-provider"/g) ?? []).length, 2);
+  assert.ok(groups[0].indexOf("compact-group__usage") < groups[0].indexOf('class="compact-provider"'));
+  assert.ok(groups[0].lastIndexOf('class="compact-provider"') < groups[0].indexOf("Ajouter un compte Codex"));
+  assert.match(groups[1], /aria-label="Ajouter un compte Claude"/);
+  assert.doesNotMatch(groups[0], /Ajouter un compte Claude/);
+});
+
+test("each card: account name, plan beside it, then its state; no chevron, no detail", () => {
+  const markup = renderToStaticMarkup(createElement(CompactPanel, groupedProps()));
+  const cards = markup.split('<section class="compact-provider"').slice(1);
+  assert.match(cards[0], /<span class="compact-provider__name">Principal<\/span><span class="compact-provider__badge">Plus<\/span><span class="compact-provider__state compact-tone--good">Connecté<\/span><\/div>/);
+  assert.match(cards[1], /compact-tone--warning">Non connecté<\/span><\/div>/);
+  assert.doesNotMatch(markup, /Détail|compact-provider__chevron|<path d="M6 3\.5 10\.5 8 6 12\.5"/);
+});
+
+test("header ↗ and + route to their own provider; no account detail handler exists", () => {
+  calls.length = 0;
+  const tree = CompactPanel(groupedProps());
+  const buttons = find(tree, (n) => n.type === "button");
+  const click = (label) => buttons.find((b) => b.props["aria-label"] === label).props.onClick();
+  click("Codex : usage détaillé"); click("Claude : usage détaillé");
+  click("Ajouter un compte Claude"); click("Ajouter un compte Codex");
+  assert.deepEqual(calls, [["usage", "codex"], ["usage", "claude"], ["add", "claude"], ["add", "codex"]]);
+  assert.equal(buttons.some((b) => /Détail/.test(b.props["aria-label"] ?? "")), false);
+});
+
+test("an enabled provider without a visible card still offers its header and its +; a disabled one has none", () => {
+  const onlyClaude = { ...groupedPanel, addable: ["codex", "claude"], providers: groupedPanel.providers.filter((p) => p.kind === "claude") };
+  const markup = renderToStaticMarkup(createElement(CompactPanel, groupedProps({ panel: onlyClaude })));
+  assert.match(markup, /aria-label="Codex : usage détaillé"/);
+  assert.match(markup, /aria-label="Ajouter un compte Codex"/);
+  const off = { ...onlyClaude, addable: ["claude"] };
+  const without = renderToStaticMarkup(createElement(CompactPanel, groupedProps({ panel: off })));
+  assert.doesNotMatch(without, /Codex/);
+});
+
+test("models without provider information (older fixtures) render as before, without header or +", () => {
+  const markup = html();
+  assert.doesNotMatch(markup, /compact-group|compact-provider__state|Ajouter un compte|usage détaillé/);
 });

@@ -1,4 +1,58 @@
-import type { ClaudeSnapshot, QuotaSnapshot } from "./types";
+import type { ClaudeAccount, ClaudeLayout, ClaudeSnapshot, CodexAccount, Preferences, QuotaSnapshot } from "./types";
+
+/** One presentation for Claude AND Codex. Same rule as Rust `prefs::parse`:
+ *  `layout` wins (unknown = compact); absent (older file) → the explicit
+ *  Claude key, else the Codex key, else the look the file already had —
+ *  paired bars for a previous Multi build, otherwise the historical card. */
+type LayoutPrefs = { layout?: string; claudeLayout?: string; codexLayout?: string; claudeAccounts?: { mode?: string } };
+export function layoutOf(prefs: LayoutPrefs | null | undefined): ClaudeLayout {
+  const value = prefs?.layout ?? prefs?.claudeLayout ?? prefs?.codexLayout;
+  if (value === undefined) return prefs?.claudeAccounts?.mode === "multi" ? "compact" : "classic";
+  return value === "classic" ? "classic" : "compact";
+}
+
+export type ClaudeCard = { key: string; name: string; snapshot: ClaudeSnapshot | null; account: ClaudeAccount | null };
+/** Cards to draw and how, shared by every React view (mirrors the native
+ *  `claude_account_panels`). The layout applies to one or several cards;
+ *  only names/notes depend on the count. */
+export type ClaudePlan = { cards: ClaudeCard[]; paired: boolean; named: boolean; emptyMulti: boolean };
+
+export function claudePlan(prefs: Preferences | null, accounts: ClaudeAccount[], fallback: ClaudeSnapshot | null): ClaudePlan {
+  const paired = layoutOf(prefs) === "compact";
+  if (!prefs?.claudeEnabled) return { cards: [], paired, named: false, emptyMulti: false };
+  const multiMode = prefs.claudeAccounts?.mode === "multi";
+  const selected = accounts.find((account) => account.id === prefs.claudeAccounts?.selectedId)
+    ?? accounts.find((account) => account.primary) ?? accounts[0];
+  const shown = multiMode ? accounts.filter((account) => account.visible) : selected ? [selected] : [];
+  const named = shown.length > 1;
+  if (multiMode && !shown.length) return { cards: [], paired, named, emptyMulti: true };
+  const cards: ClaudeCard[] = shown.length
+    ? shown.map((account) => ({ key: account.id, name: named ? "Claude · " + account.name : "Claude", snapshot: account.snapshot, account }))
+    : [{ key: "claude", name: "Claude", snapshot: fallback, account: null }];
+  return { cards, paired, named, emptyMulti: false };
+}
+
+export type CodexCard = { key: string; name: string; account: CodexAccount | null; rows: QuotaSnapshot[] };
+/** Codex cards (mirrors the native `codex_account_panels`): the primary
+ *  alone — or an older backend without accounts — is the exact historical
+ *  « Codex » card fed by `get_quota_snapshots`; several visible homes get
+ *  one « Codex · nom » card each. Never an aggregate. */
+export type CodexPlan = { cards: CodexCard[]; paired: boolean; named: boolean; emptyMulti: boolean };
+
+export function codexPlan(prefs: Preferences | null, accounts: CodexAccount[], snapshots: QuotaSnapshot[]): CodexPlan {
+  const paired = layoutOf(prefs) === "compact";
+  if (!(prefs?.codexEnabled ?? true)) return { cards: [], paired, named: false, emptyMulti: false };
+  const shown = accounts.filter((account) => account.tracked && account.visible);
+  const named = shown.length > 1;
+  if (!shown.length && accounts.length && prefs?.codexAccounts?.mode === "multi") return { cards: [], paired, named, emptyMulti: true };
+  if (!shown.length || (shown.length === 1 && shown[0].primary)) {
+    return { cards: [{ key: "codex", name: "Codex", account: shown[0] ?? null, rows: snapshots }], paired, named: false, emptyMulti: false };
+  }
+  return {
+    cards: shown.map((account) => ({ key: account.id, name: named ? "Codex · " + account.name : "Codex", account, rows: account.rows })),
+    paired, named, emptyMulti: false,
+  };
+}
 
 export function quotaPercentage(snapshot: QuotaSnapshot) {
   if (snapshot.limit <= 0) return 0;
@@ -27,6 +81,8 @@ export function quotaLabel(snapshot: QuotaSnapshot) {
 
 export type QuotaRow = {
   id: string;
+  /** Slot in the paired block, only for a real window of the selected bucket. */
+  pairSlot?: 0 | 1;
   label: string;
   modelLabel?: string;
   /** Remaining percentage, or null when the provider did not report it. */
@@ -35,28 +91,40 @@ export type QuotaRow = {
   /** Human text shown instead of a percentage when remaining is null. */
   missing: string;
   resetText: string;
+  /** Structured reset (RFC 3339) for local countdowns, without collection. */
+  resetAt?: string | null;
 };
 
 export function codexRows(snapshots: QuotaSnapshot[]): QuotaRow[] {
-  return snapshots.map((snapshot) => {
+  const window = (s: QuotaSnapshot): { bucket: string; slot: 0 | 1 } | null => {
+    if (/reserve|luna|base_model_inference/i.test(s.period)) return null;
+    if (s.period === "five-hour" || s.period === "weekly") return { bucket: "legacy", slot: s.period === "five-hour" ? 0 : 1 };
+    const match = /^(codex:.+):(primary|secondary)$/.exec(s.period);
+    if (!match || (s.windowMinutes !== 300 && s.windowMinutes !== 10080)) return null;
+    return { bucket: match[1] + ":" + s.model, slot: s.windowMinutes === 300 ? 0 : 1 };
+  };
+  const windows = snapshots.map(window);
+  const bucket = windows.find((w) => w?.bucket.startsWith("codex:codex:"))?.bucket
+    ?? windows.find((w) => w !== null)?.bucket;
+  const selected = new Set<number>();
+  for (const slot of [0, 1]) {
+    const index = windows.findIndex((w) => w?.bucket === bucket && w?.slot === slot);
+    if (index >= 0) selected.add(index);
+  }
+  return snapshots.map((snapshot, index) => {
     const remaining = Math.round(quotaPercentage(snapshot));
     return {
       id: snapshot.period, label: quotaLabel(snapshot), remaining, exhausted: remaining <= 0,
-      missing: "", resetText: formatResetDate(snapshot.resetAt),
+      ...(selected.has(index) ? { pairSlot: windows[index]!.slot } : {}),
+      missing: "", resetText: formatResetDate(snapshot.resetAt), resetAt: snapshot.resetAt,
     };
   });
 }
 
 export function claudeRows(snapshot: ClaudeSnapshot, fableEnabled = true): QuotaRow[] {
-  const metrics = snapshot.metrics.filter((metric) => fableEnabled || metric.id !== "claude:weekly_fable");
-  const fable = metrics.find((metric) => metric.id === "claude:weekly_fable");
-  // Compare raw values and a known reset, never rounded percentages or absent data.
-  const duplicate = fable?.availability === "available" && fable.usedPercent !== null && fable.resetAt !== null
-    && metrics.some((metric) => metric.id === "claude:seven_day" && metric.availability === "available"
-      && metric.usedPercent === fable.usedPercent && metric.resetAt === fable.resetAt
-      && metric.periodDurationSeconds === fable.periodDurationSeconds);
-  const displayed = duplicate ? metrics.flatMap((metric) => metric.id === "claude:seven_day" ? [fable!]
-    : metric.id === "claude:weekly_fable" ? [] : [metric]) : metrics;
+  // Every window the provider reported keeps its own row: Fable is never folded into the 7-day
+  // window (even with the same percentage and reset), so neither one depends on the other.
+  const displayed = snapshot.metrics.filter((metric) => fableEnabled || metric.id !== "claude:weekly_fable");
   return displayed.map((metric) => {
     const available = metric.availability === "available" && metric.usedPercent !== null;
     return {
@@ -66,6 +134,7 @@ export function claudeRows(snapshot: ClaudeSnapshot, fableEnabled = true): Quota
       exhausted: available && metric.exhausted,
       missing: metric.availability === "unavailable" ? "Réinitialisée · en attente" : "Non communiquée",
       resetText: metric.resetAt ? formatResetDate(metric.resetAt) : "non communiquée",
+      resetAt: metric.resetAt,
     };
   });
 }

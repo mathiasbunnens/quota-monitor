@@ -1,0 +1,155 @@
+# Claude multi-comptes — portage sur Quota Monitor 3.1.0
+
+Branche `feature/claude-multi-account-3.1`, base `1bcc2e5` (= `v3.1.0` = `origin/main`). Portage de `2d298ad` (multi-comptes) et `6a6a395` (décompte visible), repris hunk par hunk dans l'architecture 3.1.0 (`panel_model()`, fenêtre compacte, Réglages à onglets, Fable). Aucun fichier d'icône, de mascotte, d'updater, de `tauri.conf.json`, `Cargo.*` ou `package*.json` modifié ; version 3.1.0 conservée.
+
+## Comportement
+
+- Consultation uniquement : aucun login, changement de session ou accès direct aux identifiants OAuth/trousseau.
+- Profils : `CLAUDE_CONFIG_DIR` absolu, sinon `~/.claude` ; détection `~/.claude-*` (suivi automatique) ; « Supprimer <compte> » dans le détail déplié (chemin + Supprimer seulement) mémorise l'identité dans `claudeAccounts.excluded` (anciennes préférences : liste vide) pour que la détection ne le rajoute pas, le « + » le réintègre, aucun fichier touché ; visibilité par défaut d'un profil détecté sans entrée : affiché en Multi, mis de côté en Unique ; ajout manuel absolu ; déduplication canonique/symlinks. Un dossier indisponible reste représenté sans bloquer les autres.
+- Collecte sérialisée `initialize` / `get_usage` ; `CLAUDE_CONFIG_DIR` défini uniquement sur le processus enfant. Cache, erreur, rafraîchissement et ticket par identité canonique ; anti-chevauchement et résultats périmés rejetés. Les changements d'affichage ne relancent pas la collecte.
+- `prefs.json` 3.1.0 (mode d'affichage, Fable, ntfy, actualisation) se charge sans perte ; `claudeAccounts` absent → Unique, principal (test `v310_preferences_file_loads_without_loss_and_defaults_to_single_primary`).
+- Réglages (onglet Fournisseurs) : Unique|Multi dès deux profils, renommage, visibilité (affichage seul), ajout manuel.
+- Un seul compte visible : carte « Claude » sans nom de compte ni note ajoutée ; sa présentation suit le choix Compacte/Classique (voir plus bas). Classique = carte 3.1.0 exacte.
+- Multi : une carte « Claude · {profil} » par compte visible, dans `panel_model()` donc **identique dans le menu natif et la fenêtre compacte**. Bloc apparié de 40 pt : 5 h à l'épaisseur Unique mesurée sur 3.1.0 (menu AppKit 5 pt rayon 2,5 ; fenêtre compacte 5 px ; Dashboard React 7 px rayon 8), 7 j à 3 pt/px, écart 2. Entête « décompte · valeur » (3h30, 42 min, 3j 8h) calculé depuis `resetAt` et l'horloge locale, redessiné à la minute sans collecte. Aucune agrégation, couleurs et thèmes existants.
+- Fable : préférence 3.1.0 appliquée à chaque compte (vue d'affichage) ; libellé « Limite Fable » ; si la fenêtre hebdomadaire est coalescée dans Fable, la barre 7 j est préfixée « Fable · ». Rien n'est masqué pour faire tenir la carte (Fable et usage supplémentaire restent visibles).
+- Notifications : **politique 3.1.0 conservée** (alerte au retour à 100 % restant, une fois par cycle). Appliquée à tous les profils (visibles ou non), clé stable `Claude:{id profil}:{métrique}`, migration unique des anciennes clés du principal (Fable inclus), sans doublon ; nom du compte dans le message dès deux profils. Alertes Fable muettes si Fable désactivé.
+
+## Fichiers
+
+| Périmètre | Fichiers |
+| --- | --- |
+| Profils, collecte, préférences, notifications | `src-tauri/src/{claude_accounts.rs,claude_cli.rs,claude.rs,prefs.rs,ntfy.rs}` |
+| `panel_model`, menu AppKit, compact, tray, fixtures natives | `src-tauri/src/lib.rs`, `src-tauri/src/menu_fixture.rs` |
+| Cartes et contrats React | `src/features/quota/{types.ts,providers.ts,ProviderCard.tsx}` |
+| Fenêtre compacte | `src/features/compact/{types.ts,CompactPanel.tsx,compact.scss}` |
+| Réglages | `src/features/settings/{Settings.tsx,ClaudeAccountsSettings.tsx,claude-accounts.scss,settings.scss}` |
+| Dashboard | `src/pages/Dashboard/{Dashboard.tsx,dashboard.scss}` |
+| Tests et fixtures | `src/features/quota/claudeProfiles.test.cjs`, `scripts/{compact-window,quota-providers}.test.mjs`, `scripts/claude-renderer-fixture.mjs`, `tests/renderer/compact.tsx` |
+
+## Vérifications exécutées
+
+- `cargo test --offline` (src-tauri) : **106 réussis, 0 échec, 2 ignorés** (intégrations aux vrais comptes).
+- Node 24.16.0 : `node --test scripts/*.test.mjs src/features/quota/claudeProfiles.test.cjs` : **55 réussis, 0 échec** ; `npm run build` (tsc + Vite) OK.
+- `--quota-ui-smoke` natif : 53 PASS, 0 échec (épaisseurs mesurées 5/5 Unique, 5/3 Multi).
+- Non-régression : smoke natif 3.1.0 (`1bcc2e5`) et port lancés dans la même minute → **10/10 captures communes identiques au pixel** (deux fournisseurs, Codex en erreur, Claude en attente, aucun fournisseur, icône de barre empilée ; clair/sombre).
+- Fixtures React (IPC simulé) : Dashboard, fenêtre compacte et Réglages, clair/sombre ; Multi, Fable, erreurs/épuisé/manquant, un seul visible, Unique, aucun compte ; aucun débordement horizontal.
+
+## Limites
+
+- Windows/Linux : rendu React et helper tray testés sur macOS uniquement, pas d'exécution native.
+- Portage initial : aucun vrai compte interrogé. Correctif de connexion ci-dessous : seule une lecture `get_usage` du principal a été exécutée explicitement, sans appel de modèle ni lecture d'identifiants. Aucune notification/ntfy réelle, application normale jamais lancée.
+
+## Correctif : session du compte principal
+
+Le multi-comptes forçait `CLAUDE_CONFIG_DIR=~/.claude` même pour le principal. Sur macOS, cette présence explicite sélectionne une autre session Claude Code : la même lecture renvoyait `subscription_type: null` et `rate_limits_available: false`, alors que sans la variable elle renvoyait `max` et `true`.
+
+- Principal : hériter exactement de l'environnement de l'app, comme en 3.1.0. Ne pas ajouter la variable si elle est absente ; si elle existe, ne pas réécrire sa valeur.
+- Autres profils : définir la variable seulement sur l'enfant avec le chemin brut découvert/saisi, sans canonicalisation (identité/cache/déduplication restent canoniques). Le chemin sauvegardé par les Réglages reste brut.
+- Réponse sans session : état `not_signed_in`, aucune barre/quota inventé, et indication de connexion propre au profil. Les autres comptes fonctionnent indépendamment.
+- Test de régression observé en échec avant le correctif : le faux CLI recevait le chemin du principal au lieu de `<unset>` ; après correction, les deux cas absent/hérité passent, ainsi que les chemins supplémentaires exacts et la déduplication du principal.
+- Vérifications du correctif : `cargo test --offline` 109 réussis, 4 ignorés (deux intégrations historiques, un helper de sous-processus exécuté par son test parent, une sonde réelle opt-in) ; 45 tests Node affectés réussis ; `npm run build` OK. Une exécution explicite de `live_primary_collector_is_signed_in --ignored --nocapture` passe avec seulement `subtype=success subscription_type="max" rate_limits_available=true` imprimés.
+- Fixture navigateur du profil non connecté inspectée en clair/sombre : indication lisible, aucun débordement horizontal, compte voisin inchangé. Aucune modification de styles.
+- Les preuves (`evidence/`) ne sont pas commitées.
+
+## Réglages simplifiés et présentation Compacte | Classique
+
+Contrat en vigueur depuis t_ad995d23 (remplace celui de 644cca6, où un seul compte gardait toujours la carte historique).
+
+Deux réglages indépendants :
+
+- **Fournisseurs → Claude** choisit *quels* comptes sont affichés (`Unique | Multi`, dès deux profils).
+- **Affichage → Présentation** (réglage unique Claude + Codex, voir la fin du document) choisit *comment* : `Compacte` (barres 5 h / 7 j jumelées, décomptes) ou `Classique` (lignes séparées historiques : 5 h, hebdomadaire, Fable, pourcentages, réinitialisations). **S'applique à tous les cas** : Unique, Multi avec un seul visible, plusieurs visibles. Jamais d'agrégation.
+
+### Préférence `claudeLayout` (devenue `layout`, voir la fin)
+
+- Règle partagée : Rust `prefs::parse` / `claude_account_panels` (menu AppKit et fenêtre compacte/Dock via `panel_model()`) et React `claudeLayoutOf` / `claudePlan` (Dashboard). Plus aucune condition sur le nombre de comptes.
+- Choix enregistré explicite = prioritaire sur le mode et le nombre de comptes ; valeur inconnue → `compact`, autres préférences conservées.
+- Clé absente (ancien fichier) : on garde l'aspect que ce fichier avait déjà — `compact` pour un ancien Multi (barres jumelées), sinon `classic` (carte 3.1.0). Pas de fichier = `classic`. La valeur migrée est réécrite comme clé propre.
+- Une seule carte : nom « Claude », pas de note d'usage supplémentaire ; plusieurs : « Claude · {profil} ». Zéro compte visible : aucune carte inventée, message d'état vide ; le choix reste modifiable et enregistré.
+- Changer le style n'appelle que `set_preferences` : aucune collecte, ni mode, ni visibilité, ni cache/session modifiés.
+
+### Affichage
+
+- Trois groupes, pictogrammes + libellés courts, aucun paragraphe : Mode d'affichage (mini barre des menus avec icône / petite fenêtre + Dock), Afficher dans la barre des menus (glyphes Codex / Claude / les deux, monochromes `currentColor`, masqué en mode Application), Présentation Claude (miniatures : double barre serrée / lignes espacées, sans chiffres).
+- Mêmes `prefs-segmented` (variante `prefs-choices`), couleurs et thèmes ; vrais boutons radio : Tab, flèches, focus visible, nom accessible explicite. Les radios restent actives pendant l'enregistrement (garde `mutation`), le focus n'est donc pas perdu.
+
+### Fournisseurs → Claude
+
+- Une seule liste (profils détectés inclus) : nom, crayon de renommage en ligne (Entrée enregistre, Échap annule, focus rendu au crayon), Principal, abonnement, pastille d'état ; interrupteur Afficher en Multi, sélection ronde en Unique. Détail d'erreur via le bouton ⓘ (et infobulle), pas de paragraphe permanent.
+- **« + »** en bas à droite de chaque liste (0, 1 ou n profils), seul : il ouvre un petit panneau en ligne (`AddAccountFlow`) avec « Choisir un dossier… » (sélecteur macOS `NSOpenPanel`, absent sous Windows/Linux) ET le champ de chemin absolu. Plus de chevron « options avancées », de bouton Actualiser ni de bouton « Retirer l'ancien relais ».
+- Backend inchangé : `add_claude_profile` (déduplication canonique, erreurs concises « déjà affiché », « introuvable », « indisponible », chemin brut conservé), passage en Multi après un ajout volontaire. Codex inchangé.
+
+## Correctif : fausse barre bleue en haut du menu
+
+Symptôme : bande bleue au-dessus du panneau de quotas en restant sur « Réglages… » ou en passant à « Vérifier les mises à jour… ».
+
+- Cause reproduite : pendant le suivi du menu, chaque actualisation (ouverture, résultat de collecte, tic de décompte à la minute) remplaçait la vue du panneau par `setView`. AppKit reconstruit alors la ligne et replace le fond de sélection de l'action surlignée (`NSRootMenuWindowBackgroundView`) en haut du panneau ; la ligne « Réglages… » perd aussi son texte.
+- Correctif (`refresh_open_panel`) : on garde la vue du panneau et on y déplace le nouveau contenu. Si la hauteur change pendant qu'une action est surlignée (cas qui décalait aussi la sélection), ce redimensionnement attend : prochaine actualisation sans surlignage, fermeture du menu (`menuDidClose:` redessine) ou réouverture. Les valeurs à hauteur égale (décomptes, pourcentages) restent mises à jour en direct ; seul un changement de structure (ex. Claude « Lecture… » → quotas) peut rester affiché à l'ancienne hauteur tant qu'une action reste surlignée.
+- Fixture interactive `--menu-tracking-fixture <dir>` (`menu_fixture.rs`) : vrai menu de production ouvert en suivi AppKit, données synthétiques, flèches clavier envoyées au seul processus, actualisations même hauteur / autre hauteur / rafale, clair et sombre, variante `legacy` (`setView`) et `production`. Verdict calculé depuis la position du fond de sélection par rapport à la ligne surlignée.
+
+## Vérifications t_ad995d23
+
+- RED sur 644cca6 : `layout_choice_applies_to_a_single_visible_account` et `claude_layout_migrates_normalises_and_persists_independently` (Rust), 19 tests Node (présentation mono, migration, Réglages simplifiés). GREEN : `cargo test --offline` 118 réussis / 4 ignorés, Node 69 réussis, `npm run typecheck`, `npm run build`, `cargo fmt --check` OK.
+- `--quota-ui-smoke` : 82 PASS ; mono Compacte = 5/5/3/3 pt (jumelé), mono Classique = 4 × 5 pt ; le rafraîchissement en direct garde la même vue (assertion d'identité).
+- `--menu-tracking-fixture` : `legacy` → STRAY_BAND_OVER_PANEL sur toutes les actualisations avec action surlignée (clair et sombre) ; `production` → 0 bande, sélection toujours sur sa ligne, redimensionnements différés seulement sous surlignage.
+- Fixtures React headless (IPC simulé, captures avant/après 480 px clair et 360 px sombre) : Affichage 58 → 24 mots, Claude Multi 71 → 32 ; aucun débordement ; clavier réel (CDP) : flèches sur Présentation et Mode, renommage Entrée/Échap, interrupteur Espace, sélection Unique, ⓘ, Ajouter → sélecteur → `add_claude_profile`, chemin relatif refusé, erreur backend affichée ; Dashboard mono Compacte jumelé / Classique historique.
+
+### Limites
+
+- Le survol à la souris n'a pas été reproduit par la fixture (les mouvements souris envoyés au processus ne surlignent pas) : la preuve utilise le surlignage clavier, même fond de sélection AppKit. Validation finale du symptôme exact par l'utilisateur sur l'app.
+- Fixtures ≠ application installée ; `NSOpenPanel` non ouvert en test. Windows/Linux non exécutés nativement. Pas de suppression de profil (non demandé).
+
+## Extension Codex — t_33379e53
+
+- **Affichage → Présentation Codex** et **Présentation Claude** sont indépendantes, avec les mêmes miniatures Compacte/Classique. `codexLayout` absent → `classic` (ancien rendu conservé), choix explicite prioritaire, valeur inconnue → `compact`. Aucun changement de `claudeLayout`, des comptes ou de leur collecte. Préférences effectives inspectées sans modification : Claude Compacte, clé Codex absente.
+- Codex Compacte s'applique dès un compte : menu AppKit, fenêtre compacte React via le même `panel_model`, Dashboard. Épaisseurs haut/bas : 5/3 pt (AppKit), 5/3 px (compact), 7/3 px (Dashboard, épaisseur historique propre à cette vue) ; écart 2. Décomptes locaux, pourcentages restants et plan conservés ; date exacte dans les infobulles/Détails. Classique reste historique.
+- Le CLI 0.164.0 fournit de vraies clés `codex:{rateLimitId}:{primary|secondary}` et `windowMinutes`. On sélectionne les fenêtres 300/10080 minutes d'un **même bucket et modèle** (priorité au bucket `codex`, sinon premier éligible). Pas d'agrégation. Fenêtre absente = aucune barre ni valeur inventée ; semaine seule = barre fine. Autres buckets, durées et réserves restent des lignes complètes, avec leurs valeurs/resets. `pairSlot` transmet cette appartenance explicite au renderer compact ; aucun appariement arbitraire des deux premières lignes Codex.
+- Auth/transport `codex.rs`, reset/reconnexion, refresh, notifications, tray/icônes, updater et correctif `refresh_open_panel` inchangés. Changer la présentation n'appelle que `set_preferences`.
+- Vérifié : RED/GREEN Node et Rust (mono, migration, IDs réels, buckets croisés, semaine seule, extras, erreurs, épuisé), 73 tests Node réussis, 121 Rust réussis / 4 ignorés ; typecheck, build Vite, compilation native offline et fmt OK. Fixture AppKit : 116 marqueurs PASS, mesures 5/5/3/3 avec écart 2 ; 19 scènes navigateur headless, clavier flèches/persistance IPC, décompte local sans collecte, aucun débordement ni exception. Captures avant 716e3f0/après et clair/sombre examinées. JSON AppKit de la fixture utilisé directement par le renderer compact, sans simulation d'un compte réel.
+- Faisabilité multi-Codex **documentée, non implémentée** : voir [codex-multi-account-feasibility.md](codex-multi-account-feasibility.md). Isolation par `CODEX_HOME` établie dans le source officiel tagué, y compris les deux backends keyring ; pas de test de deux comptes authentifiés. Aucun login/logout, credentials, lecture keychain ou appel modèle. Aucune application normale lancée ; fixtures isolées seulement.
+- Preuves non commitées : `evidence/t_33379e53/`. Les builds locaux restent dans `dist-local/3.1.0-<sha>-arm64/`, jamais installés automatiquement ; signature ad hoc, sans notarisation. Quitter l'instance installée avant un essai volontaire (même identité/données).
+
+### Complément demandé : titres Réglages
+
+Les quatre onglets partagent désormais `prefs-group__title` (13 px, graisse 600, casse française normale, interligne 1,45) pour les titres de groupe et les légendes ; `prefs-option__title` / les libellés utilisent 12 px / 500. Le titre de page reste celui de la fenêtre native « Réglages » (région React nommée, pas de titre visuel doublonné). Espacement de groupe commun de 10 px, mêmes tokens, icônes et contrôles. Anciennes règles locales `#ntfy-heading`, `h2` fournisseur/connexion et `h3` Fable supprimées. « Actualisation des quotas » distingue le groupe de l'option « Fréquence ».
+
+RED navigateur : titre Actualisation absent et titre Notifications à 700 au lieu de 600. GREEN : 16 captures comparables (4 onglets × clair/sombre × avant/après 029dff0), titres tous à 13/600 et au même alignement gauche 35 px sur viewport 480 px, sans clipping ni débordement ; captures examinées. Les 73 tests Node, typecheck et build Vite passent après ce complément. Aucun transport, réglage d'actualisation ou envoi de notification modifié.
+
+Revue indépendante : seul écart repéré, la semaine seule remontait de 7 px dans la fenêtre React. Correctif : grille aux slots explicites 5/3 px, écart 2 px, sans créer de barre manquante. RED/GREEN du test SSR ; cas navigateur clair/sombre mesure l'offset 7 px et préserve la réserve supplémentaire. Aucun nouveau changement natif.
+
+## Un seul réglage Compacte/Classique — t_5d9c886a
+
+- **Réglages → Affichage → Présentation** (un seul contrôle `prefs-segmented`, icônes existantes) s'applique à Codex **et** Claude : menu natif macOS, fenêtre compacte React (même `panel_model`) et Dashboard. Les contrôles « Présentation Codex » / « Présentation Claude » sont supprimés ; Fournisseurs n'en contient aucun. Aucune condition sur le nombre de comptes ; changer la présentation n'appelle que `set_preferences` (aucune collecte).
+- **Clé effective : `layout`** (`compact` | `classic`, inconnue → `compact`). Rust : `prefs::parse` / `normalized_for_save` / `quota_providers` ; React : `layoutOf` (même règle).
+- **Migration (clé `layout` absente)** :
+  1. une seule ancienne clé (`claudeLayout` ou `codexLayout`) → reprise telle quelle ;
+  2. les deux présentes et différentes → **le choix Claude explicite l'emporte** (les clés ne portent aucune date : « le plus récent » n'est pas connaissable) ;
+  3. aucune → aspect historique du fichier : `compact` pour un ancien Multi, sinon `classic`.
+  Si `layout` existe, il prime sur les deux anciennes clés.
+- **Compatibilité `prefs.json`** : `claudeLayout` et `codexLayout` restent écrites, toujours égales à `layout`, pour qu'un build antérieur relise le même choix ; elles ne sont lues qu'à la migration. Premier enregistrement après mise à jour : le fichier contient `layout` + les deux miroirs.
+- Tests : Rust `single_layout_migrates_from_legacy_keys_with_a_documented_rule`, `single_layout_keeps_legacy_keys_readable_and_mirrored`, `one_saved_layout_switches_codex_and_claude_in_the_native_menu` ; Node `layoutOf…`, `Affichage has ONE Présentation control…`, `one choice changes Claude AND Codex in the Dashboard`.
+
+## Finition : Réglages, Dashboard et menu de la barre (t_5b604e15)
+
+**Réglages.** Un seul « + » (le chevron d'options avancées, « Actualiser » et « Retirer l'ancien relais » disparaissent). Les dossiers sont détectés à l'ouverture des Réglages et ensuite toutes les 2 s (`get_claude_accounts` / `get_codex_accounts`, ce dernier appelle `reconcile`) : aucun bouton n'est nécessaire. « Principal » n'est affiché qu'une fois : le nom (renommable) ; l'étiquette n'apparaît que si le compte principal a été renommé. La connexion Codex (se connecter, connexion par code, « Emplacement de Codex ») est dans le détail du compte principal, sous le chemin, tant que Codex est connecté (sinon le panneau complet reste au-dessus de la liste). Choix : l'exécutable et le login ne concernent que le principal (les autres dossiers se connectent par `CODEX_HOME=… codex login`), et le détail ne s'ouvre que sur demande.
+
+**Ancien relais.** C'était l'entrée `statusLine` de `~/.claude/settings.json` qui lançait l'application avec `--claude-statusline-relay` (source de données de la 3.0.x). La collecte passe par la CLI officielle (`get_usage`), le fichier du relais n'est plus lu. Au démarrage, `claude::migrate_legacy_relay` retire cette entrée en silence, uniquement si elle est la nôtre : une `statusLine` personnalisée, un fichier illisible ou absent ne sont jamais modifiés, les autres réglages sont conservés, la sauvegarde `settings.json.quota-monitor.bak` faite à l'installation reste. Opération idempotente (test Rust). Les commandes `install_claude_relay` / `uninstall_claude_relay` sont supprimées.
+
+**Dashboard (React, Windows/Linux compris).** Par fournisseur : un en-tête « Codex ↗ » / « Claude ↗ » (une fois), les cartes de compte (nom, badge du plan sur la même ligne, icône de réinitialisation, état Connecté / Non connecté / Même compte, chevron › du détail de CE compte), puis un « + » en bas à droite. Le chevron déplie dans la carte le dossier du compte (et, en Classique avec les deux fournisseurs côte à côte, les limites que la carte courte masque : il remplace le bouton « Détails »). Le « + » ouvre le même parcours d'ajout que les Réglages (`AddAccountButton`, mêmes commandes `add_*_profile` / `choose_*_profile_folder`).
+
+**Menu de la barre (macOS).** Le panneau de quotas est une vue personnalisée non interactive (`panel.setEnabled(false)`) : les entrées cliquables sont donc des `NSMenuItem` natifs sous le panneau, jamais un `setView` pendant le suivi (`account_menu.rs`). Par fournisseur : « Codex ↗ » (usage détaillé), un item par compte « nom · état » dont le sous-menu natif (chevron dessiné par AppKit) montre le dossier et « Réglages… » (ouvre Réglages → Fournisseurs sur le détail de ce compte), puis « + Ajouter un compte » (ouvre Réglages → Fournisseurs sur le parcours d'ajout du bon fournisseur). Le routage passe par `settings_focus.rs` (`open_settings_focus` / `take_settings_focus`, événement `settings-focus`). L'icône de réinitialisation n'est pas reprise dans le menu natif : elle demande une confirmation propre au compte. Les items sont reconstruits à chaque rendu menu fermé ; pendant que le menu est ouvert seule la vue du panneau est mise à jour en direct.
+
+**Fenêtre compacte (React).** Même logique à l'échelle compacte : en-tête « CODEX ↗ » par fournisseur, nom + plan + état + chevron par carte, « + » par fournisseur (`kind`, `accountId`, `accountName`, `state`, `addable` du modèle `get_compact_panel`).
+
+Vérifications : `scripts/accounts-detail-check.mjs` (Réglages), `scripts/dashboard-accounts-check.mjs` (Dashboard), `scripts/compact-accounts-check.mjs` (fenêtre compacte), `--quota-ui-smoke` (`NATIVE_ACCOUNT_MENU_PASS` : entrées natives, sous-menus, routes).
+
+## Retrait des détails de compte, menu épuré, Fable et réinitialisations rétablis (t_e0f6e24a)
+
+Remplace les passages ci-dessus sur le chevron › de détail, les sous-menus natifs et les entrées « Codex ↗ / Claude ↗ / + Ajouter un compte » sous le panneau.
+
+- **Plus de détail de compte** (Réglages, Dashboard, fenêtre compacte, menu natif) : ni chevron à droite de l'état, ni dossier, ni « Supprimer », ni bloc de connexion intégré, ni survol/épingle qui dévoilait les limites cachées. Restent : nom + renommage, plan, état (Connecté…), interrupteur de visibilité, « + » par fournisseur, icône de réinitialisation Codex, flèche ↗ d'usage détaillé à côté du titre du fournisseur. Le panneau de connexion Codex complet reste affiché au-dessus de la liste tant que Codex n'est pas connecté. Les commandes `untrack_*_profile` et les exclusions des préférences sont conservées côté Rust (plus appelées par l'interface).
+- **Bas du menu natif** : Réglages… (⌘,), Vérifier les mises à jour…, séparateur, Quitter, version — rien d'autre. L'entrée de connexion Codex, historique, précède Réglages… tant que Codex n'est pas connecté. Aucun `setView` pendant le suivi (correctif `dbeda20` intact).
+- **Fable** : la fenêtre hebdomadaire n'est plus *fusionnée* dans « Limite Fable » quand les deux annoncent le même pourcentage et la même réinitialisation (cause de la barre Fable disparue : la 7 j devenait Fable et la barre séparée disparaissait). 5 h, 7 j et Fable ont chacune leur ligne ; Fable n'est affichée que si la préférence est cochée **et** que Claude Code l'a communiquée (rien de fabriqué, rien d'agrégé). Le jumelage Compacte prend toujours la 5 h et la 7 j, jamais Fable.
+- **Réinitialisation sous 7 j** : en Compacte, une ligne sous les barres donne la réinitialisation de chaque fenêtre (« Réinit. à 14h30 », « Réinit. le 03/11 à 19h00 » en natif et fenêtre compacte ; « Réinit. 03/11 19:00 » au Dashboard), pour Codex et Claude, indépendamment de Fable. En Classique, chaque ligne garde sa ligne « Réinitialisation ». Le bloc jumelé natif passe de 40 à 54 pt (barres 5/3 pt, écart 2 inchangés). Ce n'est pas le crédit/l'action de réinitialisation Codex (conservé tel quel).
+- **Renommage du compte** : le champ en édition faisait grandir la ligne (~19 px) parce que la règle générique `.prefs input` (marge 6 px, remplissage, 100 % de large) l'emportait sur la règle du champ. Il est maintenant en ligne, haut de 22 px comme le nom, large de 15 em au plus (rétrécit avant le plan, l'état ou l'interrupteur) : la hauteur de la ligne, du contenu et de la fenêtre ne change pas (`scripts/rename-geometry-check.mjs`).
+- Vérifications : `--quota-ui-smoke` (`NATIVE_MENU_BOTTOM_PASS`), `scripts/rename-geometry-check.mjs`, `scripts/accounts-detail-check.mjs`, `scripts/dashboard-accounts-check.mjs`, `scripts/compact-accounts-check.mjs`.

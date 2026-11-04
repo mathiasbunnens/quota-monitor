@@ -29,7 +29,6 @@
   &:disabled { opacity: 0.5; cursor: wait; }
 }
 .plan-badge { display: inline-block; margin-left: 6px; padding: 2px 7px; border: 1px solid var(--desktop-border); border-radius: 6px; text-transform: capitalize; color: var(--desktop-ink); }
-.reset-credits { margin-bottom: 16px; }
 .settings-panel {
   position: fixed; inset: 0 0 0 auto; margin: 0; width: min(380px, 100vw); height: 100dvh; max-height: 100dvh;
   max-width: 100vw; padding: 24px; border: 0; border-left: 1px solid var(--desktop-border);
@@ -51,17 +50,35 @@
 
 .provider-grid { display: grid; gap: 12px; margin: 20px 0; grid-template-columns: minmax(0, 1fr); align-items: start; }
 .provider-grid--two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+// One group per provider: « Codex ↗ » header once, its cards, its + at the bottom right.
+.provider-group {
+  min-width: 0;
+  &__header h2 { margin: 0 0 8px; font-size: 15px; font-weight: 650; }
+  &__cards { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); align-items: start; }
+  &__cards--columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  &__footer { display: flex; justify-content: flex-end; }
+}
+@media (max-width: 520px) { .provider-group__cards--columns { grid-template-columns: minmax(0, 1fr); } }
 .provider-card {
   position: relative; border: 1px solid var(--desktop-border); border-radius: 14px; padding: 18px;
   background: var(--desktop-card); box-shadow: 0 2px 5px #00000005; min-width: 0;
-  &__header { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
-  h2 { margin: 0; font-size: 15px; font-weight: 650; }
+  // Wraps in a narrow column: the state moves under the name instead of squeezing it.
+  &__header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px 8px; margin-bottom: 10px; }
+  // Account name with its plan badge on the same line (never under the name).
+  &__title { display: flex; align-items: center; gap: 6px; min-width: 0; margin: 0; font-size: 14px; font-weight: 650; }
+  &__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  &__title .plan-badge { flex: none; margin-left: 0; font-size: 10.5px; font-weight: 500; }
+  // Connection state, at the right of the header.
+  &__status { flex: none; display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+  &__pill {
+    flex: none; padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 600; line-height: 16px; color: var(--desktop-muted);
+    &--good { color: #2f8f5b; background: color-mix(in srgb, #30a46c 15%, transparent); }
+    &--warning { color: #b56d00; background: color-mix(in srgb, #d68b12 16%, transparent); }
+    &--error { color: #d93c41; background: color-mix(in srgb, #e5484d 15%, transparent); }
+    &--neutral { background: color-mix(in srgb, var(--desktop-ink) 8%, transparent); }
+  }
   &__note { margin: 10px 0 0; font-size: 11px; line-height: 1.5; color: var(--desktop-muted); }
   &__error { margin: 0 0 10px; font-size: 12px; color: #e5484d; }
-  &__details {
-    position: absolute; z-index: 5; left: 8px; right: 8px; top: 100%; margin-top: -6px; padding: 14px;
-    border: 1px solid var(--desktop-border); border-radius: 12px; background: var(--desktop-card); box-shadow: 0 10px 30px #0003;
-  }
 }
 .provider-row + .provider-row { margin-top: 14px; }
 .provider-row__missing { font-size: 13px !important; font-weight: 500; color: var(--desktop-muted); letter-spacing: 0 !important; }
@@ -71,3 +88,61 @@
 .provider-row--warning { --quota-fill: #d68b12; }
 .provider-row--low { --quota-fill: #e5484d; }
 .provider-row__model-label { color: var(--quota-fill); }
+
+// Multi-account cards only: labels stay above two adjacent quota tracks.
+.provider-card__paired-values {
+  display: grid; gap: 4px;
+  .dashboard__quota-heading { font-size: 11px; gap: 6px; }
+  strong { font-size: 15px; letter-spacing: -0.2px; }
+}
+// Explicit slots: a lone weekly bar keeps its y offset (7 px short slot + 2 px gap), nothing is drawn for the absent window.
+.provider-card__paired-bars { display: grid; grid-template-rows: 7px 3px; gap: 2px; margin-top: 8px; }
+// 5 h: inherit the exact Unique track/fill thickness and radius (.dashboard__progress).
+.provider-card__window--short { margin-top: 0; }
+.provider-card__window--week { height: 3px; margin-top: 0; }
+// Reset of each window under its bar (like the Classique « Réinitialisation » line): 5 h left, 7 j right.
+.provider-card__paired-resets {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin-top: 6px;
+  font-size: 10.5px; line-height: 1.4; color: var(--desktop-muted); font-variant-numeric: tabular-nums;
+  span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  span:last-child { text-align: right; }
+}
+.provider-card:has(.provider-card__paired-bars) {
+  // Further limits (Fable…) keep the compact scale of the paired block.
+  .provider-row { margin-top: 10px; }
+  .provider-row .dashboard__quota-heading { font-size: 11px; gap: 6px; }
+  .provider-row .dashboard__quota-heading strong { font-size: 15px; letter-spacing: -0.2px; }
+  .provider-row .dashboard__progress { margin-top: 6px; }
+  .provider-row__reset { margin-top: 4px; font-size: 10.5px; }
+  padding: 12px;
+  .provider-card__title { font-size: 13px; }
+  .plan-badge { font-size: 10px; }
+  .provider-card__header { align-items: center; }
+}
+
+// Provider title doubles as the detailed-usage link (existing external arrow).
+.external-icon { flex: none; vertical-align: -1px; }
+.dashboard .provider-group .provider-card__usage {
+  display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 0 2px; margin: 0 -2px; white-space: nowrap; text-align: left;
+  border: 0; border-radius: 6px; background: transparent; box-shadow: none; font: inherit; color: inherit; cursor: pointer;
+  .external-icon { color: var(--desktop-accent); }
+  &:hover { background: color-mix(in srgb, var(--desktop-ink) 7%, transparent); }
+  &:focus-visible { outline: 2px solid var(--desktop-accent); outline-offset: 2px; }
+}
+
+// Reset credits of one account: icon + remaining count, same chip in the
+// Settings account rows and in the Dashboard card headers.
+.prefs .reset-chip, .dashboard .reset-chip {
+  display: inline-flex; align-items: center; gap: 4px; flex: none; padding: 2px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 16px; box-shadow: none;
+  color: var(--desktop-accent); border-color: color-mix(in srgb, var(--desktop-accent) 35%, transparent);
+  background: color-mix(in srgb, var(--desktop-accent) 8%, transparent);
+  &:disabled { color: var(--desktop-muted); border-color: var(--desktop-border); background: transparent; opacity: 1; }
+}
+// Title and account chip share one wrapping block: a narrow card moves the chip
+// under the title instead of squeezing it, the state stays on the right.
+.provider-card__heading { flex: 1 1 7rem; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.provider-card__action { display: contents; }
+
+// Fable is a third fine track, not a full Classique quota row.
+.provider-card__paired-bars.has-fable { grid-template-rows: 7px 3px 3px; }

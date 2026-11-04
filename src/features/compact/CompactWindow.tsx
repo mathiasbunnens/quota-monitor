@@ -1,8 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
+import ExternalIcon from "../ui/ExternalIcon";
+import { createFitScheduler } from "./fitWindow";
 import { CompactPanel } from "./CompactPanel";
-import type { CompactPanelModel } from "./types";
+import type { CompactPanelModel, ProviderKind } from "./types";
 import "./compact.scss";
 
 /** The menu-bar item refreshes on every open; the window does it on focus. */
@@ -70,6 +72,14 @@ export default function CompactWindow() {
   const checkUpdates = useCallback(() => void run("update", "start_update_check"), [run]);
   const connect = useCallback(() => void run("connect", "connect_codex_account"), [run]);
 
+  // Provider ↗ and +: the same pages and Réglages focus as the app.
+  const openUsage = useCallback((kind: ProviderKind) => {
+    void invoke(kind === "codex" ? "open_usage_details" : "open_claude_usage").catch((cause) => setError(String(cause)));
+  }, []);
+  const addAccount = useCallback((kind: ProviderKind) => {
+    void invoke("open_settings_focus", { provider: kind, add: true }).catch((cause) => setError(String(cause)));
+  }, []);
+
   // Cmd+, opens Réglages, like the key equivalent of the menu item.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -82,6 +92,24 @@ export default function CompactWindow() {
     return () => window.removeEventListener("keydown", onKey);
   }, [openSettings]);
 
-  return <CompactPanel panel={panel} error={error ?? readError} pending={pending}
-    onSettings={openSettings} onUpdate={checkUpdates} onConnect={connect} />;
+  // The window follows the panel height (see fitWindow.ts); width is the user's.
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const node = root.current;
+    if (!node) return;
+    const scheduler = createFitScheduler({
+      request: (value) => void invoke("fit_main_window", value).catch(console.error),
+      setTimer: (callback, ms) => window.setTimeout(callback, ms),
+      clearTimer: (handle) => window.clearTimeout(handle as number),
+    });
+    const measure = () => scheduler.measure(node.getBoundingClientRect().height, window.innerHeight);
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    measure();
+    return () => { observer.disconnect(); scheduler.dispose(); };
+  }, []);
+
+  return <div ref={root} className="compact-fit"><CompactPanel panel={panel} error={error ?? readError} pending={pending}
+    onSettings={openSettings} onUpdate={checkUpdates} onConnect={connect}
+    onUsage={openUsage} onAdd={addAccount} usageIcon={<ExternalIcon />} /></div>;
 }
