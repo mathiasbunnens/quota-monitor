@@ -35,7 +35,12 @@ test('A: the + opens one small flow with the folder chooser AND the absolute pat
   assert.doesNotMatch(closed, /Choisir un dossier|add-account__flow/);
   const open = renderToStaticMarkup(list({ onChooseFolder: async () => null }, ['', null, true, null]));
   assert.match(open, /<div[^>]*class="add-account__flow"[^>]*role="group"[^>]*aria-label="Ajouter un compte Codex"/);
-  assert.match(open, />Choisir un dossier…<\/button>/);
+  assert.match(open, /<button[^>]*class="add-account__choose"[^>]*aria-label="Choisir un dossier"[^>]*title="Choisir un dossier"[^>]*><svg/);
+  assert.doesNotMatch(open, />Choisir un dossier…</);
+  const flowHtml = open.slice(open.indexOf('class="add-account__flow"'));
+  assert.ok(flowHtml.indexOf('add-account__choose') < flowHtml.indexOf('<input'), 'folder icon before the path');
+  const pending = renderToStaticMarkup(list({ busy: true, onChooseFolder: async () => null }, ['', null, true, null]));
+  assert.match(pending, /class="add-account__choose"[^>]*disabled=""/);
   assert.match(open, /<input[^>]*aria-label="Chemin absolu d’un dossier CODEX_HOME"/);
   assert.equal((open.match(/role="dialog"|<dialog/g) || []).length, 0, 'no sub-window');
   // Without a native chooser (Windows/Linux): the path field alone.

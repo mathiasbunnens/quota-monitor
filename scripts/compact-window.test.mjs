@@ -65,6 +65,28 @@ test("Codex paired windows use explicit slots and preserve unknown and additiona
   assert.doesNotMatch(render([]),/role="meter"/);
 });
 
+test("compact Fable is a third thin track with a conditional reset, without changing Classique", () => {
+  const base = { ...panel.providers[0].rows[0], countdown: "42 min" };
+  const week = { ...base, pairSlot: 1, label: "7 jours" };
+  const fable = { ...panel.providers[1].rows[0], reset: week.reset };
+  const render = (rows, compact = true) => html({ panel: { ...panel, providers: [{ name: "Claude", section: "CLAUDE", compact, rows }] } });
+  const rows = [{ ...base, pairSlot: 0 }, week, fable];
+  const same = render(rows);
+  assert.match(same, /compact-pair has-fable/);
+  assert.match(same, /compact-pair__track--fable/);
+  assert.equal((same.match(/role="meter"/g) || []).length, 3);
+  assert.doesNotMatch(same.split('compact-pair__fable-caption')[1], /Réinit\./);
+  const different = render([...rows.slice(0, 2), { ...fable, reset: 'Réinitialisation demain' }]);
+  assert.match(different.split('compact-pair__fable-caption')[1], /Réinit\. demain/);
+  const absent = render(rows.slice(0, 2));
+  assert.doesNotMatch(absent, /has-fable|fable-caption|track--fable/);
+  const classic = render(rows, false);
+  assert.doesNotMatch(classic, /compact-pair/);
+  assert.equal((classic.match(/compact-row__reset/g) || []).length, 3);
+  const unknown = render([...rows.slice(0, 2), { ...fable, remaining: null, value: 'Non communiquée', fill: fill('red', 'red', 0, 0) }]);
+  assert.match(unknown, /aria-valuetext="Non communiquée"/);
+});
+
 test("header carries exactly two icon buttons, settings then update, after the status", () => {
   const markup = html();
   const header = markup.slice(markup.indexOf("<header"), markup.indexOf("</header>"));
@@ -188,30 +210,26 @@ const multiPanel = {
   ],
 };
 
-test("multi-account cards pair 5 h and 7 j with countdowns above and resets below, Fable stays its own row", () => {
+test("multi-account cards pair 5 h and 7 j with countdowns and a third fine Fable bar", () => {
   const markup = html({ panel: multiPanel });
-  assert.equal((markup.match(/class="compact-pair"/g) ?? []).length, 2);
+  assert.equal((markup.match(/class="compact-pair has-fable"/g) ?? []).length, 2);
   assert.match(markup, /CLAUDE · PERSONNEL/);
   assert.match(markup, /CLAUDE · TRAVAIL/);
-  // Countdown + provider value; the window name stays in the accessible label.
   assert.match(markup, />3h30 · 73 %</);
   assert.match(markup, />3j 8h · 86 %</);
   assert.match(markup, />42 min · Épuisé</);
   assert.match(markup, /aria-label="Limite 5 heures : Limite sur 3h30 · 73 % restant"/);
-  // The pair is always 5 h + 7 j: Fable never takes the weekly slot, whatever it reports.
+  // The pair is always 5 h + 7 j, never Fable.
   assert.match(markup, />2j 1h · 20 %</);
-  assert.doesNotMatch(markup, />Fable · /);
-  // Reset of each window under its bar, independent of Fable (Personnel has one, Travail another).
+  assert.match(markup, />Fable · 4j 4h · 60 %</);
   assert.equal((markup.match(/class="compact-pair__resets"/g) ?? []).length, 2);
   assert.match(markup, /compact-pair__resets"><span title="[^"]*">Réinit\. à 15h40<\/span><span title="[^"]*">Réinit\. à 15h40<\/span>/);
   assert.match(markup, />Réinit\. le 02\/11 à 12h00</);
   assert.equal(pairReset({ reset: "Réinitialisation non communiquée" }), "Réinit. non communiquée");
-  // 5 h track = the Unique track class (same 5 px), 7 j finer.
   assert.equal((markup.match(/compact-row__track compact-pair__track--short/g) ?? []).length, 2);
-  assert.equal((markup.match(/compact-row__track compact-pair__track--week/g) ?? []).length, 2);
-  // A separate Fable row stays visible as a normal row (nothing dropped).
-  assert.equal((markup.match(/Limite <span style="color:var\(--compact-teal\)">Fable<\/span>/g) ?? []).length, 2);
-  assert.equal((markup.match(/class="compact-row"/g) ?? []).length, 2, "one Fable row per account");
+  assert.equal((markup.match(/compact-row__track compact-pair__track--week/g) ?? []).length, 4);
+  assert.equal((markup.match(/compact-pair__track--fable/g) ?? []).length, 2);
+  assert.equal((markup.match(/class="compact-row"/g) ?? []).length, 0, "Fable no longer takes a full row");
   assert.match(markup, /Usage supplémentaire : plafond atteint/);
 });
 
@@ -228,7 +246,9 @@ test("compact window thickness: 5 h inherits the 5 px Unique track, 7 j is 3 px 
   assert.doesNotMatch(css, /\.compact-pair__track--short\s*\{[^}]*height:/);
   assert.match(css, /\.compact-pair__track--week\s*\{[^}]*height: 3px[^}]*border-radius: 1\.5px/);
   assert.match(css, /\.compact-pair__bars\s*\{[^}]*gap: 2px/);
-  assert.match(css, /\.compact-pair\s*\{[^}]*height: 54px/);
+  assert.match(css, /\.compact-pair\s*\{[^}]*height: 60px/);
+  assert.match(css, /\.compact-pair\.has-fable\s*\{[^}]*height: 78px/);
+  assert.match(css, /\.compact-pair\.has-fable \.compact-pair__bars\s*\{[^}]*grid-template-rows: 5px 3px 3px/);
   assert.match(css, /\.compact-pair__resets\s*\{[^}]*font-size: 10px/);
 });
 

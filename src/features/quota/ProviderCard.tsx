@@ -56,7 +56,7 @@ function PairedHeading({ row, now }: { row: QuotaRow; now: number }) {
 }
 
 /** Same progressbar markup/classes as the Unique row; height comes from CSS. */
-function PairedProgress({ row, className, slot }: { row: QuotaRow; className: string; slot: 1 | 2 }) {
+function PairedProgress({ row, className, slot }: { row: QuotaRow; className: string; slot: 1 | 2 | 3 }) {
   const known = row.remaining !== null;
   const state = known ? level(row.remaining as number) : "low";
   return <div className={"dashboard__progress dashboard__progress--" + state + " " + className
@@ -124,6 +124,8 @@ function Row({ row }: { row: QuotaRow }) {
 
 export default function ProviderCard({ name, provider, badge, rows, status, error, accountCompact = false, now = Date.now(), empty, state, action, children }: Props) {
   const paired = pairedRows(rows);
+  const fable = paired.others.find((row) => row.modelLabel === "Fable");
+  const fableResetDiffers = fable && (!paired.week || pairedResetLabel(fable) !== pairedResetLabel(paired.week));
   const title = <h3 className="provider-card__title"><span className="provider-card__name">{name}</span>{badge && <span className="plan-badge">{badge}</span>}</h3>;
   return <section className="provider-card" aria-label={"Quotas " + (provider ? provider + " · " : "") + name}>
     <header className="provider-card__header">
@@ -141,13 +143,17 @@ export default function ProviderCard({ name, provider, badge, rows, status, erro
       <div className="provider-card__paired-values">
         {[paired.short, paired.week].map((row) => row && <PairedHeading key={row.id} row={row} now={now} />)}
       </div>
-      <div className="provider-card__paired-bars">
+      <div className={"provider-card__paired-bars" + (fable ? " has-fable" : "")}>
         {paired.short && <PairedProgress row={paired.short} className="provider-card__window--short" slot={1} />}
         {paired.week && <PairedProgress row={paired.week} className="provider-card__window--week" slot={2} />}
+        {fable && <PairedProgress row={fable} className="provider-card__window--week provider-card__window--fable" slot={3} />}
       </div>
       {(paired.short || paired.week) && <PairedResets short={paired.short} week={paired.week} />}
-      {/* Fable and any other limit stay visible: nothing is dropped to fit. */}
-      {paired.others.map((row) => <Row key={row.id} row={row} />)}
+      {fable && <div className={"provider-card__fable-caption provider-row--model provider-row--" + (fable.remaining === null ? "low" : level(fable.remaining))}>
+        <span><span className="provider-row__model-label">Fable</span>{" · "}{resetCountdown(fable.resetAt, now)}{" · "}{fable.remaining === null ? fable.missing : fable.exhausted ? "Épuisé" : `${fable.remaining} %`}</span>
+        {fableResetDiffers && <span>{pairedResetLabel(fable)}</span>}
+      </div>}
+      {paired.others.filter((row) => row !== fable).map((row) => <Row key={row.id} row={row} />)}
     </> : rows.map((row) => <Row key={row.id} row={row} />)}
     {!rows.length && !error && <p className="provider-card__note">{empty ?? "Aucun quota à afficher."}</p>}
     {status && <p className="provider-card__note" role="status">{status}</p>}

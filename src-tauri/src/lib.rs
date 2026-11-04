@@ -1257,10 +1257,34 @@ fn compact_tracks() -> ((f64, f64), (f64, f64)) {
     )
 }
 
-/// Paired 5 h / 7 j block: 40 pt of headings and bars, then one line with the
-/// reset of each window (like the reset line under a Classique row).
+/// Paired 5 h / 7 j block with room for resets; Fable adds only a fine track and caption.
 #[cfg(target_os = "macos")]
-const PAIR_BLOCK_HEIGHT: f64 = 54.0;
+const PAIR_BLOCK_HEIGHT: f64 = 60.0;
+
+#[cfg(target_os = "macos")]
+fn compact_fable(provider: &PanelProvider) -> Option<&PanelRow> {
+    if paired_panel_rows(provider).is_empty() { return None; }
+    provider.rows.iter().find(|row| row.model && row.label.ends_with(" Fable"))
+}
+
+#[cfg(target_os = "macos")]
+fn pair_block_height(provider: &PanelProvider) -> f64 {
+    PAIR_BLOCK_HEIGHT + if compact_fable(provider).is_some() { 18.0 } else { 0.0 }
+}
+
+#[cfg(target_os = "macos")]
+fn compact_fable_reset(provider: &PanelProvider) -> Option<String> {
+    let fable = compact_fable(provider)?;
+    let pair = paired_panel_rows(provider);
+    let week = pair.iter().enumerate()
+        .find(|(i, row)| row.pair_slot.unwrap_or(*i) == 1)
+        .map(|(_, row)| row);
+    if week.is_some_and(|row| row.reset == fable.reset) {
+        None
+    } else {
+        Some(compact_reset(&fable.reset))
+    }
+}
 
 /// Short reset line of a paired window: « Réinit. à 14h30 » / « Réinit. le 03/11 à 19h00 ».
 #[cfg(target_os = "macos")]
@@ -1828,7 +1852,7 @@ fn note_lines(text: &str) -> f64 {
 fn card_height(provider: &PanelProvider) -> f64 {
     let paired_count = paired_panel_rows(provider).len();
     let rows = if paired_count > 0 {
-        PAIR_BLOCK_HEIGHT + (provider.rows.len() - paired_count) as f64 * PANEL_ROW_HEIGHT
+        pair_block_height(provider) + (provider.rows.len() - paired_count - usize::from(compact_fable(provider).is_some())) as f64 * PANEL_ROW_HEIGHT
     } else {
         provider.rows.len() as f64 * PANEL_ROW_HEIGHT
     };
@@ -2001,14 +2025,16 @@ fn make_panel_view(
         // Compacte card: 5 h and 7 j share one block with their countdowns above
         // and their reset line below, independent of any Fable row; the 5 h track/fill keeps the Unique thickness.
         let paired_rows = paired_panel_rows(provider);
+        let fable = compact_fable(provider);
+        let block_height = pair_block_height(provider);
         if !paired_rows.is_empty() {
             let group = NSView::initWithFrame(
                 mtm.alloc(),
-                frame(0.0, height - row_top - PAIR_BLOCK_HEIGHT, PANEL_WIDTH, PAIR_BLOCK_HEIGHT),
+                frame(0.0, height - row_top - block_height, PANEL_WIDTH, block_height),
             );
             root.addSubview(&group);
             let place = |view: &NSView, x: f64, top: f64, w: f64, h: f64| {
-                view.setFrame(frame(x, PAIR_BLOCK_HEIGHT - (top - row_top) - h, w, h));
+                view.setFrame(frame(x, block_height - (top - row_top) - h, w, h));
                 group.addSubview(view);
             };
             let tracks = compact_tracks();
@@ -2081,17 +2107,42 @@ fn make_panel_view(
                 place(
                     &reset,
                     20.0 + index as f64 * 138.0,
-                    row_top + 38.0,
+                    row_top + if fable.is_some() { 43.0 } else { 38.0 },
                     138.0,
                     13.0,
                 );
             }
-            row_top += PAIR_BLOCK_HEIGHT;
+            if let Some(row) = fable {
+                let tooltip = NSString::from_str(&format!("{} · {} · {}", row.label, compact_value(row), row.reset));
+                let offset = tracks.1.0 + tracks.1.1 + 2.0;
+                let thickness = tracks.1.1;
+                let track = rounded_box(mtm, &NSColor::systemGrayColor().colorWithAlphaComponent(0.28), thickness / 2.0);
+                track.setToolTip(Some(&tooltip));
+                place(&track, 22.0, row_top + offset, PANEL_INNER_WIDTH, thickness);
+                let width = row_fill_width(row);
+                if width >= thickness {
+                    let fill = rounded_box(mtm, &quota_color(row.remaining.unwrap_or(0), true), thickness / 2.0);
+                    fill.setToolTip(Some(&tooltip));
+                    place(&fill, 22.0, row_top + offset, width, thickness);
+                }
+                let caption = panel_label(mtm, &compact_heading(row), &NSFont::systemFontOfSize(10.0), &quota_color(row.remaining.unwrap_or(0), true));
+                caption.setToolTip(Some(&tooltip));
+                let fable_reset = compact_fable_reset(provider);
+                place(&caption, 20.0, row_top + 58.0, if fable_reset.is_some() { 138.0 } else { 276.0 }, 13.0);
+                if let Some(reset_text) = fable_reset {
+                    let reset = panel_label(mtm, &reset_text, &NSFont::systemFontOfSize(10.0), &NSColor::secondaryLabelColor());
+                    reset.setAlignment(NSTextAlignment::Right);
+                    reset.setToolTip(Some(&tooltip));
+                    place(&reset, 158.0, row_top + 58.0, 138.0, 13.0);
+                }
+            }
+            row_top += block_height;
         }
         for row in provider
             .rows
             .iter()
-            .filter(|r| !paired_rows.iter().any(|paired| std::ptr::eq(*paired, *r)))
+            .filter(|r| !paired_rows.iter().any(|paired| std::ptr::eq(*paired, *r))
+                && !fable.is_some_and(|f| std::ptr::eq(f, *r)))
         {
             // Composite the complete row once: track, fill, value, label and reset.
             let group = NSView::initWithFrame(
@@ -2709,6 +2760,7 @@ pub fn quota_ui_smoke(directory: &str) {
         fixture("Personnel", "pro", Some(27.0), Some(14.0), Some(40.0)),
         fixture("Travail", "max", Some(65.0), Some(80.0), Some(91.0)),
     ];
+    scenarios.push(("single-fable", claude_account_panels(&fable_pair[..1], false)));
     scenarios.push(("multi-fable", claude_account_panels(&fable_pair, false)));
     scenarios.push((
         "multi-fable-classic",
@@ -3015,6 +3067,9 @@ pub fn quota_ui_smoke(directory: &str) {
                 "single-account"
                     | "single-account-classic"
                     | "multi-accounts"
+                    | "single-fable"
+                    | "multi-fable"
+                    | "multi-fable-classic"
                     | "multi-accounts-classic"
                     | "two-providers"
                     | "codex-compact"
@@ -3042,6 +3097,20 @@ pub fn quota_ui_smoke(directory: &str) {
                 let heights: Vec<f64> = found.iter().map(|r| r.size.height).collect();
                 let unique_claude = vec![PANEL_TRACK_HEIGHT; 4];
                 match name {
+                    "single-fable" | "multi-fable" => {
+                        let count = if name == "single-fable" { 1 } else { 2 };
+                        assert_eq!(heights, [5.0, 5.0, 3.0, 3.0, 3.0, 3.0].repeat(count));
+                        for block in found.chunks(6) {
+                            let gap = block[2].origin.y - (block[4].origin.y + block[4].size.height);
+                            assert!((gap - 2.0).abs() < 0.01, "Fable gap {gap}");
+                        }
+                        for provider in &providers {
+                            assert_eq!(pair_block_height(provider), 78.0);
+                            assert_eq!(card_height(provider), 94.0);
+                        }
+                        println!("NATIVE_FABLE_THIN_PASS {name} {mode}: block=78 gap=2 thickness=3");
+                    }
+                    "multi-fable-classic" => assert_eq!(heights, vec![5.0; 12]),
                     "codex-compact" => {
                         assert_eq!(heights, vec![5.0, 5.0, 3.0, 3.0, 5.0]);
                         let gap = found[0].origin.y - (found[2].origin.y + found[2].size.height);
@@ -3883,11 +3952,18 @@ mod tests {
             assert_eq!(fable_rows.len(), usize::from(fable.is_some()));
             if let Some(f) = fable {
                 assert_eq!(fable_rows[0].value, format!("{} %", 100.0 - f));
+                assert_eq!(compact_fable_reset(&panel), None, "same reset is not repeated");
+                let mut different = panel.clone();
+                different.rows[2].reset = "Réinitialisation demain".into();
+                assert_eq!(compact_fable_reset(&different), Some("Réinit. demain".into()));
+            } else {
+                assert!(compact_fable(&panel).is_none());
+                assert_eq!(pair_block_height(&panel), 60.0);
             }
-            // Card = paired block (with the reset line) + the Fable row when present.
+            // Fable adds 18 pt for a fine track and caption, never a 48 pt row.
             assert_eq!(
                 card_height(&panel),
-                16.0 + PAIR_BLOCK_HEIGHT + f64::from(u8::from(fable.is_some())) * PANEL_ROW_HEIGHT
+                16.0 + PAIR_BLOCK_HEIGHT + if fable.is_some() { 18.0 } else { 0.0 }
             );
         }
         // Weekly window absent: Fable never takes the weekly slot.
@@ -4362,7 +4438,7 @@ mod tests {
             // Separated rows: taller than the paired block by exactly 2 rows - the paired block.
             assert_eq!(
                 card_height(k) - card_height(c),
-                2.0 * PANEL_ROW_HEIGHT - PAIR_BLOCK_HEIGHT
+                3.0 * PANEL_ROW_HEIGHT - (PAIR_BLOCK_HEIGHT + 18.0)
             );
         }
         assert_eq!(classic[0].rows[0].value, "73 %");
@@ -4410,12 +4486,12 @@ mod tests {
         assert_eq!(multi[0].rows[1].countdown, "3j 8h");
         assert_eq!(multi[1].rows[0].countdown, "42 min");
         assert_eq!(multi[1].rows[1].countdown, "2j 1h");
-        // Paired 5 h/7 j block (54 pt: bars + reset line) replaces two 48 pt rows; Fable keeps its row.
+        // Fable becomes a third fine bar and caption in the 78 pt compact block.
         let mut unpaired = multi[0].clone();
         unpaired.compact = false;
         assert_eq!(
             card_height(&unpaired) - card_height(&multi[0]),
-            2.0 * PANEL_ROW_HEIGHT - PAIR_BLOCK_HEIGHT
+            3.0 * PANEL_ROW_HEIGHT - (PAIR_BLOCK_HEIGHT + 18.0)
         );
     }
 

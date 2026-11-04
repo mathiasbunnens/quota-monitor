@@ -267,7 +267,8 @@ test('Compacte: Fable never takes the 7 j slot; both keep their own countdown, r
   assert.ok(html.includes('>' + label(210) + '</span><span'), 'reset of the 5 h window');
   assert.ok(html.includes('>' + label(80 * 60) + '</span></div>'), 'reset of the 7 j window');
   assert.equal(pairedResetLabel({ resetAt: null, resetText: 'non communiquée' }), 'Réinit. non communiquée');
-  assert.doesNotMatch(html, /Fable · /);
+  assert.match(html, /provider-card__window--fable/);
+  assert.match(html, /provider-card__fable-caption/);
   assert.match(html, /provider-row__model-label">Fable/);
   // Without any Fable row (switch off / not reported) the pair and its resets are unchanged.
   const without = renderToStaticMarkup(component('./ProviderCard.tsx', { name: 'Claude', accountCompact: true, now,
@@ -571,5 +572,20 @@ test('the saved layout changes a sole card too (Unique, Multi with one visible);
     const html = render(layout, none);
     assert.match(html, /Aucun compte Claude visible/);
     assert.doesNotMatch(html, /role="progressbar"|%/);
+  }
+});
+
+test('compact Fable only adds a reset when different from the weekly reset; Classique keeps every reset', () => {
+  const at = '2026-11-04T12:00:00Z';
+  const week = { ...rows[1], id: 'claude:seven_day', resetAt: at, resetText: 'same' };
+  for (const [resetAt, extraReset] of [[at, false], ['2026-11-05T12:00:00Z', true], [null, true]]) {
+    const rs = [{ ...rows[0], id: 'claude:five_hour' }, week, { ...fableRow, resetAt }];
+    const html = renderToStaticMarkup(component('./ProviderCard.tsx', { name: 'Claude', accountCompact: true, rows: rs }));
+    const caption = html.split('provider-card__fable-caption')[1];
+    assert.equal(caption.includes('Réinit.'), extraReset);
+    assert.equal((html.match(/provider-row__reset/g) || []).length, 0);
+    const classic = renderToStaticMarkup(component('./ProviderCard.tsx', { name: 'Claude', accountCompact: false, rows: rs }));
+    assert.equal((classic.match(/provider-row__reset/g) || []).length, 3);
+    assert.doesNotMatch(classic, /window--fable|fable-caption/);
   }
 });

@@ -26,8 +26,10 @@ export default function AddAccountFlow({ provider, path, error, busy, canChoose,
   const codex = provider === "Codex";
   return <div className="add-account__flow" role="group" aria-label={"Ajouter un compte " + provider}
     onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); onClose(); } }}>
-    {canChoose && <button type="button" className="add-account__choose" disabled={busy} onClick={onChoose}>Choisir un dossier…</button>}
     <form className="add-account__manual" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+      {canChoose && <button type="button" className="add-account__choose" aria-label="Choisir un dossier" title="Choisir un dossier" disabled={busy} onClick={onChoose}>
+        <svg width="16" height="16" viewBox="0 0 24 24" className="add-account__glyph" aria-hidden="true"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z" /></svg>
+      </button>}
       <input ref={inputRef} value={path} disabled={busy} spellCheck={false} aria-invalid={error ? true : undefined}
         placeholder={codex ? "/Users/nom/.codex-travail" : "/Users/nom/.claude-travail"}
         aria-label={codex ? "Chemin absolu d’un dossier CODEX_HOME" : "Chemin absolu d’un profil Claude Code"}

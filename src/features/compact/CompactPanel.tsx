@@ -67,10 +67,11 @@ export function pairReset(row: CompactRow): string {
   return row.reset.replace("Réinitialisation", "Réinit.");
 }
 
-/** Compacte block (54 pt like the menu): 5 h + 7 j, countdowns above, resets below. */
-function Pair({ rows }: { rows: CompactRow[] }) {
+/** Compacte block: 5 h + 7 j and an optional third fine Fable track. */
+function Pair({ rows, fable }: { rows: CompactRow[]; fable?: CompactRow }) {
+  const week = rows.find((row, index) => (row.pairSlot ?? index) === 1);
   const windows = ["Limite 5 heures", "Limite hebdomadaire"];
-  return <div className="compact-pair">
+  return <div className={"compact-pair" + (fable ? " has-fable" : "")}>
     <div className="compact-pair__values">
       {rows.map((row, index) => <span key={index} className={row.low ? "is-low" : undefined}
         style={{ marginLeft: row.pairSlot === 1 ? "auto" : undefined }}
@@ -91,11 +92,20 @@ function Pair({ rows }: { rows: CompactRow[] }) {
             style={{ width: `${row.fill.ratio * 100}%`, background: fillColor(row.fill, row.model) }} />}
         </div>;
       })}
+      {fable && <div className="compact-row__track compact-pair__track--week compact-pair__track--fable"
+        role="meter" aria-label={`${fable.label} : quota restant`} aria-valuemin={0} aria-valuemax={100}
+        aria-valuenow={fable.remaining ?? undefined} aria-valuetext={fable.value} title={`${fable.label} · ${fable.reset}`}>
+        {fable.fill.ratio * 276 >= 3 && <span className="compact-row__fill" style={{ width: `${fable.fill.ratio * 100}%`, background: fillColor(fable.fill, true) }} />}
+      </div>}
     </div>
     <div className="compact-pair__resets">
       {rows.map((row, index) => <span key={index} style={{ marginLeft: row.pairSlot === 1 ? "auto" : undefined }}
         title={`${windows[row.pairSlot ?? index]} · ${row.label} · ${row.reset}`}>{pairReset(row)}</span>)}
     </div>
+    {fable && <div className="compact-pair__fable-caption">
+      <span style={{ color: fillColor(fable.fill, true) }}>{pairHeading(fable)}</span>
+      {fable.reset !== week?.reset && <span>{pairReset(fable)}</span>}
+    </div>}
   </div>;
 }
 
@@ -167,9 +177,11 @@ export type CompactPanelProps = {
 };
 
 function Card({ provider }: { provider: CompactProvider }) {
+  const pair = pairRowsOf(provider);
+  const fable = pair.length ? provider.rows.find((row) => row.model && row.label.endsWith(" Fable")) : undefined;
   return <>
-    {pairRowsOf(provider).length > 0 && <Pair rows={pairRowsOf(provider)} />}
-    {provider.rows.filter((row) => !pairRowsOf(provider).includes(row))
+    {pair.length > 0 && <Pair rows={pair} fable={fable} />}
+    {provider.rows.filter((row) => !pair.includes(row) && row !== fable)
       .map((row, index) => <Row key={`${row.label}-${index}`} row={row} />)}
     {provider.note && <p className={`compact-card__note compact-tone--${provider.note.tone}`
       + (provider.rows.length ? " has-rows" : "")}>{provider.note.text}</p>}

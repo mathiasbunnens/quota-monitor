@@ -34,7 +34,7 @@ try{
  const shot=async name=>fs.writeFileSync(path.join(out,name+'.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png',captureBeyondViewport:true})).data,'base64'));
  await cdp('Page.enable');await cdp('Runtime.enable');
  const open=async(which,model,scheme='light',width=324)=>{await cdp('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:scheme},{name:'prefers-reduced-motion',value:'reduce'}]});await cdp('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:2,mobile:false});await cdp('Page.navigate',{url:`http://127.0.0.1:${ports[which]}/?model=${model}`});await sleep(700);};
- const scenes=['single-account','single-account-classic','codex-and-claude-multi','codex-multi-accounts','codex-multi-accounts-classic','multi-accounts-classic','multi-fable','multi-fable-classic'];
+ const scenes=['single-account','single-account-classic','codex-and-claude-multi','codex-multi-accounts','codex-multi-accounts-classic','multi-accounts-classic','single-fable','multi-accounts','multi-fable','multi-fable-classic'];
  for(const scheme of ['light','dark'])for(const which of Object.keys(sites))for(const m of scenes){await open(which,m,scheme);await shot(`compact-${m}-${which}-${scheme}`);}
 
  // ---- assertions on the new build ----
@@ -51,9 +51,9 @@ try{
  assert.deepEqual(calls.slice(0,2),[['usage','codex'],['usage','claude']]);
  assert.deepEqual(calls.slice(2),[['add','codex'],['add','claude']]);
  assert.equal(await ev(`document.querySelectorAll('.compact-provider__chevron,[aria-label^="Détail"]').length`),0,'no chevron, no detail');
- // Compacte: each pair has its reset line under the bars (5 h left, 7 j right), Fable stays a separate row
+ // Compacte: each pair has its reset line under the bars (5 h left, 7 j right), Fable is a third fine track
  const pairs=await ev(`[...document.querySelectorAll('.compact-pair')].map(p=>({resets:[...p.querySelectorAll('.compact-pair__resets span')].map(s=>s.textContent),height:Math.round(p.getBoundingClientRect().height),clipped:[...p.querySelectorAll('.compact-pair__resets span,.compact-pair__values span')].some(s=>s.scrollWidth>s.clientWidth+1)}))`);
- report.pairs=pairs;assert.ok(pairs.length>=3);for(const p of pairs){assert.equal(p.resets.length,2);assert.ok(p.resets.every(t=>/^Réinit\. /.test(t)),JSON.stringify(p));assert.equal(p.height,54);assert.equal(p.clipped,false,JSON.stringify(p));}
+ report.pairs=pairs;assert.ok(pairs.length>=3);for(const p of pairs){assert.equal(p.resets.length,2);assert.ok(p.resets.every(t=>/^Réinit\. /.test(t)),JSON.stringify(p));assert.equal(p.height,60);assert.equal(p.clipped,false,JSON.stringify(p));}
  // sizes, no overflow, both schemes and widths
  for(const scheme of ['light','dark'])for(const width of [300,324,420]){await open('after','codex-multi-accounts',scheme,width);
   const g=await ev(`({overflow:document.documentElement.scrollWidth>innerWidth,heads:[...document.querySelectorAll('.compact-provider__head')].every(h=>h.scrollWidth<=h.clientWidth+1),states:[...document.querySelectorAll('.compact-provider__state')].map(s=>s.textContent),chevrons:document.querySelectorAll('.compact-provider__chevron').length})`);
