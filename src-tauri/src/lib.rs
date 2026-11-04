@@ -3303,8 +3303,6 @@ pub fn run() {
             codex::follow_codex_profile,
             codex::untrack_codex_profile,
             claude::request_claude_refresh,
-            claude::install_claude_relay,
-            claude::uninstall_claude_relay,
             open_usage_details,
             open_claude_usage,
             fit_settings_window,
@@ -3325,6 +3323,7 @@ pub fn run() {
         ])
         .setup(|app| {
             *app.state::<prefs::PrefsState>().0.lock().unwrap() = prefs::load(app.handle());
+            claude::migrate_legacy_relay_at_startup(app.handle());
             ntfy::start(app.handle().clone());
             #[cfg(target_os = "macos")]
             let _ = APP_HANDLE.set(app.handle().clone());

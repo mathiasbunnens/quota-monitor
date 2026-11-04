@@ -3,7 +3,9 @@
 //! and refresh ticket. Legacy statusLine relay helpers remain for compatibility.
 use crate::prefs;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 use std::{
     fs,
     io::{Read, Write},
@@ -366,6 +368,7 @@ fn claude_settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("settings.json"))
 }
 
+#[cfg(test)]
 fn quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
@@ -391,11 +394,13 @@ fn read_settings(path: &Path) -> Result<Option<Value>, String> {
     }
 }
 
+#[cfg(test)]
 pub fn relay_installed(settings_path: &Path) -> bool {
     matches!(read_settings(settings_path), Ok(Some(v)) if is_ours(&v))
 }
 
-/// Installs the relay only when Claude Code has no statusLine of its own.
+/// Installs the relay only when Claude Code has no statusLine of its own (kept for the migration tests).
+#[cfg(test)]
 pub fn install_relay(settings_path: &Path, exe: &Path, data_dir: &Path) -> Result<(), String> {
     let mut settings = read_settings(settings_path)?.unwrap_or_else(|| json!({}));
     if settings.get("statusLine").is_some() && !is_ours(&settings) {
@@ -411,6 +416,40 @@ pub fn install_relay(settings_path: &Path, exe: &Path, data_dir: &Path) -> Resul
     });
     let bytes = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
     write_private(settings_path, &bytes).map_err(|e| e.to_string())
+}
+
+/// The statusLine relay was the data source of Quota Monitor 3.0.x. Collection
+/// now goes through the official CLI (`get_usage`), so a relay entry left in
+/// the Claude Code settings only launches this executable for nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RelayMigration {
+    /// No entry of ours (absent file, another statusLine): nothing was touched.
+    NotNeeded,
+    /// Our entry was removed; every other setting is kept as it was.
+    Removed,
+    /// Settings unreadable or not writable: left as they were.
+    Skipped,
+}
+
+/// Silent, idempotent migration: removes ONLY a statusLine that launches this
+/// app's relay. The user's own statusLine and unreadable files are never
+/// modified; the backup written at install time stays in place.
+pub fn migrate_legacy_relay(settings_path: &Path) -> RelayMigration {
+    match read_settings(settings_path) {
+        Err(_) => RelayMigration::Skipped,
+        Ok(Some(settings)) if is_ours(&settings) => match uninstall_relay(settings_path) {
+            Ok(()) => RelayMigration::Removed,
+            Err(_) => RelayMigration::Skipped,
+        },
+        Ok(_) => RelayMigration::NotNeeded,
+    }
+}
+
+/// Startup hook: migrates the primary profile's settings (where the relay was installed).
+pub fn migrate_legacy_relay_at_startup(app: &tauri::AppHandle) {
+    if let Ok(path) = claude_settings_path(app) {
+        let _ = migrate_legacy_relay(&path);
+    }
 }
 
 pub fn uninstall_relay(settings_path: &Path) -> Result<(), String> {
@@ -825,21 +864,6 @@ pub fn get_claude_snapshot(app: tauri::AppHandle) -> ClaudeSnapshot {
 pub fn request_claude_refresh(app: tauri::AppHandle) -> ClaudeSnapshot {
     REFRESH_REQUESTED.store(true, Ordering::Release);
     snapshot(&app)
-}
-
-#[tauri::command]
-pub fn install_claude_relay(app: tauri::AppHandle) -> Result<ClaudeSnapshot, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    install_relay(&claude_settings_path(&app)?, &exe, &data_dir(&app)?)?;
-    crate::publish_quotas(&app);
-    Ok(snapshot(&app))
-}
-
-#[tauri::command]
-pub fn uninstall_claude_relay(app: tauri::AppHandle) -> Result<ClaudeSnapshot, String> {
-    uninstall_relay(&claude_settings_path(&app)?)?;
-    crate::publish_quotas(&app);
-    Ok(snapshot(&app))
 }
 
 fn refresh_due(
@@ -1593,6 +1617,36 @@ cat >/dev/null
         let m = merge(Some(prev), None, None, NOW);
         assert_eq!(m.five_hour, None);
         assert_eq!(m.seven_day.unwrap().used_percent, 4.0);
+    }
+
+    #[test]
+    fn legacy_relay_is_removed_silently_and_only_when_it_is_ours() {
+        let dir = std::env::temp_dir().join(format!("qm-claude-migrate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings.json");
+        let exe = Path::new("/Apps/Quota Monitor.app/Contents/MacOS/qm");
+        // Absent file: nothing to do, nothing created.
+        assert_eq!(migrate_legacy_relay(&settings), RelayMigration::NotNeeded);
+        assert!(!settings.exists());
+        // Our relay: removed, every other key kept, backup of the original kept, idempotent.
+        fs::write(&settings, br#"{"theme":"dark","model":"opus"}"#).unwrap();
+        install_relay(&settings, exe, &dir).unwrap();
+        assert_eq!(migrate_legacy_relay(&settings), RelayMigration::Removed);
+        let v: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(v, json!({"theme":"dark","model":"opus"}));
+        assert!(settings.with_extension("json.quota-monitor.bak").exists());
+        assert_eq!(migrate_legacy_relay(&settings), RelayMigration::NotNeeded);
+        // A statusLine of the user's own is never touched (byte-identical).
+        let own = br#"{"statusLine":{"type":"command","command":"mine.sh"}}"#;
+        fs::write(&settings, own).unwrap();
+        assert_eq!(migrate_legacy_relay(&settings), RelayMigration::NotNeeded);
+        assert_eq!(fs::read(&settings).unwrap(), own);
+        // Unreadable settings are left alone.
+        fs::write(&settings, b"{broken").unwrap();
+        assert_eq!(migrate_legacy_relay(&settings), RelayMigration::Skipped);
+        assert_eq!(fs::read(&settings).unwrap(), b"{broken");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

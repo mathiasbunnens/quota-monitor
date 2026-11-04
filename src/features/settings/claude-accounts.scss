@@ -15,7 +15,7 @@
   .prefs &__rename { flex: 1; width: auto; min-width: 0; margin: 0; padding: 2px 6px; }
   // Detail of one account (opened by its chevron): its folder and « Supprimer » only.
   &__detail {
-    flex-basis: 100%; display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0 0 2px !important; font-size: 11px !important;
+    flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; margin: 0 0 2px !important; font-size: 11px !important;
   }
   // Read-only, selectable and copyable; the full path is in the tooltip.
   &__path {
@@ -39,14 +39,9 @@
     input:focus-visible + span { outline: 2px solid var(--desktop-accent); outline-offset: 2px; }
     input:disabled + span { opacity: 0.5; }
   }
-  // Advanced chevron at the left, the + (manual add) at the bottom right.
-  &__actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
-  .prefs &__actions .prefs-more { margin-left: 0; }
-  .prefs &__add { margin-left: auto; }
-  &__advanced { .prefs-actions { margin-bottom: 0; } }
-  &__manual {
-    display: flex; gap: 8px; align-items: center;
-    .prefs & input { flex: 1; min-width: 0; margin: 0; }
-    button { flex: none; }
-  }
+  // The + sits alone at the bottom right; its flow opens right under it.
+  &__actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+  .add-account__flow { margin-top: 8px; }
+  // Connection of the primary account, under its folder: tight, no rule of its own.
+  &__detail .codex-connection--embedded { margin: 0 0 4px; p { margin: 0.3rem 0; } }
 }

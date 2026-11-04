@@ -263,12 +263,6 @@ export default function Settings() {
     catch (cause) { setCodexActionError(String(cause).replace(/^Error: /, "")); return null; }
     finally { setBusy(false); }
   };
-  const relay = async (command: "install_claude_relay" | "uninstall_claude_relay") => {
-    setError(null); setBusy(true);
-    try { setClaude(await invoke<ClaudeSnapshot>(command)); reload(); }
-    catch (cause) { setError(String(cause)); }
-    finally { setBusy(false); }
-  };
 
   const onTabKey = (event: KeyboardEvent, index: number) => {
     const move = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : event.key === "Home" ? -index : event.key === "End" ? tabs.length - 1 - index : 0;
@@ -322,7 +316,9 @@ export default function Settings() {
             onAdd={(path) => codexAction("add_codex_profile", { path })}
             onUntrack={(id) => codexAction("untrack_codex_profile", { id })}
             onChooseFolder={canChooseMode ? chooseCodexFolder : undefined} actionError={codexActionError}
-            advanced={<p className="prefs-footnote">Un dossier <code>CODEX_HOME</code> par compte, lu en lecture seule par Codex CLI. Connexion dans un terminal : <code>CODEX_HOME=… codex login</code>.</p>} />
+            // The primary detail also holds the Codex connection (login, executable) once connected;
+            // until then the full connection panel above is shown.
+            detailExtra={(account) => account.primary && codexReady ? <CodexConnection embedded status={status} onChange={reload} /> : null} />
           {codexAccountsError && <p className="prefs-state prefs-state--error" role="alert">{codexAccountsError}</p>}
         </section>
 
@@ -348,14 +344,7 @@ export default function Settings() {
               </button>
               : null}
             onUntrack={(id) => profileAction("untrack_claude_profile", { id })}
-            onChooseFolder={canChooseMode ? chooseFolder : undefined} actionError={accountActionError}
-            advanced={<>
-              <p className="prefs-footnote">Lu via Claude Code (<code>claude auth login</code>), sans jeton ni requête de modèle.</p>
-              <div className="prefs-actions">
-                {prefs.claudeEnabled && <button type="button" disabled={busy} onClick={() => void invoke("request_claude_refresh").then(reload)}>Actualiser</button>}
-                <button type="button" className="prefs-link" disabled={busy} onClick={() => void relay("uninstall_claude_relay")}>Retirer l’ancien relais</button>
-              </div>
-            </>} />
+            onChooseFolder={canChooseMode ? chooseFolder : undefined} actionError={accountActionError} />
           {accountsError && <p className="prefs-state prefs-state--error" role="alert">{accountsError}</p>}
         </section>
       </div>}

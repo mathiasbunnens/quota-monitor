@@ -1,5 +1,6 @@
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import type { ClaudeAccount, ClaudeAccountsPreferences, ClaudeProfile, CodexAccount, Preferences } from "../quota/types";
+import AddAccountFlow, { ABSOLUTE_PATH, ABSOLUTE_PATH_ERROR } from "../accounts/AddAccountFlow";
 import "./claude-accounts.scss";
 
 type Tone = "good" | "warning" | "error" | "neutral";
@@ -18,8 +19,6 @@ type Props<A extends ListedAccount = ClaudeAccount> = {
   onChooseFolder?: () => Promise<string | null>;
   /** Last add failure, shown under the Add action. */
   actionError?: string | null;
-  /** Extra technical actions shown in the single secondary area. */
-  advanced?: ReactNode;
   /** Codex reuse: provider wording, preference key and per-account state. */
   provider?: "Claude" | "Codex";
   stateOf?: (account: A) => [string, Tone, string];
@@ -28,6 +27,8 @@ type Props<A extends ListedAccount = ClaudeAccount> = {
   onUntrack?: (id: string) => Promise<boolean>;
   /** Per-account control shown before the connection state (reset, extra usage). */
   accessory?: (account: A) => ReactNode;
+  /** Extra content under the folder in the detail of an account (Codex: connection of the primary). */
+  detailExtra?: (account: A) => ReactNode;
 };
 
 /** Connection state of one profile: [pill, tone, actionable detail]. */
@@ -97,15 +98,14 @@ export function AccountName({ account, disabled, onSave }: { account: { name: st
   </>;
 }
 
-export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeAccount>({ prefs, accounts, busy, onUpdate, onAdd, onChooseFolder, actionError = null, advanced,
-  provider = "Claude", stateOf, planOf, onUntrack, accessory }: Props<A>) {
+export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeAccount>({ prefs, accounts, busy, onUpdate, onAdd, onChooseFolder, actionError = null,
+  provider = "Claude", stateOf, planOf, onUntrack, accessory, detailExtra }: Props<A>) {
   const [path, setPath] = useState("");
   const [pathError, setPathError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [details, setDetails] = useState<string | null>(null);
   const pathInput = useRef<HTMLInputElement>(null);
   const addButton = useRef<HTMLButtonElement>(null);
-  const advancedId = useId();
   const codex = provider === "Codex";
   const key = codex ? "codexAccounts" : "claudeAccounts";
   const slug = codex ? "codex" : "claude";
@@ -131,16 +131,18 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
     const profile: ClaudeProfile = { id: account.id, path: account.path, name: account.name, visible: stored?.visible ?? defaultVisible(account), ...patch };
     return onUpdate({ [key]: { ...settings, profiles: [...settings.profiles.filter((item) => item.id !== account.id), profile] } });
   };
-  // « Ajouter » opens the folder chooser directly; without one, the path field.
-  const add = async () => {
+  // The + opens the single add flow: folder chooser (macOS) and absolute path, in place.
+  const add = () => {
     if (busy) return;
-    if (onChooseFolder) {
-      const chosen = await onChooseFolder();
-      if (chosen) await onAdd(chosen);
-      return;
-    }
-    setOpen(true);
+    setOpen(!open);
+    setPathError(null);
     window.requestAnimationFrame(() => pathInput.current?.focus());
+  };
+  const close = () => { setOpen(false); setPathError(null); window.requestAnimationFrame(() => addButton.current?.focus()); };
+  const choose = async () => {
+    if (busy || !onChooseFolder) return;
+    const chosen = await onChooseFolder();
+    if (chosen && await onAdd(chosen)) setOpen(false);
   };
   // Supprimer: stops tracking only. The row disappears, so focus moves to the + of this list.
   const remove = async (account: A) => {
@@ -149,9 +151,9 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
   };
   const submitPath = async () => {
     if (busy) return;
-    if (!/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(path)) { setPathError("Chemin absolu requis (il commence par /)."); return; }
+    if (!ABSOLUTE_PATH.test(path)) { setPathError(ABSOLUTE_PATH_ERROR); return; }
     setPathError(null);
-    if (await onAdd(path)) setPath("");
+    if (await onAdd(path)) { setPath(""); setOpen(false); }
   };
 
   return <div className="claude-accounts" aria-busy={busy || undefined}>
@@ -172,7 +174,7 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
         return <li className="claude-accounts__row" key={account.id}>
           <div className="claude-accounts__who">
             <AccountName key={account.id} account={account} disabled={busy || !tracked} onSave={(name) => saveProfile(account, { name })} />
-            {account.primary && <small>Principal</small>}
+            {account.primary && account.name !== "Principal" && <small>Principal</small>}
             {planType && <span className="prefs-plan">{planType}</span>}
           </div>
           {accessory?.(account)}
@@ -194,6 +196,7 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
               window.requestAnimationFrame(() => document.getElementById(detailId + "-toggle")?.focus());
             }}>
             <code className="claude-accounts__path" title={account.path}>{account.path}</code>
+            {detailExtra?.(account)}
             {onUntrack && !account.primary && <button type="button" className="prefs-link claude-accounts__remove" disabled={busy}
               title="Le dossier et son contenu ne sont pas modifiés" onClick={() => void remove(account)}>Supprimer {account.name}</button>}
           </div>}
@@ -202,27 +205,14 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
     </ul>}
 
     <div className="claude-accounts__actions">
-      <button type="button" className="prefs-more" aria-label="Chemins et options avancées" title="Chemins et options avancées"
-        aria-expanded={open} aria-controls={open ? advancedId : undefined} onClick={() => setOpen((value) => !value)}>
-        <Glyph>{chevron}</Glyph>
-      </button>
       <button type="button" ref={addButton} className="claude-accounts__icon claude-accounts__add" disabled={busy}
-        aria-label={"Ajouter un compte " + provider} title={"Ajouter un compte " + provider} onClick={() => void add()}>
+        aria-label={"Ajouter un compte " + provider} title={"Ajouter un compte " + provider} aria-expanded={open} onClick={add}>
         <Glyph>{plus}</Glyph>
       </button>
     </div>
     {actionError && <p role="alert" className="prefs-state prefs-state--error">{actionError}</p>}
-
-    {open && <div id={advancedId} className="prefs-advanced claude-accounts__advanced" role="group" aria-label="Chemins et options avancées">
-      <form className="claude-accounts__manual" onSubmit={(event) => { event.preventDefault(); void submitPath(); }}>
-        <input ref={pathInput} value={path} disabled={busy} placeholder={codex ? "/Users/nom/.codex-travail" : "/Users/nom/.claude-travail"} spellCheck={false}
-          aria-label={codex ? "Chemin absolu d’un dossier CODEX_HOME" : "Chemin absolu d’un profil Claude Code"} aria-invalid={pathError ? true : undefined}
-          onChange={(event) => setPath(event.target.value)} />
-        <button type="submit" disabled={busy || !path}>Ajouter</button>
-      </form>
-      {pathError && <p role="alert" className="prefs-state prefs-state--error">{pathError}</p>}
-      {advanced}
-    </div>}
+    {open && <AddAccountFlow provider={provider} path={path} error={pathError} busy={busy} canChoose={!!onChooseFolder} inputRef={pathInput}
+      onPath={setPath} onChoose={() => void choose()} onSubmit={() => void submitPath()} onClose={close} />}
   </div>;
 }
 

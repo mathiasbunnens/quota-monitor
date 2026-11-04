@@ -34,6 +34,8 @@
   code { overflow-wrap: anywhere; }
   button { margin: 0.25rem 0.35rem 0.25rem 0; }
   &__actions { display: flex; flex-wrap: wrap; }
+  // Inside the primary account detail: no rule, no top margin, the folder above is the heading.
+  &--embedded { flex-basis: 100%; margin: 0; padding: 0; border-top: 0; max-width: none; font-size: 11px; details { margin-top: 4px; } }
   &__code { font-family: monospace; font-size: 1.2rem; user-select: all; }
 }
 .dashboard__source { color: var(--desktop-muted, #616161); font-size: 0.8rem; }

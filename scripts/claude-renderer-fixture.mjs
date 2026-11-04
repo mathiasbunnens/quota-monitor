@@ -73,7 +73,7 @@ export async function invoke(command, payload) {
  case 'get_claude_accounts':return structuredClone(accounts());
  case 'get_claude_snapshot':return accounts().find(a=>a.visible)?.snapshot||profiles[0].snapshot;
  case 'get_quota_snapshots':return prefs.codexEnabled?structuredClone(codexRows):[];
- case 'get_codex_status':return {phase:'ready',message:'',planType:'plus',refreshSettings:{customSeconds:null},refreshSeconds:60,availableResets:2};
+ case 'get_codex_status':return {phase:query.get('codexPhase')||'ready',message:'',executable:'/usr/local/bin/codex',planType:'plus',refreshSettings:{customSeconds:null},refreshSeconds:60,availableResets:2};
  case 'redeem_codex_reset':{const home=codexHomes.find(h=>h.id===payload.accountId);if(!home||!home.availableResets)throw new Error('Fixture: aucun compte');home.availableResets-=1;emit();return {outcome:'reset',quotasRefreshed:true};}
  case 'open_usage_details': case 'open_claude_usage': return null;
  case 'add_claude_profile':{const back=removedProfiles.find(p=>p.path===payload.path);if(!back&&payload.path!=='/fixtures/.claude-work')throw new Error('Fixture: dossier inexistant');if(back){removedProfiles.splice(removedProfiles.indexOf(back),1);profiles.push(back);}prefs={...prefs,claudeAccounts:{...prefs.claudeAccounts,mode:'multi',excluded:(prefs.claudeAccounts.excluded||[]).filter(id=>id!==back?.id),profiles:profiles.map(({id,path,name})=>({id,path,name,visible:true}))}};emit();return structuredClone(prefs);}

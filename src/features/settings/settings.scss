@@ -136,14 +136,6 @@ html:has(.prefs), html:has(.prefs) body { background: var(--desktop-bg); }
   .prefs-toolbar button[role="tab"], .prefs-switch span, .prefs-switch span::after, .prefs-segmented label, .prefs-choices__icon { transition: none; }
 }
 
-// Static chevron at the right of the links row (does not rotate).
-.prefs .prefs-more {
-  display: grid; place-items: center; width: 22px; height: 22px; margin-left: auto; padding: 0;
-  border: 0; border-radius: 6px; background: transparent; box-shadow: none; color: var(--desktop-muted);
-  &:hover:not(:disabled) { background: color-mix(in srgb, var(--desktop-ink) 7%, transparent); color: var(--desktop-ink); }
-  &[aria-expanded="true"] { color: var(--desktop-accent); background: color-mix(in srgb, var(--desktop-accent) 10%, transparent); }
-}
-.prefs-advanced { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--desktop-border); }
 .prefs .prefs-group > .codex-connection { margin-top: 8px; padding-top: 8px; }
 
 // Provider title doubles as the detailed-usage link: same ink as the other

@@ -195,7 +195,7 @@ test('manual add rejects relative paths and forwards absolute paths literally', 
   const added = [];
   for (const value of ['relative/profile', '/fixtures/Profile with spaces']) {
     const tree = component('../settings/ClaudeAccountsSettings.tsx', settingsProps({ onAdd: async value => { added.push(value); return true; } }), [value, null, true]);
-    await find(tree, node => node.props?.className === 'claude-accounts__manual').props.onSubmit({ preventDefault() {} });
+    await find(tree, node => typeof node.props?.onSubmit === 'function' && node.props?.provider === 'Claude').props.onSubmit();
     await new Promise(resolve => setImmediate(resolve));
   }
   assert.deepEqual(added, ['/fixtures/Profile with spaces']);
@@ -321,15 +321,23 @@ test('zero or one profile: the Add action is there at once, no panel, prose or d
   // One profile: name, plan and state in one compact row, rename by pencil.
   const one = renderToStaticMarkup(accountsUx({ accounts: [accounts[0]] }));
   assert.match(one, /class="claude-accounts__label">Principal<\/strong><button[^>]*aria-label="Renommer Principal"/);
-  assert.match(one, /<small>Principal<\/small><span class="prefs-plan">Pro<\/span>/);
+  assert.match(one, /<\/button><span class="prefs-plan">Pro<\/span>/, 'one « Principal »: the name, no second label');
+  assert.doesNotMatch(one, /<small>Principal<\/small>/);
   assert.match(one, /prefs-pill--good">Connecté/);
   assert.doesNotMatch(one, /aria-label="Nom du compte/);
 });
-test('« Ajouter » opens the folder chooser directly and forwards the chosen path literally', async () => {
+test('the + opens the add flow; its folder chooser forwards the chosen path literally', async () => {
   for (const [picked, expected] of [['/Users/fixture/.claude-pro/', ['/Users/fixture/.claude-pro/']], [null, []]]) {
     const added = [];
-    const tree = accountsUx({ onChooseFolder: async () => picked, onAdd: async value => { added.push(value); return true; } });
-    await addButton(tree).props.onClick();
+    const props = { onChooseFolder: async () => picked, onAdd: async value => { added.push(value); return true; } };
+    stateChanges = [];
+    global.window = { requestAnimationFrame: () => 0 };
+    await addButton(accountsUx(props)).props.onClick();
+    assert.ok(stateChanges.some(change => change.index === 2 && change.value === true), 'the + opens the flow, no direct chooser');
+    assert.deepEqual(added, []);
+    const flow = find(accountsUx(props, ['', null, true]), node => typeof node.props?.onChoose === 'function');
+    await flow.props.onChoose();
+    delete global.window;
     await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(added, expected);
   }
@@ -344,6 +352,7 @@ test('without a native chooser « Ajouter » opens the single secondary area wit
   const open = renderToStaticMarkup(accountsUx({}, ['', null, true]));
   assert.match(open, /aria-label="Chemin absolu d’un profil Claude Code"/);
   assert.doesNotMatch(open, /<dl|<code>|Ne plus suivre/, 'paths live in each account detail now');
+  assert.doesNotMatch(open, /Choisir un dossier/, 'no chooser without a native one');
   assert.doesNotMatch(open, /<details/);
 });
 test('add errors stay concise next to the action; busy disables add/rename, switches keep focus', () => {
@@ -418,7 +427,7 @@ test('settings add/choose commands are explicit and their failures stay next to 
   const html = renderToStaticMarkup(tree);
   assert.match(html, /Quota Fable/);
   assert.match(html, /aria-label="Claude : usage détaillé sur claude\.ai"/);
-  assert.ok(controls.props.advanced, 'refresh/relay actions live in the single secondary area');
+  assert.equal(controls.props.advanced, undefined, 'no secondary area: no refresh or relay button');
   invokeFailure = null;
   assert.ok(!invokeCalls.some(call => /refresh|login|follow/.test(call.command)));
 });
