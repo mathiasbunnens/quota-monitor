@@ -488,7 +488,13 @@ mod tests {
         std::fs::create_dir_all(home.join(".codex")).unwrap();
         let elsewhere = home.join("Elsewhere").join("codex-pro");
         std::fs::create_dir_all(&elsewhere).unwrap();
-        let raw = format!("{}/", elsewhere.to_str().unwrap());
+        // Native separator: on Windows the canonical temp root is a verbatim `\\?\` path,
+        // where a trailing `/` is not a separator and the folder would not resolve.
+        let raw = format!(
+            "{}{}",
+            elsewhere.to_str().unwrap(),
+            std::path::MAIN_SEPARATOR
+        );
         let next = follow(
             &home,
             None,
