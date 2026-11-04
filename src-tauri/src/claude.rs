@@ -1459,7 +1459,14 @@ cat >/dev/null
         // weekly window (same percentage and reset): nothing is folded.
         let shown = account_view(raw.clone(), true, true, Some(true));
         let ids: Vec<_> = shown.metrics.iter().map(|m| m.id).collect();
-        assert_eq!(ids, ["claude:five_hour", "claude:seven_day", "claude:weekly_fable"]);
+        assert_eq!(
+            ids,
+            [
+                "claude:five_hour",
+                "claude:seven_day",
+                "claude:weekly_fable"
+            ]
+        );
         assert_eq!(shown.metrics[1].label, "Limite hebdomadaire");
         assert_eq!(shown.metrics[2].label, "Limite Fable");
         assert_eq!(shown.metrics[2].used_percent, Some(37.5));

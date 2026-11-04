@@ -1121,7 +1121,12 @@ mod tests {
         server.join().unwrap();
     }
 
-    fn codex_account(name: &str, primary: bool, used5: f64, identity: Option<u64>) -> codex::CodexAccount {
+    fn codex_account(
+        name: &str,
+        primary: bool,
+        used5: f64,
+        identity: Option<u64>,
+    ) -> codex::CodexAccount {
         let found = crate::codex_accounts::Discovered {
             profile: crate::claude_accounts::Profile {
                 id: format!("profile:{name}"),
@@ -1135,7 +1140,9 @@ mod tests {
             available: true,
             visible: true,
         };
-        let checked = chrono::DateTime::from_timestamp(1000, 0).unwrap().to_rfc3339();
+        let checked = chrono::DateTime::from_timestamp(1000, 0)
+            .unwrap()
+            .to_rfc3339();
         let mut rows = codex::normalize(&serde_json::json!({"rateLimits":{
             "primary":{"usedPercent":used5,"windowDurationMins":300,"resetsAt":2000}
         }}))
@@ -1157,7 +1164,12 @@ mod tests {
             rows,
             identity,
         };
-        codex::account_view(found, true, Some(&primary_view), (!primary).then_some((reading, false)))
+        codex::account_view(
+            found,
+            true,
+            Some(&primary_view),
+            (!primary).then_some((reading, false)),
+        )
     }
 
     #[test]
@@ -1196,7 +1208,10 @@ mod tests {
         let message = ledger
             .observe_all(&codex_account_observations(&refilled), 1000)
             .unwrap();
-        assert_eq!(message, "Codex · Principal · 5 heures : quota reconstitué (100 % restant).");
+        assert_eq!(
+            message,
+            "Codex · Principal · 5 heures : quota reconstitué (100 % restant)."
+        );
         // Legacy unqualified Codex entries move once to the primary id.
         let mut legacy: Ledger = serde_json::from_value(serde_json::json!({
             "Codex:codex:codex:primary": {"reset":null,"full":true,"attempted":true,"checked":900},
@@ -1204,9 +1219,14 @@ mod tests {
         }))
         .unwrap();
         assert!(legacy.migrate_codex_primary("profile:Principal"));
-        assert!(legacy.0.contains_key("Codex:profile:Principal:codex:codex:primary"));
+        assert!(legacy
+            .0
+            .contains_key("Codex:profile:Principal:codex:codex:primary"));
         assert!(!legacy.0.contains_key("Codex:codex:codex:primary"));
-        assert!(legacy.0.contains_key("Claude:claude:five_hour"), "Claude keys untouched");
+        assert!(
+            legacy.0.contains_key("Claude:claude:five_hour"),
+            "Claude keys untouched"
+        );
         assert!(!legacy.migrate_codex_primary("profile:Other"), "only once");
     }
 }

@@ -207,7 +207,12 @@ fn collection_changed(previous: &Prefs, next: &Prefs) -> bool {
             .profiles
             .iter()
             .map(|a| (a.id.clone(), a.path.clone()))
-            .chain(p.claude_accounts.excluded.iter().map(|id| (id.clone(), "excluded".into())))
+            .chain(
+                p.claude_accounts
+                    .excluded
+                    .iter()
+                    .map(|id| (id.clone(), "excluded".into())),
+            )
             .collect::<std::collections::BTreeSet<_>>()
     };
     previous.claude_enabled != next.claude_enabled || sources(previous) != sources(next)
@@ -221,7 +226,12 @@ fn codex_collection_changed(previous: &Prefs, next: &Prefs) -> bool {
             .profiles
             .iter()
             .map(|a| (a.id.clone(), a.path.clone()))
-            .chain(p.codex_accounts.excluded.iter().map(|id| (id.clone(), "excluded".into())))
+            .chain(
+                p.codex_accounts
+                    .excluded
+                    .iter()
+                    .map(|id| (id.clone(), "excluded".into())),
+            )
             .collect::<std::collections::BTreeSet<_>>()
     };
     previous.codex_enabled != next.codex_enabled || sources(previous) != sources(next)
@@ -537,12 +547,14 @@ mod tests {
         let file = root.join("prefs.json");
         let mut p = Prefs::default();
         p.codex_accounts.mode = "multi".into();
-        p.codex_accounts.profiles.push(crate::claude_accounts::Profile {
-            id: crate::claude_accounts::identity(&home),
-            path: home.to_str().unwrap().into(),
-            name: "Travail".into(),
-            visible: true,
-        });
+        p.codex_accounts
+            .profiles
+            .push(crate::claude_accounts::Profile {
+                id: crate::claude_accounts::identity(&home),
+                path: home.to_str().unwrap().into(),
+                name: "Travail".into(),
+                visible: true,
+            });
         save_to(&file, &p).unwrap();
         assert_eq!(parse(&fs::read(&file).unwrap()), p);
         let bytes = fs::read(&file).unwrap();
@@ -566,12 +578,15 @@ mod tests {
         after.layout = "compact".into();
         assert!(!codex_collection_changed(&before, &after));
         let before = after.clone();
-        after.codex_accounts.profiles.push(crate::claude_accounts::Profile {
-            id: "profile:a".into(),
-            path: "/fixture/a".into(),
-            name: "A".into(),
-            visible: true,
-        });
+        after
+            .codex_accounts
+            .profiles
+            .push(crate::claude_accounts::Profile {
+                id: "profile:a".into(),
+                path: "/fixture/a".into(),
+                name: "A".into(),
+                visible: true,
+            });
         assert!(codex_collection_changed(&before, &after));
         // Claude collection is not touched by a Codex change, and vice versa.
         assert!(!collection_changed(&before, &after));

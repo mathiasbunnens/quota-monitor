@@ -1319,13 +1319,23 @@ const PAIR_BLOCK_HEIGHT: f64 = 60.0;
 
 #[cfg(target_os = "macos")]
 fn compact_fable(provider: &PanelProvider) -> Option<&PanelRow> {
-    if paired_panel_rows(provider).is_empty() { return None; }
-    provider.rows.iter().find(|row| row.model && row.label.ends_with(" Fable"))
+    if paired_panel_rows(provider).is_empty() {
+        return None;
+    }
+    provider
+        .rows
+        .iter()
+        .find(|row| row.model && row.label.ends_with(" Fable"))
 }
 
 #[cfg(target_os = "macos")]
 fn pair_block_height(provider: &PanelProvider) -> f64 {
-    PAIR_BLOCK_HEIGHT + if compact_fable(provider).is_some() { 5.0 } else { 0.0 }
+    PAIR_BLOCK_HEIGHT
+        + if compact_fable(provider).is_some() {
+            5.0
+        } else {
+            0.0
+        }
 }
 
 /// Short reset line of a paired window: « Réinit. à 14h30 » / « Réinit. le 03/11 à 19h00 ».
@@ -1835,7 +1845,10 @@ async fn choose_codex_profile_folder(app: tauri::AppHandle) -> Result<Option<Str
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
 fn choose_codex_profile_folder() -> Result<Option<String>, String> {
-    Err("Sélecteur de dossier indisponible : indiquez le chemin absolu du dossier CODEX_HOME.".into())
+    Err(
+        "Sélecteur de dossier indisponible : indiquez le chemin absolu du dossier CODEX_HOME."
+            .into(),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -1894,7 +1907,10 @@ fn note_lines(text: &str) -> f64 {
 fn card_height(provider: &PanelProvider) -> f64 {
     let paired_count = paired_panel_rows(provider).len();
     let rows = if paired_count > 0 {
-        pair_block_height(provider) + (provider.rows.len() - paired_count - usize::from(compact_fable(provider).is_some())) as f64 * PANEL_ROW_HEIGHT
+        pair_block_height(provider)
+            + (provider.rows.len() - paired_count - usize::from(compact_fable(provider).is_some()))
+                as f64
+                * PANEL_ROW_HEIGHT
     } else {
         provider.rows.len() as f64 * PANEL_ROW_HEIGHT
     };
@@ -2072,7 +2088,12 @@ fn make_panel_view(
         if !paired_rows.is_empty() {
             let group = NSView::initWithFrame(
                 mtm.alloc(),
-                frame(0.0, height - row_top - block_height, PANEL_WIDTH, block_height),
+                frame(
+                    0.0,
+                    height - row_top - block_height,
+                    PANEL_WIDTH,
+                    block_height,
+                ),
             );
             root.addSubview(&group);
             let place = |view: &NSView, x: f64, top: f64, w: f64, h: f64| {
@@ -2155,10 +2176,15 @@ fn make_panel_view(
                 );
             }
             if let Some(row) = fable {
-                let tooltip = NSString::from_str(&format!("{} · {}", compact_heading(row), row.reset));
-                let offset = tracks.1.0 + tracks.1.1 + 2.0;
-                let thickness = tracks.1.1;
-                let track = rounded_box(mtm, &NSColor::systemGrayColor().colorWithAlphaComponent(0.28), thickness / 2.0);
+                let tooltip =
+                    NSString::from_str(&format!("{} · {}", compact_heading(row), row.reset));
+                let offset = tracks.1 .0 + tracks.1 .1 + 2.0;
+                let thickness = tracks.1 .1;
+                let track = rounded_box(
+                    mtm,
+                    &NSColor::systemGrayColor().colorWithAlphaComponent(0.28),
+                    thickness / 2.0,
+                );
                 track.setToolTip(Some(&tooltip));
                 {
                     use objc2_app_kit::NSAccessibility;
@@ -2168,19 +2194,21 @@ fn make_panel_view(
                 place(&track, 22.0, row_top + offset, PANEL_INNER_WIDTH, thickness);
                 let width = row_fill_width(row);
                 if width >= thickness {
-                    let fill = rounded_box(mtm, &quota_color(row.remaining.unwrap_or(0), true), thickness / 2.0);
+                    let fill = rounded_box(
+                        mtm,
+                        &quota_color(row.remaining.unwrap_or(0), true),
+                        thickness / 2.0,
+                    );
                     fill.setToolTip(Some(&tooltip));
                     place(&fill, 22.0, row_top + offset, width, thickness);
                 }
             }
             row_top += block_height;
         }
-        for row in provider
-            .rows
-            .iter()
-            .filter(|r| !paired_rows.iter().any(|paired| std::ptr::eq(*paired, *r))
-                && !fable.is_some_and(|f| std::ptr::eq(f, *r)))
-        {
+        for row in provider.rows.iter().filter(|r| {
+            !paired_rows.iter().any(|paired| std::ptr::eq(*paired, *r))
+                && !fable.is_some_and(|f| std::ptr::eq(f, *r))
+        }) {
             // Composite the complete row once: track, fill, value, label and reset.
             let group = NSView::initWithFrame(
                 mtm.alloc(),
@@ -2797,7 +2825,10 @@ pub fn quota_ui_smoke(directory: &str) {
         fixture("Personnel", "pro", Some(27.0), Some(14.0), Some(40.0)),
         fixture("Travail", "max", Some(65.0), Some(80.0), Some(91.0)),
     ];
-    scenarios.push(("single-fable", claude_account_panels(&fable_pair[..1], false)));
+    scenarios.push((
+        "single-fable",
+        claude_account_panels(&fable_pair[..1], false),
+    ));
     scenarios.push(("multi-fable", claude_account_panels(&fable_pair, false)));
     scenarios.push((
         "multi-fable-classic",
@@ -2876,7 +2907,12 @@ pub fn quota_ui_smoke(directory: &str) {
     ));
     // Multi-Codex: production projection (account_view -> mark_duplicates ->
     // codex_account_panels), synthetic rows only, no Codex process.
-    let codex_env = |name: &str, primary: bool, phase: &str, message: &str, rows: &[QuotaPayload], identity: Option<u64>| {
+    let codex_env = |name: &str,
+                     primary: bool,
+                     phase: &str,
+                     message: &str,
+                     rows: &[QuotaPayload],
+                     identity: Option<u64>| {
         let found = codex_accounts::Discovered {
             profile: claude_accounts::Profile {
                 id: format!("profile:{name}"),
@@ -2910,7 +2946,12 @@ pub fn quota_ui_smoke(directory: &str) {
             rows: rows.to_vec(),
             identity,
         };
-        codex::account_view(found, true, Some(&view), (!primary).then_some((reading, false)))
+        codex::account_view(
+            found,
+            true,
+            Some(&view),
+            (!primary).then_some((reading, false)),
+        )
     };
     let mut work_codex = native_codex.clone();
     work_codex[0].remaining = 18;
@@ -2942,7 +2983,13 @@ pub fn quota_ui_smoke(directory: &str) {
         "codex-and-claude-multi",
         codex_account_panels(&codex_envs[..2], "compact")
             .into_iter()
-            .chain(claude_account_panels(&[fixture("Personnel", "pro", Some(27.0), Some(14.0), None), work.clone()], false))
+            .chain(claude_account_panels(
+                &[
+                    fixture("Personnel", "pro", Some(27.0), Some(14.0), None),
+                    work.clone(),
+                ],
+                false,
+            ))
             .collect(),
     ));
     let target = QuotaMenuTarget::new(mtm);
@@ -2952,8 +2999,7 @@ pub fn quota_ui_smoke(directory: &str) {
         for connection in [None, Some(false), Some(true)] {
             let header = panel_header(providers, (!providers.is_empty()).then(Local::now));
             let view = make_panel_view(mtm, &header, providers);
-            let (menu, panel) =
-                make_native_quota_menu(mtm, &target, &view, connection, "fixture");
+            let (menu, panel) = make_native_quota_menu(mtm, &target, &view, connection, "fixture");
             assert!(!menu.autoenablesItems());
             assert!(
                 !panel.isEnabled(),
@@ -3138,7 +3184,8 @@ pub fn quota_ui_smoke(directory: &str) {
                         let count = if name == "single-fable" { 1 } else { 2 };
                         assert_eq!(heights, [5.0, 5.0, 3.0, 3.0, 3.0, 3.0].repeat(count));
                         for block in found.chunks(6) {
-                            let gap = block[2].origin.y - (block[4].origin.y + block[4].size.height);
+                            let gap =
+                                block[2].origin.y - (block[4].origin.y + block[4].size.height);
                             assert!((gap - 2.0).abs() < 0.01, "Fable gap {gap}");
                         }
                         for provider in &providers {
@@ -3163,8 +3210,14 @@ pub fn quota_ui_smoke(directory: &str) {
                                     if let Some(label) = sub.accessibilityLabel() {
                                         let label = label.to_string();
                                         if label.starts_with("Fable ·") {
-                                            assert!(label.contains('%') && label.contains("Réinitialisation"));
-                                            assert_eq!(sub.toolTip().map(|s| s.to_string()), Some(label.clone()));
+                                            assert!(
+                                                label.contains('%')
+                                                    && label.contains("Réinitialisation")
+                                            );
+                                            assert_eq!(
+                                                sub.toolTip().map(|s| s.to_string()),
+                                                Some(label.clone())
+                                            );
                                             out.push(label);
                                         }
                                     }
@@ -4006,7 +4059,11 @@ mod tests {
             let snap = claude::usage_snapshot(&limits(fable), now);
             let mut panel = claude_panel(&snap);
             panel.compact = true;
-            assert_eq!(panel.rows.len(), 2 + usize::from(fable.is_some()), "{fable:?}");
+            assert_eq!(
+                panel.rows.len(),
+                2 + usize::from(fable.is_some()),
+                "{fable:?}"
+            );
             // The pair is always the 5 h and the 7 j window, never Fable.
             let pair = paired_panel_rows(&panel);
             assert_eq!(pair.len(), 2);
@@ -4158,7 +4215,12 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    fn codex_fixture(name: &str, primary: bool, visible: bool, rows: &[QuotaPayload]) -> codex::CodexAccount {
+    fn codex_fixture(
+        name: &str,
+        primary: bool,
+        visible: bool,
+        rows: &[QuotaPayload],
+    ) -> codex::CodexAccount {
         let found = codex_accounts::Discovered {
             profile: claude_accounts::Profile {
                 id: format!("profile:{name}"),
@@ -4188,7 +4250,12 @@ mod tests {
             rows: rows.to_vec(),
             identity: None,
         };
-        codex::account_view(found, true, Some(&view), (!primary).then_some((reading, false)))
+        codex::account_view(
+            found,
+            true,
+            Some(&view),
+            (!primary).then_some((reading, false)),
+        )
     }
 
     #[cfg(target_os = "macos")]
@@ -4310,7 +4377,13 @@ mod tests {
             payload("weekly", 85, Some(10080)),
         ];
         for layout in ["compact", "classic"] {
-            let historical = codex_presentation(&rows, "ready", "Quotas synchronisés directement avec Codex.", None, layout);
+            let historical = codex_presentation(
+                &rows,
+                "ready",
+                "Quotas synchronisés directement avec Codex.",
+                None,
+                layout,
+            );
             // Unique (primary only) and Multi with a hidden extra.
             for accounts in [
                 vec![codex_fixture("Principal", true, true, &rows)],
@@ -4354,7 +4427,15 @@ mod tests {
         let compact = codex_account_panels(&accounts, "compact");
         let classic = codex_account_panels(&accounts, "classic");
         let names: Vec<_> = compact.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["Codex · Principal", "Codex · Travail", "Codex · Perso", "Codex · Alias"]);
+        assert_eq!(
+            names,
+            [
+                "Codex · Principal",
+                "Codex · Travail",
+                "Codex · Perso",
+                "Codex · Alias"
+            ]
+        );
         assert!(compact.iter().all(|p| p.compact) && classic.iter().all(|p| !p.compact));
         // Each named card pairs its own real windows (not only the plain "Codex").
         assert_eq!(paired_panel_rows(&compact[0]).len(), 2);
@@ -4383,7 +4464,12 @@ mod tests {
         let (note, tone) = compact[2].note.clone().unwrap();
         assert!(note.contains("Non connecté") && tone == Tone::Warning);
         // Same identity: flagged, values kept apart.
-        assert!(compact[3].note.as_ref().unwrap().0.contains("Même compte que « Principal »"));
+        assert!(compact[3]
+            .note
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Même compte que « Principal »"));
         assert_eq!(compact[3].rows[0].remaining, Some(63));
         // Codex disabled: no card at all; Claude-only providers unaffected.
         let mut prefs = prefs::Prefs::default();
@@ -4403,7 +4489,11 @@ mod tests {
         assert_eq!(serialized.providers.len(), 4);
         assert_eq!(serialized.providers[1].section, "CODEX · TRAVAIL");
         assert_eq!(
-            serialized.providers[1].rows.iter().filter(|r| r.pair_slot.is_some()).count(),
+            serialized.providers[1]
+                .rows
+                .iter()
+                .filter(|r| r.pair_slot.is_some())
+                .count(),
             2
         );
     }
@@ -4422,7 +4512,11 @@ mod tests {
                 format!(r#"{{"layout":"{layout}","claudeEnabled":true,"codexLayout":"classic"}}"#)
                     .as_bytes(),
             );
-            quota_providers(&prefs, &[codex_fixture("Principal", true, true, &rows)], &[personal.clone()])
+            quota_providers(
+                &prefs,
+                &[codex_fixture("Principal", true, true, &rows)],
+                &[personal.clone()],
+            )
         };
         let (compact, classic) = (build("compact"), build("classic"));
         assert_eq!((compact.len(), classic.len()), (2, 2));

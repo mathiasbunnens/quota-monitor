@@ -748,10 +748,19 @@ mod tests {
         let found = discover(&home, None, &AccountPrefs::default());
         let ids: Vec<_> = found.iter().map(|a| a.profile.id.clone()).collect();
         // Auto-added: Unique keeps only the principal displayed, Multi shows all.
-        assert_eq!(visible_ids(&home, &AccountPrefs::default()), vec![ids[0].clone()]);
-        let multi = AccountPrefs { mode: "multi".into(), ..AccountPrefs::default() };
+        assert_eq!(
+            visible_ids(&home, &AccountPrefs::default()),
+            vec![ids[0].clone()]
+        );
+        let multi = AccountPrefs {
+            mode: "multi".into(),
+            ..AccountPrefs::default()
+        };
         assert_eq!(visible_ids(&home, &multi).len(), 3);
-        assert!(remove(&home, None, &multi, &ids[0]).is_err(), "principal stays");
+        assert!(
+            remove(&home, None, &multi, &ids[0]).is_err(),
+            "principal stays"
+        );
         assert!(remove(&home, None, &multi, "profile:00").is_err());
         let next = remove(&home, None, &multi, &ids[1]).unwrap();
         assert_eq!(next.excluded, vec![ids[1].clone()]);
@@ -759,16 +768,29 @@ mod tests {
             let again = discover(&home, None, &next);
             assert_eq!(again.len(), 2, "the next scan does not add it back");
         }
-        assert_eq!(std::fs::read_to_string(home.join(".claude-a/sentinel")).unwrap(), "kept");
+        assert_eq!(
+            std::fs::read_to_string(home.join(".claude-a/sentinel")).unwrap(),
+            "kept"
+        );
         // Removing the last extra returns to the historical single account.
         let alone = remove(&home, None, &next, &ids[2]).unwrap();
-        assert_eq!((alone.mode.as_str(), alone.selected_id.as_ref()), ("single", None));
+        assert_eq!(
+            (alone.mode.as_str(), alone.selected_id.as_ref()),
+            ("single", None)
+        );
         // The + restores a removed folder (and forgets the exclusion).
-        let back = follow(&home, None, &next, FollowTarget::Path(home.join(".claude-a").to_str().unwrap())).unwrap();
+        let back = follow(
+            &home,
+            None,
+            &next,
+            FollowTarget::Path(home.join(".claude-a").to_str().unwrap()),
+        )
+        .unwrap();
         assert!(back.excluded.is_empty());
         assert!(visible_ids(&home, &back).contains(&ids[1]));
         // Old prefs without `excluded` still load; a bad list is refused.
-        let old: AccountPrefs = serde_json::from_str(r#"{"mode":"multi","selectedId":null,"profiles":[]}"#).unwrap();
+        let old: AccountPrefs =
+            serde_json::from_str(r#"{"mode":"multi","selectedId":null,"profiles":[]}"#).unwrap();
         assert!(old.excluded.is_empty() && old.validate().is_ok());
         let mut bad = next.clone();
         bad.excluded.push("x".into());

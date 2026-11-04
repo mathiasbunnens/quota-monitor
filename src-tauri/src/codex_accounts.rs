@@ -130,7 +130,9 @@ pub fn discover(home: &Path, env: Option<&Path>, prefs: &AccountPrefs) -> Vec<Di
                     .unwrap_or_else(|| default_name(&raw)),
                 // Automatically added homes follow the current mode: shown in
                 // Multi, kept aside in Unique (which shows the selected one).
-                visible: saved.map(|s| s.visible).unwrap_or(detected && prefs.mode == "multi"),
+                visible: saved
+                    .map(|s| s.visible)
+                    .unwrap_or(detected && prefs.mode == "multi"),
             },
             launch: Some(raw),
             primary: false,
@@ -142,10 +144,9 @@ pub fn discover(home: &Path, env: Option<&Path>, prefs: &AccountPrefs) -> Vec<Di
         let mut detected: Vec<_> = entries
             .flatten()
             .filter(|e| {
-                e.file_name()
-                    .to_str()
-                    .is_some_and(|n| (n.starts_with(PREFIX) && n.len() > PREFIX.len()) || n == ".codex")
-                    && e.path().is_dir()
+                e.file_name().to_str().is_some_and(|n| {
+                    (n.starts_with(PREFIX) && n.len() > PREFIX.len()) || n == ".codex"
+                }) && e.path().is_dir()
             })
             .map(|e| e.path())
             .collect();
@@ -233,25 +234,35 @@ pub fn follow(
             "Au plus {MAX_EXTRA} comptes Codex supplémentaires peuvent être suivis."
         ));
     }
-    let profile = existing.map(|a| a.profile.clone()).unwrap_or_else(|| Profile {
-        id: id.clone(),
-        path: raw.clone(),
-        name: default_name(Path::new(&raw)),
-        visible: true,
-    });
+    let profile = existing
+        .map(|a| a.profile.clone())
+        .unwrap_or_else(|| Profile {
+            id: id.clone(),
+            path: raw.clone(),
+            name: default_name(Path::new(&raw)),
+            visible: true,
+        });
     let mut next = prefs.clone();
-    let upsert = |next: &mut AccountPrefs, profile: Profile| {
-        match next.profiles.iter_mut().find(|p| p.id == profile.id) {
-            Some(saved) => saved.visible = profile.visible,
-            None => next.profiles.push(profile),
-        }
+    let upsert = |next: &mut AccountPrefs, profile: Profile| match next
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile.id)
+    {
+        Some(saved) => saved.visible = profile.visible,
+        None => next.profiles.push(profile),
     };
     if !found
         .iter()
         .any(|a| a.profile.id != id && a.tracked && a.available)
     {
         // No other usable account (e.g. no ~/.codex): this one is displayed alone.
-        upsert(&mut next, Profile { visible: true, ..profile });
+        upsert(
+            &mut next,
+            Profile {
+                visible: true,
+                ..profile
+            },
+        );
         next.mode = "single".into();
         next.selected_id = Some(id);
         validate(&next)?;
@@ -261,12 +272,30 @@ pub fn follow(
     next.mode = "multi".into();
     for a in found.iter().filter(|a| a.tracked && a.profile.id != id) {
         if a.visible {
-            upsert(&mut next, Profile { visible: true, ..a.profile.clone() });
+            upsert(
+                &mut next,
+                Profile {
+                    visible: true,
+                    ..a.profile.clone()
+                },
+            );
         } else if was_single {
-            upsert(&mut next, Profile { visible: false, ..a.profile.clone() });
+            upsert(
+                &mut next,
+                Profile {
+                    visible: false,
+                    ..a.profile.clone()
+                },
+            );
         }
     }
-    upsert(&mut next, Profile { visible: true, ..profile });
+    upsert(
+        &mut next,
+        Profile {
+            visible: true,
+            ..profile
+        },
+    );
     validate(&next)?;
     Ok(next)
 }
@@ -309,7 +338,8 @@ pub fn untrack(
 mod tests {
     use super::*;
     fn root(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("qm-codex-accounts-{name}-{}", std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("qm-codex-accounts-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p.canonicalize().unwrap()
@@ -342,7 +372,10 @@ mod tests {
         // Auto-added, but kept aside in Unique: the principal stays the one displayed.
         assert!(!found[1].primary && found[1].tracked && !found[1].visible);
         assert_eq!(found[1].profile.name, "work");
-        assert_eq!(found[1].launch.as_deref(), Some(home.join(".codex-work").as_path()));
+        assert_eq!(
+            found[1].launch.as_deref(),
+            Some(home.join(".codex-work").as_path())
+        );
         assert_eq!(
             std::fs::read_to_string(home.join(".codex-work/auth.json")).unwrap(),
             "sentinel"
@@ -350,7 +383,10 @@ mod tests {
         // Background discovery never changes the historical mode.
         assert_eq!(prefs.mode, "single");
         // In Multi the same home is shown by default.
-        let multi = AccountPrefs { mode: "multi".into(), ..AccountPrefs::default() };
+        let multi = AccountPrefs {
+            mode: "multi".into(),
+            ..AccountPrefs::default()
+        };
         assert_eq!(visible(&home, &multi), vec!["Principal", "work"]);
         std::fs::remove_dir_all(home).unwrap();
     }
@@ -370,7 +406,11 @@ mod tests {
         {
             std::os::unix::fs::symlink(&custom, home.join(".codex-alias")).unwrap();
             let again = discover(&home, Some(&custom), &AccountPrefs::default());
-            assert_eq!(again.len(), found.len(), "alias of the primary is not a second account");
+            assert_eq!(
+                again.len(),
+                found.len(),
+                "alias of the primary is not a second account"
+            );
         }
         // Relative/empty CODEX_HOME is ignored like the CLI ignores an empty value.
         let rel = discover(&home, Some(Path::new("relative")), &AccountPrefs::default());
@@ -387,14 +427,38 @@ mod tests {
         let prefs = AccountPrefs::default();
         let found = discover(&home, None, &prefs);
         let work = found.iter().find(|a| a.profile.name == "work").unwrap();
-        let next = follow(&home, None, &prefs, FollowTarget::Detected(&work.profile.id)).unwrap();
+        let next = follow(
+            &home,
+            None,
+            &prefs,
+            FollowTarget::Detected(&work.profile.id),
+        )
+        .unwrap();
         assert_eq!(next.mode, "multi");
         assert_eq!(visible(&home, &next), vec!["Principal", "work"]);
         let after = discover(&home, None, &next);
-        assert!(after.iter().find(|a| a.profile.name == "work").unwrap().tracked);
+        assert!(
+            after
+                .iter()
+                .find(|a| a.profile.name == "work")
+                .unwrap()
+                .tracked
+        );
         // The other detected home is followed too, but not displayed.
-        assert!(after.iter().find(|a| a.profile.name == "perso").unwrap().tracked);
-        assert!(!after.iter().find(|a| a.profile.name == "perso").unwrap().visible);
+        assert!(
+            after
+                .iter()
+                .find(|a| a.profile.name == "perso")
+                .unwrap()
+                .tracked
+        );
+        assert!(
+            !after
+                .iter()
+                .find(|a| a.profile.name == "perso")
+                .unwrap()
+                .visible
+        );
         let again =
             follow(&home, None, &next, FollowTarget::Detected(&work.profile.id)).unwrap_err();
         assert!(again.contains("déjà affiché"), "{again}");
@@ -425,7 +489,13 @@ mod tests {
         let elsewhere = home.join("Elsewhere").join("codex-pro");
         std::fs::create_dir_all(&elsewhere).unwrap();
         let raw = format!("{}/", elsewhere.to_str().unwrap());
-        let next = follow(&home, None, &AccountPrefs::default(), FollowTarget::Path(&raw)).unwrap();
+        let next = follow(
+            &home,
+            None,
+            &AccountPrefs::default(),
+            FollowTarget::Path(&raw),
+        )
+        .unwrap();
         let added = next.profiles.iter().find(|p| p.path == raw).unwrap();
         assert_eq!(added.name, "codex-pro");
         let extra = discover(&home, None, &next)
@@ -438,8 +508,13 @@ mod tests {
         {
             let alias = home.join("alias");
             std::os::unix::fs::symlink(&elsewhere, &alias).unwrap();
-            let err =
-                follow(&home, None, &next, FollowTarget::Path(alias.to_str().unwrap())).unwrap_err();
+            let err = follow(
+                &home,
+                None,
+                &next,
+                FollowTarget::Path(alias.to_str().unwrap()),
+            )
+            .unwrap_err();
             assert!(err.contains("déjà affiché"), "{err}");
         }
         let p = AccountPrefs::default();
@@ -453,7 +528,13 @@ mod tests {
         assert!(missing.contains("introuvable"), "{missing}");
         assert!(follow(&home, None, &p, FollowTarget::Path("relative/dir")).is_err());
         std::fs::write(home.join("file"), "x").unwrap();
-        assert!(follow(&home, None, &p, FollowTarget::Path(home.join("file").to_str().unwrap())).is_err());
+        assert!(follow(
+            &home,
+            None,
+            &p,
+            FollowTarget::Path(home.join("file").to_str().unwrap())
+        )
+        .is_err());
         std::fs::remove_dir_all(home).unwrap();
     }
 
@@ -467,7 +548,10 @@ mod tests {
         let id = discover(&home, None, &prefs)[1].profile.id.clone();
         let followed = follow(&home, None, &prefs, FollowTarget::Detected(&id)).unwrap();
         let primary = discover(&home, None, &followed)[0].profile.id.clone();
-        assert!(untrack(&home, None, &followed, &primary).is_err(), "primary is never removed");
+        assert!(
+            untrack(&home, None, &followed, &primary).is_err(),
+            "primary is never removed"
+        );
         let back = untrack(&home, None, &followed, &id).unwrap();
         assert_eq!(back.mode, "single");
         assert!(back.selected_id.is_none());
@@ -508,8 +592,14 @@ mod tests {
         .unwrap();
         assert!(old.excluded.is_empty());
         assert_eq!(old.profiles[0].name, "Perso");
-        let prefs = AccountPrefs { mode: "multi".into(), ..AccountPrefs::default() };
-        let a = discover(&home, None, &prefs).into_iter().find(|x| x.profile.name == "a").unwrap();
+        let prefs = AccountPrefs {
+            mode: "multi".into(),
+            ..AccountPrefs::default()
+        };
+        let a = discover(&home, None, &prefs)
+            .into_iter()
+            .find(|x| x.profile.name == "a")
+            .unwrap();
         let next = untrack(&home, None, &prefs, &a.profile.id).unwrap();
         for _ in 0..2 {
             assert_eq!(visible(&home, &next), vec!["Principal", "b"]);
@@ -536,15 +626,29 @@ mod tests {
             .unwrap();
         let prefs = AccountPrefs {
             mode: "multi".into(),
-            profiles: vec![Profile { name: "Travail".into(), visible: false, ..b.profile }],
+            profiles: vec![Profile {
+                name: "Travail".into(),
+                visible: false,
+                ..b.profile
+            }],
             ..AccountPrefs::default()
         };
         validate(&prefs).unwrap();
         let found = discover(&home, None, &prefs);
         let names: Vec<_> = found.iter().map(|x| x.profile.name.as_str()).collect();
-        assert_eq!(names, vec!["Principal", "a", "Travail"], "renaming does not reorder");
-        assert!(!found[2].visible, "saved visibility wins over the Multi default");
-        assert!(found[1].visible, "unsaved auto-added home is shown in Multi");
+        assert_eq!(
+            names,
+            vec!["Principal", "a", "Travail"],
+            "renaming does not reorder"
+        );
+        assert!(
+            !found[2].visible,
+            "saved visibility wins over the Multi default"
+        );
+        assert!(
+            found[1].visible,
+            "unsaved auto-added home is shown in Multi"
+        );
         std::fs::remove_dir_all(home).unwrap();
     }
 

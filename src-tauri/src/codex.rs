@@ -290,14 +290,7 @@ impl Provider {
                     first_poll: Instant::now() + Duration::from_secs(2 * index as u64 + 1),
                 };
                 std::thread::spawn(move || run_extra(worker, rx));
-                extras.insert(
-                    a.profile.id.clone(),
-                    ExtraHandle {
-                        shared,
-                        tx,
-                        launch,
-                    },
-                );
+                extras.insert(a.profile.id.clone(), ExtraHandle { shared, tx, launch });
             }
         }
         if changed {
@@ -1248,10 +1241,7 @@ fn poll_extra(
             *session = None;
             let mut reading = Reading::new("signed_out", &signed_out_message(&w.launch));
             reading.last_checked = now();
-            (
-                reading,
-                Duration::from_secs((w.interval)(None).max(120)),
-            )
+            (reading, Duration::from_secs((w.interval)(None).max(120)))
         }
         Err(error) => {
             *session = None;
@@ -1516,23 +1506,42 @@ fn edit_accounts(
 
 /// « Ajouter un compte » with a chosen/typed existing CODEX_HOME folder.
 #[tauri::command]
-pub fn add_codex_profile(app: tauri::AppHandle, path: String) -> Result<crate::prefs::Prefs, String> {
+pub fn add_codex_profile(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<crate::prefs::Prefs, String> {
     edit_accounts(app, |home, env, prefs| {
-        crate::codex_accounts::follow(home, env, prefs, crate::codex_accounts::FollowTarget::Path(&path))
+        crate::codex_accounts::follow(
+            home,
+            env,
+            prefs,
+            crate::codex_accounts::FollowTarget::Path(&path),
+        )
     })
 }
 
 /// Follow a detected `~/.codex-*` folder.
 #[tauri::command]
-pub fn follow_codex_profile(app: tauri::AppHandle, id: String) -> Result<crate::prefs::Prefs, String> {
+pub fn follow_codex_profile(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<crate::prefs::Prefs, String> {
     edit_accounts(app, |home, env, prefs| {
-        crate::codex_accounts::follow(home, env, prefs, crate::codex_accounts::FollowTarget::Detected(&id))
+        crate::codex_accounts::follow(
+            home,
+            env,
+            prefs,
+            crate::codex_accounts::FollowTarget::Detected(&id),
+        )
     })
 }
 
 /// Stop following (never deletes or changes the folder).
 #[tauri::command]
-pub fn untrack_codex_profile(app: tauri::AppHandle, id: String) -> Result<crate::prefs::Prefs, String> {
+pub fn untrack_codex_profile(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<crate::prefs::Prefs, String> {
     edit_accounts(app, |home, env, prefs| {
         crate::codex_accounts::untrack(home, env, prefs, &id)
     })
@@ -1736,7 +1745,11 @@ done
         id: &str,
         launch: &std::path::Path,
         exe: &std::path::Path,
-    ) -> (Arc<Shared>, Sender<ExtraAction>, std::thread::JoinHandle<()>) {
+    ) -> (
+        Arc<Shared>,
+        Sender<ExtraAction>,
+        std::thread::JoinHandle<()>,
+    ) {
         let generation = store.lock().unwrap().register(id);
         let shared = Arc::new(Shared::default());
         let (tx, rx) = mpsc::channel();
@@ -1752,7 +1765,11 @@ done
             changed: Box::new(|| {}),
             first_poll: Instant::now(),
         };
-        (shared, tx, std::thread::spawn(move || run_extra(worker, rx)))
+        (
+            shared,
+            tx,
+            std::thread::spawn(move || run_extra(worker, rx)),
+        )
     }
     #[cfg(unix)]
     fn wait_for(store: &Arc<Mutex<AccountStore>>, ids: &[&str]) {
@@ -1797,7 +1814,12 @@ done
         let before = std::env::var_os("CODEX_HOME");
         let store = Arc::new(Mutex::new(AccountStore::default()));
         let mut workers = vec![];
-        let homes = [("alpha", &alpha), ("beta", &beta), ("gamma", &gamma), ("dead", &dead)];
+        let homes = [
+            ("alpha", &alpha),
+            ("beta", &beta),
+            ("gamma", &gamma),
+            ("dead", &dead),
+        ];
         for (id, dir) in homes {
             workers.push(spawn_extra(&store, id, dir, &exe));
         }
@@ -1811,9 +1833,15 @@ done
             assert_eq!(rows.len(), 2);
             assert_eq!(rows[0].remaining, 70);
             assert_eq!(g.rows.as_ref().unwrap()[0].remaining, 45, "no aggregation");
-            assert!(a.identity.is_some() && a.identity == g.identity, "same account detected");
+            assert!(
+                a.identity.is_some() && a.identity == g.identity,
+                "same account detected"
+            );
             assert_eq!(b.phase, "signed_out");
-            assert!(b.rows.is_none() && b.identity.is_none(), "no invented quota");
+            assert!(
+                b.rows.is_none() && b.identity.is_none(),
+                "no invented quota"
+            );
             assert!(b.message.contains("CODEX_HOME=") && b.message.contains("codex login"));
             assert!(b.message.contains(beta.to_str().unwrap()));
             assert_eq!(d.phase, "error");
@@ -1829,16 +1857,28 @@ done
                     parts.next().unwrap(),
                 );
                 assert!(
-                    ["initialize", "initialized", "account/read", "account/rateLimits/read"]
-                        .contains(&method),
+                    [
+                        "initialize",
+                        "initialized",
+                        "account/read",
+                        "account/rateLimits/read"
+                    ]
+                    .contains(&method),
                     "unexpected call {method}"
                 );
-                assert!(homes.iter().any(|(_, dir)| dir.to_str() == Some(seen)), "{seen}");
+                assert!(
+                    homes.iter().any(|(_, dir)| dir.to_str() == Some(seen)),
+                    "{seen}"
+                );
                 if method == "account/read" {
                     assert!(raw.contains(r#""refreshToken":false"#), "{raw}");
                 }
                 if method == "account/rateLimits/read" {
-                    assert_ne!(seen, beta.to_str().unwrap(), "no quota read when signed out");
+                    assert_ne!(
+                        seen,
+                        beta.to_str().unwrap(),
+                        "no quota read when signed out"
+                    );
                 }
             }
             assert!(!calls.contains("login") && !calls.contains("logout"));
@@ -1888,7 +1928,11 @@ done
         assert!(store.commit("a", g2, Reading::new("ready", "fresh")));
         let gb = store.register("b");
         assert!(store.commit("b", gb, Reading::new("error", "b failed")));
-        assert_eq!(store.get("a").unwrap().0.message, "fresh", "errors isolated");
+        assert_eq!(
+            store.get("a").unwrap().0.message,
+            "fresh",
+            "errors isolated"
+        );
         store.remove("a");
         assert!(!store.begin("a", g2));
         assert!(!store.commit("a", g2, Reading::new("ready", "removed")));
@@ -1898,18 +1942,35 @@ done
     #[test]
     fn fingerprint_uses_only_the_returned_account_id_never_tokens() {
         let fp = |v: Value| account_fingerprint(&v);
-        let a = fp(json!({"account":{"type":"chatgpt","email":" A@Example.invalid ","planType":"plus"}}));
+        let a = fp(
+            json!({"account":{"type":"chatgpt","email":" A@Example.invalid ","planType":"plus"}}),
+        );
         assert!(a.is_some());
-        assert_eq!(a, fp(json!({"account":{"type":"chatgpt","email":"a@example.invalid"}})));
-        assert_ne!(a, fp(json!({"account":{"type":"chatgpt","email":"b@example.invalid"}})));
+        assert_eq!(
+            a,
+            fp(json!({"account":{"type":"chatgpt","email":"a@example.invalid"}}))
+        );
+        assert_ne!(
+            a,
+            fp(json!({"account":{"type":"chatgpt","email":"b@example.invalid"}}))
+        );
         assert_eq!(fp(json!({"account":null,"requiresOpenaiAuth":true})), None);
         assert_eq!(fp(json!({"account":{"type":"chatgpt","email":null}})), None);
         assert!(fp(json!({"account":{"type":"chatgpt","email":null},"workspaceRouting":{"chatgptAccountId":"acc-1"}})).is_some());
         // Tokens/keys are never looked at, even if a payload carried them.
-        assert_eq!(fp(json!({"account":{"type":"apiKey"},"accessToken":"x","apiKey":"y"})), None);
+        assert_eq!(
+            fp(json!({"account":{"type":"apiKey"},"accessToken":"x","apiKey":"y"})),
+            None
+        );
     }
 
-    fn found(name: &str, primary: bool, tracked: bool, available: bool, visible: bool) -> crate::codex_accounts::Discovered {
+    fn found(
+        name: &str,
+        primary: bool,
+        tracked: bool,
+        available: bool,
+        visible: bool,
+    ) -> crate::codex_accounts::Discovered {
         crate::codex_accounts::Discovered {
             profile: crate::claude_accounts::Profile {
                 id: format!("profile:{name}"),
@@ -1928,8 +1989,10 @@ done
         let mut r = Reading::new("ready", "ok");
         r.identity = Some(identity);
         r.rows = Some(
-            normalize(&json!({"rateLimits":{"primary":{"usedPercent":used,"windowDurationMins":300}}}))
-                .unwrap(),
+            normalize(
+                &json!({"rateLimits":{"primary":{"usedPercent":used,"windowDurationMins":300}}}),
+            )
+            .unwrap(),
         );
         r
     }
@@ -1946,9 +2009,24 @@ done
             identity: Some(1),
         };
         let mut list = vec![
-            account_view(found("Principal", true, true, true, true), true, Some(&primary), None),
-            account_view(found("work", false, true, true, true), true, None, Some((ready(2, 10.0), false))),
-            account_view(found("alias", false, true, true, true), true, None, Some((ready(1, 40.0), true))),
+            account_view(
+                found("Principal", true, true, true, true),
+                true,
+                Some(&primary),
+                None,
+            ),
+            account_view(
+                found("work", false, true, true, true),
+                true,
+                None,
+                Some((ready(2, 10.0), false)),
+            ),
+            account_view(
+                found("alias", false, true, true, true),
+                true,
+                None,
+                Some((ready(1, 40.0), true)),
+            ),
             account_view(
                 found("out", false, true, true, true),
                 true,
@@ -1969,7 +2047,12 @@ done
         assert!(list[3].rows.is_empty());
         assert_eq!(list[4].phase, "unavailable");
         // Disabled provider: nothing visible, nothing reported.
-        let off = account_view(found("work", false, true, true, true), false, None, Some((ready(2, 10.0), false)));
+        let off = account_view(
+            found("work", false, true, true, true),
+            false,
+            None,
+            Some((ready(2, 10.0), false)),
+        );
         assert!(!off.profile.visible && off.rows.is_empty() && off.phase == "disabled");
         // Serialised view never carries the fingerprint.
         let json = serde_json::to_value(&list[2]).unwrap();
@@ -2192,7 +2275,11 @@ done
             .map(|name| {
                 let dir = root.join(name);
                 fs::create_dir_all(&dir).unwrap();
-                fs::write(dir.join("config.toml"), "cli_auth_credentials_store = \"ephemeral\"\n").unwrap();
+                fs::write(
+                    dir.join("config.toml"),
+                    "cli_auth_credentials_store = \"ephemeral\"\n",
+                )
+                .unwrap();
                 dir.canonicalize().unwrap()
             })
             .collect();
@@ -2215,9 +2302,16 @@ done
                     reading.rows.is_some()
                 );
                 assert_eq!(reading.phase, "signed_out", "{}", reading.message);
-                assert!(reading.identity.is_none() && reading.rows.is_none(), "no primary leak");
+                assert!(
+                    reading.identity.is_none() && reading.rows.is_none(),
+                    "no primary leak"
+                );
             }
-            assert_eq!(std::env::var_os("CODEX_HOME"), before, "process environment untouched");
+            assert_eq!(
+                std::env::var_os("CODEX_HOME"),
+                before,
+                "process environment untouched"
+            );
         }));
         // finally: stop and reap both children, even after a failure or timeout.
         for (shared, _, _) in &workers {
@@ -2238,7 +2332,10 @@ done
                 .collect();
             names.sort();
             println!("home {i} entries (names only): {names:?}");
-            assert!(!names.iter().any(|n| n == "auth.json"), "no credentials written");
+            assert!(
+                !names.iter().any(|n| n == "auth.json"),
+                "no credentials written"
+            );
         }
         result.unwrap();
     }
