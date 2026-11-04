@@ -29,6 +29,10 @@ if (query.get('extra')==='yes') profiles[0].snapshot.extraUsage={enabled:true,li
 if (scenario === 'edge') {profiles[0].snapshot.metrics = [metric('five_hour',100,'Limite 5 heures'),metric('seven_day',null,'Limite hebdomadaire'),{...metric('seven_day',15,'Limite hebdomadaire Fable'),id:'claude:weekly_fable'}];profiles[0].snapshot.extraUsage={enabled:true,limitReached:true};profiles[1].snapshot.state='error';profiles[1].snapshot.metrics=[];profiles[1].snapshot.message='Lecture Claude impossible : vérifiez la connexion.';}
 if (scenario === 'signed-out') Object.assign(profiles[1].snapshot, {state:'error',metrics:[],planType:null,errorKind:'not_signed_in',message:'Profil Claude non connecté. Connectez-vous avec CLAUDE_CONFIG_DIR=/fixtures/.claude-work claude auth login.'});
 if (scenario === 'fable') for (const [i,p] of profiles.entries()) p.snapshot.metrics.push({...metric('seven_day',i?91:40,'Limite hebdomadaire Fable',4800+1200),id:'claude:weekly_fable'});
+if (query.get('fableReset') === 'same') for (const p of profiles) {
+  const fable = p.snapshot.metrics.find(m => m.id === 'claude:weekly_fable');
+  if (fable) fable.resetAt = p.snapshot.metrics.find(m => m.id === 'claude:seven_day').resetAt;
+}
 if (scenario === 'one' || query.get('only') === '1') profiles.splice(1); // only=1: one account, whatever the scenario (e.g. Fable)
 if (scenario === 'zero') { profiles.splice(1); Object.assign(profiles[0], {available:false}); Object.assign(profiles[0].snapshot, {state:'error',metrics:[],planType:null,message:'Dossier de profil Claude indisponible.'}); }
 if (scenario === 'add-error') profiles[1].snapshot.planType = 'team';

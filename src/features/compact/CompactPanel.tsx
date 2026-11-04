@@ -103,7 +103,7 @@ function Pair({ rows, fable }: { rows: CompactRow[]; fable?: CompactRow }) {
         title={`${windows[row.pairSlot ?? index]} · ${row.label} · ${row.reset}`}>{pairReset(row)}</span>)}
     </div>
     {fable && <div className="compact-pair__fable-caption">
-      <span style={{ color: fillColor(fable.fill, true) }}>{pairHeading(fable)}</span>
+      <span style={{ color: fillColor(fable.fill, true) }} title={`${pairHeading(fable)} · ${fable.reset}`}>Fable</span>
       {fable.reset !== week?.reset && <span>{pairReset(fable)}</span>}
     </div>}
   </div>;

@@ -48,7 +48,7 @@ try {
   });
   const ev = async expression => (await cdp('Runtime.evaluate', { expression, returnByValue: true })).result.value;
   await cdp('Page.enable'); await cdp('Runtime.enable');
-  for (const renderer of Object.keys(roots)) for (const theme of ['light', 'dark']) for (const multi of [false, true]) for (const scene of ['absent', 'fable', 'classic']) {
+  for (const renderer of Object.keys(roots)) for (const theme of ['light', 'dark']) for (const multi of [false, true]) for (const scene of ['absent', 'fable', 'same-reset', 'classic']) {
     const fable = scene !== 'absent'; const classic = scene === 'classic';
     const model = fable ? (multi ? 'multi-fable' : 'single-fable') : (multi ? 'multi-accounts' : 'single-account');
     // Classic mono uses the same real three-row model with only its layout flag changed.
@@ -57,8 +57,17 @@ try {
       source.providers.forEach(p => { p.compact = false; });
       fs.writeFileSync(path.join(roots.compact, 'models/single-fable-classic.json'), JSON.stringify(source));
     }
-    const query = renderer === 'compact' ? `model=${model}${classic ? '-classic' : ''}`
-      : `scenario=${fable ? 'fable' : 'multi'}&only=${multi ? '2' : '1'}&layout=${classic ? 'classic' : 'compact'}&clock=controlled&platform=macos`;
+    if (scene === 'same-reset') {
+      const source = JSON.parse(fs.readFileSync(path.join(roots.compact, `models/${model}.json`)));
+      for (const provider of source.providers) {
+        const fable = provider.rows.find(r => r.model);
+        const week = provider.rows.filter(r => !r.model)[1];
+        if (fable && week) fable.reset = week.reset;
+      }
+      fs.writeFileSync(path.join(roots.compact, `models/${model}-same.json`), JSON.stringify(source));
+    }
+    const query = renderer === 'compact' ? `model=${model}${classic ? '-classic' : scene === 'same-reset' ? '-same' : ''}`
+      : `scenario=${fable ? 'fable' : 'multi'}&fableReset=${scene === 'same-reset' ? 'same' : 'different'}&only=${multi ? '2' : '1'}&layout=${classic ? 'classic' : 'compact'}&clock=controlled&platform=macos`;
     await cdp('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }, { name: 'prefers-reduced-motion', value: 'reduce' }] });
     await cdp('Emulation.setDeviceMetricsOverride', { width: renderer === 'compact' ? 324 : 520, height: 900, deviceScaleFactor: 2, mobile: false });
     await cdp('Page.navigate', { url: `http://127.0.0.1:${ports[renderer]}/?${query}` });
@@ -95,7 +104,10 @@ try {
         if (fable) {
           assert.equal(card.tracks[2].y - card.tracks[1].bottom, 2);
           assert.equal(card.fills[2]?.height, 3);
-          assert.match(card.caption, /Fable/); assert.match(card.caption, /Réinit\./);
+          assert.equal(card.caption.split(/\n/)[0], 'Fable');
+          assert.doesNotMatch(card.caption, /%| · |\d+j \d+h/);
+          if (scene === 'same-reset') assert.equal(card.caption, 'Fable');
+          else assert.match(card.caption, /Réinit\./);
         } else assert.equal(card.caption, undefined);
       }
     }
@@ -104,7 +116,7 @@ try {
     report.push({ name, ...result });
   }
   assert.deepEqual(errors, []);
-  assert.equal(report.length, 24);
+  assert.equal(report.length, 32);
   fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2));
   console.log(`FABLE_GEOMETRY_PASS ${report.length} scenes: light/dark mono/multi absent/present/classic; track=fill=3 gap=2; no clipping`);
 } finally {

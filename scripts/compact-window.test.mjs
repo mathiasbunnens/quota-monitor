@@ -76,6 +76,7 @@ test("compact Fable is a third thin track with a conditional reset, without chan
   assert.match(same, /compact-pair__track--fable/);
   assert.equal((same.match(/role="meter"/g) || []).length, 3);
   assert.doesNotMatch(same.split('compact-pair__fable-caption')[1], /Réinit\./);
+  assert.equal(same.split('compact-pair__fable-caption')[1].split('</div>')[0].replace(/^[^>]*>|<[^>]*>/g, ''), 'Fable');
   const different = render([...rows.slice(0, 2), { ...fable, reset: 'Réinitialisation demain' }]);
   assert.match(different.split('compact-pair__fable-caption')[1], /Réinit\. demain/);
   const absent = render(rows.slice(0, 2));
@@ -221,7 +222,8 @@ test("multi-account cards pair 5 h and 7 j with countdowns and a third fine Fabl
   assert.match(markup, /aria-label="Limite 5 heures : Limite sur 3h30 · 73 % restant"/);
   // The pair is always 5 h + 7 j, never Fable.
   assert.match(markup, />2j 1h · 20 %</);
-  assert.match(markup, />Fable · 4j 4h · 60 %</);
+  assert.match(markup, />Fable<\/span>/);
+  assert.doesNotMatch(markup.replace(/<[^>]*>/g, ''), /Fable ·/);
   assert.equal((markup.match(/class="compact-pair__resets"/g) ?? []).length, 2);
   assert.match(markup, /compact-pair__resets"><span title="[^"]*">Réinit\. à 15h40<\/span><span title="[^"]*">Réinit\. à 15h40<\/span>/);
   assert.match(markup, />Réinit\. le 02\/11 à 12h00</);

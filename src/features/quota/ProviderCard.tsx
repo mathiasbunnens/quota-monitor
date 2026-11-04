@@ -150,7 +150,7 @@ export default function ProviderCard({ name, provider, badge, rows, status, erro
       </div>
       {(paired.short || paired.week) && <PairedResets short={paired.short} week={paired.week} />}
       {fable && <div className={"provider-card__fable-caption provider-row--model provider-row--" + (fable.remaining === null ? "low" : level(fable.remaining))}>
-        <span><span className="provider-row__model-label">Fable</span>{" · "}{resetCountdown(fable.resetAt, now)}{" · "}{fable.remaining === null ? fable.missing : fable.exhausted ? "Épuisé" : `${fable.remaining} %`}</span>
+        <span title={`Fable · ${resetCountdown(fable.resetAt, now)} · ${fable.remaining === null ? fable.missing : fable.exhausted ? "Épuisé" : `${fable.remaining} %`} · ${fable.resetText}`}><span className="provider-row__model-label">Fable</span></span>
         {fableResetDiffers && <span>{pairedResetLabel(fable)}</span>}
       </div>}
       {paired.others.filter((row) => row !== fable).map((row) => <Row key={row.id} row={row} />)}

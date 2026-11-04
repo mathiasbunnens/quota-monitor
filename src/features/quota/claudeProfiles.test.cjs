@@ -583,6 +583,10 @@ test('compact Fable only adds a reset when different from the weekly reset; Clas
     const html = renderToStaticMarkup(component('./ProviderCard.tsx', { name: 'Claude', accountCompact: true, rows: rs }));
     const caption = html.split('provider-card__fable-caption')[1];
     assert.equal(caption.includes('Réinit.'), extraReset);
+    const visible = caption.split('</div>')[0].replace(/^[^>]*>|<[^>]*>/g, '');
+    assert.ok(visible.startsWith('Fable'));
+    assert.doesNotMatch(visible, /%| · |\d+j \d+h/);
+    if (!extraReset) assert.equal(visible, 'Fable');
     assert.equal((html.match(/provider-row__reset/g) || []).length, 0);
     const classic = renderToStaticMarkup(component('./ProviderCard.tsx', { name: 'Claude', accountCompact: false, rows: rs }));
     assert.equal((classic.match(/provider-row__reset/g) || []).length, 3);

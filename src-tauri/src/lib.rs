@@ -2113,7 +2113,7 @@ fn make_panel_view(
                 );
             }
             if let Some(row) = fable {
-                let tooltip = NSString::from_str(&format!("{} · {} · {}", row.label, compact_value(row), row.reset));
+                let tooltip = NSString::from_str(&format!("{} · {}", compact_heading(row), row.reset));
                 let offset = tracks.1.0 + tracks.1.1 + 2.0;
                 let thickness = tracks.1.1;
                 let track = rounded_box(mtm, &NSColor::systemGrayColor().colorWithAlphaComponent(0.28), thickness / 2.0);
@@ -2125,7 +2125,7 @@ fn make_panel_view(
                     fill.setToolTip(Some(&tooltip));
                     place(&fill, 22.0, row_top + offset, width, thickness);
                 }
-                let caption = panel_label(mtm, &compact_heading(row), &NSFont::systemFontOfSize(10.0), &quota_color(row.remaining.unwrap_or(0), true));
+                let caption = panel_label(mtm, "Fable", &NSFont::systemFontOfSize(10.0), &quota_color(row.remaining.unwrap_or(0), true));
                 caption.setToolTip(Some(&tooltip));
                 let fable_reset = compact_fable_reset(provider);
                 place(&caption, 20.0, row_top + 58.0, if fable_reset.is_some() { 138.0 } else { 276.0 }, 13.0);
@@ -3108,6 +3108,18 @@ pub fn quota_ui_smoke(directory: &str) {
                             assert_eq!(pair_block_height(provider), 78.0);
                             assert_eq!(card_height(provider), 94.0);
                         }
+                        fn labels(view: &NSView, out: &mut Vec<String>) {
+                            for sub in view.subviews().iter() {
+                                if let Some(label) = sub.downcast_ref::<NSTextField>() {
+                                    out.push(label.stringValue().to_string());
+                                }
+                                labels(&sub, out);
+                            }
+                        }
+                        let mut texts = Vec::new();
+                        labels(&panel, &mut texts);
+                        assert_eq!(texts.iter().filter(|s| s.as_str() == "Fable").count(), count);
+                        assert!(!texts.iter().any(|s| s.starts_with("Fable ·")));
                         println!("NATIVE_FABLE_THIN_PASS {name} {mode}: block=78 gap=2 thickness=3");
                     }
                     "multi-fable-classic" => assert_eq!(heights, vec![5.0; 12]),
