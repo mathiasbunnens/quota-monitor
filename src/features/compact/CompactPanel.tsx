@@ -69,8 +69,8 @@ export function pairReset(row: CompactRow): string {
 
 /** Compacte block: 5 h + 7 j and an optional third fine Fable track. */
 function Pair({ rows, fable }: { rows: CompactRow[]; fable?: CompactRow }) {
-  const week = rows.find((row, index) => (row.pairSlot ?? index) === 1);
   const windows = ["Limite 5 heures", "Limite hebdomadaire"];
+  const fableDescription = fable ? `${fable.label} · ${fable.value}${fable.remaining === null ? "" : " restants"} · ${fable.reset}` : undefined;
   return <div className={"compact-pair" + (fable ? " has-fable" : "")}>
     <div className="compact-pair__values">
       {rows.map((row, index) => <span key={index} className={row.low ? "is-low" : undefined}
@@ -93,8 +93,8 @@ function Pair({ rows, fable }: { rows: CompactRow[]; fable?: CompactRow }) {
         </div>;
       })}
       {fable && <div className="compact-row__track compact-pair__track--week compact-pair__track--fable"
-        role="meter" aria-label={`${fable.label} : quota restant`} aria-valuemin={0} aria-valuemax={100}
-        aria-valuenow={fable.remaining ?? undefined} aria-valuetext={fable.value} title={`${fable.label} · ${fable.reset}`}>
+        role="meter" aria-label={fableDescription} aria-valuemin={0} aria-valuemax={100}
+        aria-valuenow={fable.remaining ?? undefined} aria-valuetext={fable.value} title={fableDescription}>
         {fable.fill.ratio * 276 >= 3 && <span className="compact-row__fill" style={{ width: `${fable.fill.ratio * 100}%`, background: fillColor(fable.fill, true) }} />}
       </div>}
     </div>
@@ -102,10 +102,6 @@ function Pair({ rows, fable }: { rows: CompactRow[]; fable?: CompactRow }) {
       {rows.map((row, index) => <span key={index} style={{ marginLeft: row.pairSlot === 1 ? "auto" : undefined }}
         title={`${windows[row.pairSlot ?? index]} · ${row.label} · ${row.reset}`}>{pairReset(row)}</span>)}
     </div>
-    {fable && <div className="compact-pair__fable-caption">
-      <span style={{ color: fillColor(fable.fill, true) }} title={`${pairHeading(fable)} · ${fable.reset}`}>Fable</span>
-      {fable.reset !== week?.reset && <span>{pairReset(fable)}</span>}
-    </div>}
   </div>;
 }
 

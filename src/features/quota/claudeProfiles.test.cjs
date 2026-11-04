@@ -247,7 +247,8 @@ test('multi card keeps a separate Fable row visible with its model label (nothin
   const html = renderToStaticMarkup(component('./ProviderCard.tsx', { name: 'Claude · Travail', compact: true, accountCompact: true, now,
     rows: [{ ...rows[0], id: 'claude:five_hour' }, { ...rows[1], id: 'claude:seven_day' }, fableRow] }));
   assert.equal((html.match(/role="progressbar"/g) || []).length, 3);
-  assert.match(html, /provider-row__model-label">Fable/);
+  assert.match(html, /aria-label="Limite Fable · 60 % restants · réinitialisation/);
+  assert.doesNotMatch(html.replace(/<[^>]*>/g, ''), /Fable/);
   assert.match(html, /60 %/);
 });
 test('Compacte: Fable never takes the 7 j slot; both keep their own countdown, reset line and bar', () => {
@@ -268,8 +269,9 @@ test('Compacte: Fable never takes the 7 j slot; both keep their own countdown, r
   assert.ok(html.includes('>' + label(80 * 60) + '</span></div>'), 'reset of the 7 j window');
   assert.equal(pairedResetLabel({ resetAt: null, resetText: 'non communiquée' }), 'Réinit. non communiquée');
   assert.match(html, /provider-card__window--fable/);
-  assert.match(html, /provider-card__fable-caption/);
-  assert.match(html, /provider-row__model-label">Fable/);
+  assert.doesNotMatch(html, /provider-card__fable-caption/);
+  assert.match(html, /aria-label="Limite Fable · 60 % restants · réinitialisation/);
+  assert.doesNotMatch(html.replace(/<[^>]*>/g, ''), /Fable/);
   // Without any Fable row (switch off / not reported) the pair and its resets are unchanged.
   const without = renderToStaticMarkup(component('./ProviderCard.tsx', { name: 'Claude', accountCompact: true, now,
     rows: [{ ...rows[0], id: 'claude:five_hour', resetAt: null, resetText: 'a' }, { ...rows[1], id: 'claude:seven_day', resetAt: null, resetText: 'b' }] }));
@@ -575,18 +577,16 @@ test('the saved layout changes a sole card too (Unique, Multi with one visible);
   }
 });
 
-test('compact Fable only adds a reset when different from the weekly reset; Classique keeps every reset', () => {
+test('compact Fable has no visible caption and keeps accessible details; Classique keeps every reset', () => {
   const at = '2026-11-04T12:00:00Z';
   const week = { ...rows[1], id: 'claude:seven_day', resetAt: at, resetText: 'same' };
-  for (const [resetAt, extraReset] of [[at, false], ['2026-11-05T12:00:00Z', true], [null, true]]) {
+  for (const resetAt of [at, '2026-11-05T12:00:00Z', null, 'invalid']) {
     const rs = [{ ...rows[0], id: 'claude:five_hour' }, week, { ...fableRow, resetAt }];
     const html = renderToStaticMarkup(component('./ProviderCard.tsx', { name: 'Claude', accountCompact: true, rows: rs }));
-    const caption = html.split('provider-card__fable-caption')[1];
-    assert.equal(caption.includes('Réinit.'), extraReset);
-    const visible = caption.split('</div>')[0].replace(/^[^>]*>|<[^>]*>/g, '');
-    assert.ok(visible.startsWith('Fable'));
-    assert.doesNotMatch(visible, /%| · |\d+j \d+h/);
-    if (!extraReset) assert.equal(visible, 'Fable');
+    assert.doesNotMatch(html, /provider-card__fable-caption/);
+    assert.doesNotMatch(html.replace(/<[^>]*>/g, ''), /Fable/);
+    assert.match(html, /title="Limite Fable · [^"]*%[^"]*réinitialisation/);
+    assert.match(html, /aria-label="Limite Fable · [^"]*%[^"]*réinitialisation/);
     assert.equal((html.match(/provider-row__reset/g) || []).length, 0);
     const classic = renderToStaticMarkup(component('./ProviderCard.tsx', { name: 'Claude', accountCompact: false, rows: rs }));
     assert.equal((classic.match(/provider-row__reset/g) || []).length, 3);

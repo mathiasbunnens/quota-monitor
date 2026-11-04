@@ -38,7 +38,8 @@ test('A: the + opens one small flow with the folder chooser AND the absolute pat
   assert.match(open, /<button[^>]*class="add-account__choose"[^>]*aria-label="Choisir un dossier"[^>]*title="Choisir un dossier"[^>]*><svg/);
   assert.doesNotMatch(open, />Choisir un dossier…</);
   const flowHtml = open.slice(open.indexOf('class="add-account__flow"'));
-  assert.ok(flowHtml.indexOf('add-account__choose') < flowHtml.indexOf('<input'), 'folder icon before the path');
+  assert.match(flowHtml, /class="add-account__path has-chooser"><input[^>]*>.*class="add-account__choose"[^]*?<\/button><\/div><button type="submit"/, 'folder suffix inside the input wrapper, before Ajouter');
+  assert.ok(flowHtml.indexOf('<input') < flowHtml.indexOf('add-account__choose'), 'folder icon after the path');
   const pending = renderToStaticMarkup(list({ busy: true, onChooseFolder: async () => null }, ['', null, true, null]));
   assert.match(pending, /class="add-account__choose"[^>]*disabled=""/);
   assert.match(open, /<input[^>]*aria-label="Chemin absolu d’un dossier CODEX_HOME"/);
@@ -46,6 +47,7 @@ test('A: the + opens one small flow with the folder chooser AND the absolute pat
   // Without a native chooser (Windows/Linux): the path field alone.
   const bare = renderToStaticMarkup(list({}, ['', null, true, null]));
   assert.doesNotMatch(bare, /Choisir un dossier/);
+  assert.doesNotMatch(bare, /has-chooser/);
   assert.match(bare, /<input[^>]*aria-label="Chemin absolu/);
 });
 

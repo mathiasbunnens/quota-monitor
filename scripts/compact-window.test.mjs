@@ -65,7 +65,7 @@ test("Codex paired windows use explicit slots and preserve unknown and additiona
   assert.doesNotMatch(render([]),/role="meter"/);
 });
 
-test("compact Fable is a third thin track with a conditional reset, without changing Classique", () => {
+test("compact Fable is a third thin track without a caption, with accessible reset; Classique unchanged", () => {
   const base = { ...panel.providers[0].rows[0], countdown: "42 min" };
   const week = { ...base, pairSlot: 1, label: "7 jours" };
   const fable = { ...panel.providers[1].rows[0], reset: week.reset };
@@ -75,10 +75,11 @@ test("compact Fable is a third thin track with a conditional reset, without chan
   assert.match(same, /compact-pair has-fable/);
   assert.match(same, /compact-pair__track--fable/);
   assert.equal((same.match(/role="meter"/g) || []).length, 3);
-  assert.doesNotMatch(same.split('compact-pair__fable-caption')[1], /Réinit\./);
-  assert.equal(same.split('compact-pair__fable-caption')[1].split('</div>')[0].replace(/^[^>]*>|<[^>]*>/g, ''), 'Fable');
+  assert.doesNotMatch(same, /fable-caption/);
+  assert.doesNotMatch(same.replace(/<[^>]*>/g, ''), /Fable/);
+  assert.match(same, /aria-label="Limite Fable · 50 % restants · Réinitialisation/);
   const different = render([...rows.slice(0, 2), { ...fable, reset: 'Réinitialisation demain' }]);
-  assert.match(different.split('compact-pair__fable-caption')[1], /Réinit\. demain/);
+  assert.match(different, /title="Limite Fable · 50 % restants · Réinitialisation demain"/);
   const absent = render(rows.slice(0, 2));
   assert.doesNotMatch(absent, /has-fable|fable-caption|track--fable/);
   const classic = render(rows, false);
@@ -222,7 +223,7 @@ test("multi-account cards pair 5 h and 7 j with countdowns and a third fine Fabl
   assert.match(markup, /aria-label="Limite 5 heures : Limite sur 3h30 · 73 % restant"/);
   // The pair is always 5 h + 7 j, never Fable.
   assert.match(markup, />2j 1h · 20 %</);
-  assert.match(markup, />Fable<\/span>/);
+  assert.doesNotMatch(markup.replace(/<[^>]*>/g, ''), /Fable/);
   assert.doesNotMatch(markup.replace(/<[^>]*>/g, ''), /Fable ·/);
   assert.equal((markup.match(/class="compact-pair__resets"/g) ?? []).length, 2);
   assert.match(markup, /compact-pair__resets"><span title="[^"]*">Réinit\. à 15h40<\/span><span title="[^"]*">Réinit\. à 15h40<\/span>/);
@@ -249,7 +250,7 @@ test("compact window thickness: 5 h inherits the 5 px Unique track, 7 j is 3 px 
   assert.match(css, /\.compact-pair__track--week\s*\{[^}]*height: 3px[^}]*border-radius: 1\.5px/);
   assert.match(css, /\.compact-pair__bars\s*\{[^}]*gap: 2px/);
   assert.match(css, /\.compact-pair\s*\{[^}]*height: 60px/);
-  assert.match(css, /\.compact-pair\.has-fable\s*\{[^}]*height: 78px/);
+  assert.match(css, /\.compact-pair\.has-fable\s*\{[^}]*height: 65px/);
   assert.match(css, /\.compact-pair\.has-fable \.compact-pair__bars\s*\{[^}]*grid-template-rows: 5px 3px 3px/);
   assert.match(css, /\.compact-pair__resets\s*\{[^}]*font-size: 10px/);
 });

@@ -84,6 +84,7 @@ try {
         const caption = card.querySelector(compact ? '.compact-pair__fable-caption' : '.provider-card__fable-caption');
         return { tracks:tracks.map(rect), fills:tracks.map(t=>t.firstElementChild?rect(t.firstElementChild):null), pairHeight:pair?rect(pair).height:null,
           caption:caption?.innerText, clipped:caption?[...caption.children].some(s=>s.scrollWidth>s.clientWidth+1):false,
+          visible:card.innerText, details:tracks.map(t=>({title:t.title,label:t.getAttribute('aria-label')})),
           resets:card.querySelectorAll(compact ? '.compact-row__reset' : '.provider-row__reset').length };
       }) };
     })()`);
@@ -100,14 +101,13 @@ try {
       } else {
         assert.deepEqual(heights, fable ? [compact ? 5 : 7, 3, 3] : [compact ? 5 : 7, 3]);
         assert.equal(card.resets, 0);
-        if (compact) assert.equal(card.pairHeight, fable ? 78 : 60);
+        if (compact) assert.equal(card.pairHeight, fable ? 65 : 60);
+        assert.equal(card.caption, undefined);
+        assert.doesNotMatch(card.visible, /Fable/);
         if (fable) {
           assert.equal(card.tracks[2].y - card.tracks[1].bottom, 2);
           assert.equal(card.fills[2]?.height, 3);
-          assert.equal(card.caption.split(/\n/)[0], 'Fable');
-          assert.doesNotMatch(card.caption, /%| · |\d+j \d+h/);
-          if (scene === 'same-reset') assert.equal(card.caption, 'Fable');
-          else assert.match(card.caption, /Réinit\./);
+          for (const text of Object.values(card.details[2])) assert.match(text, /Fable.*%.*[Rr]éinitialisation/);
         } else assert.equal(card.caption, undefined);
       }
     }

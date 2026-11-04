@@ -34,13 +34,20 @@ try{
   if(measureOnly)continue;
   assert.equal(open.input.h,32,key+' field height');assert.equal(open.margin,'0px',key+' margin');
   assert.equal(open.row.h,32,key+' row height');assert.equal(open.flow.h,54,key+' panel height');
-  assert.ok(open.folder.right<=open.input.x-7,key+' folder before input');assert.equal(open.folder.h,32);
-  assert.equal(open.input.y,open.folder.y,key+' vertical alignment');
+  assert.ok(open.folder.right<=open.input.right && open.folder.x>open.input.x,key+' folder inside input suffix');assert.equal(open.folder.h,30);
+  assert.equal(open.input.y+1,open.folder.y,key+' vertical alignment');
+  assert.ok(await ev(`(()=>{const i=document.querySelector('.add-account__flow input');const b=document.querySelector('.add-account__choose');return i.getBoundingClientRect().right-parseFloat(getComputedStyle(i).paddingRight)<=b.getBoundingClientRect().left})()`),key+' text avoids icon');
   assert.equal(open.overflow,false,key+' overflow');assert.equal(typing.row.h,open.row.h);assert.equal(typing.flow.h,open.flow.h);assert.equal(typing.content.h,open.content.h);assert.equal(typing.window,open.window);
   await ev(`document.querySelector('.add-account__choose').focus()`);
   assert.equal(await ev(`document.activeElement.getAttribute('aria-label')`),'Choisir un dossier');
   await cdp('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});await sleep(150);
   const closed=await measure();assert.equal(closed.flow,null);assert.equal(closed.content.h,before.content.h,key+' restored height');
+  await cdp('Page.navigate',{url:`http://127.0.0.1:1597/?view=${view}&scenario=multi&codex=yes&codexAccounts=multi&clock=controlled&platform=linux`});await sleep(700);
+  if(view==='settings'){await click('#tab-providers');await sleep(150);}
+  await click(`[aria-label="Ajouter un compte ${provider}"]`);await sleep(200);
+  const bare=await measure();report[key].bare=bare;
+  assert.equal(bare.folder,null,key+' no native chooser');assert.equal(bare.row.h,32);assert.equal(bare.flow.h,54);
+  assert.equal(await ev(`getComputedStyle(document.querySelector('.add-account__flow input')).paddingRight`),'8px',key+' no reserved suffix');
  }
  fs.writeFileSync(path.join(out,`add-${tag}.json`),JSON.stringify(report,null,2));
  console.log(measureOnly?'ADD_GEOMETRY_MEASURED':'ADD_GEOMETRY_PASS',Object.keys(report).length);

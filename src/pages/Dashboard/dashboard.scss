@@ -146,7 +146,3 @@
 
 // Fable is a third fine track, not a full Classique quota row.
 .provider-card__paired-bars.has-fable { grid-template-rows: 7px 3px 3px; }
-.provider-card__fable-caption {
-  display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 8px;
-  margin-top: 3px; font-size: 10px; line-height: 13px; color: var(--desktop-muted);
-}

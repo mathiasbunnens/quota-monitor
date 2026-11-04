@@ -1257,7 +1257,7 @@ fn compact_tracks() -> ((f64, f64), (f64, f64)) {
     )
 }
 
-/// Paired 5 h / 7 j block with room for resets; Fable adds only a fine track and caption.
+/// Paired 5 h / 7 j block with room for resets; Fable adds only a fine track.
 #[cfg(target_os = "macos")]
 const PAIR_BLOCK_HEIGHT: f64 = 60.0;
 
@@ -1269,21 +1269,7 @@ fn compact_fable(provider: &PanelProvider) -> Option<&PanelRow> {
 
 #[cfg(target_os = "macos")]
 fn pair_block_height(provider: &PanelProvider) -> f64 {
-    PAIR_BLOCK_HEIGHT + if compact_fable(provider).is_some() { 18.0 } else { 0.0 }
-}
-
-#[cfg(target_os = "macos")]
-fn compact_fable_reset(provider: &PanelProvider) -> Option<String> {
-    let fable = compact_fable(provider)?;
-    let pair = paired_panel_rows(provider);
-    let week = pair.iter().enumerate()
-        .find(|(i, row)| row.pair_slot.unwrap_or(*i) == 1)
-        .map(|(_, row)| row);
-    if week.is_some_and(|row| row.reset == fable.reset) {
-        None
-    } else {
-        Some(compact_reset(&fable.reset))
-    }
+    PAIR_BLOCK_HEIGHT + if compact_fable(provider).is_some() { 5.0 } else { 0.0 }
 }
 
 /// Short reset line of a paired window: « Réinit. à 14h30 » / « Réinit. le 03/11 à 19h00 ».
@@ -2118,22 +2104,17 @@ fn make_panel_view(
                 let thickness = tracks.1.1;
                 let track = rounded_box(mtm, &NSColor::systemGrayColor().colorWithAlphaComponent(0.28), thickness / 2.0);
                 track.setToolTip(Some(&tooltip));
+                {
+                    use objc2_app_kit::NSAccessibility;
+                    track.setAccessibilityElement(true);
+                    track.setAccessibilityLabel(Some(&tooltip));
+                }
                 place(&track, 22.0, row_top + offset, PANEL_INNER_WIDTH, thickness);
                 let width = row_fill_width(row);
                 if width >= thickness {
                     let fill = rounded_box(mtm, &quota_color(row.remaining.unwrap_or(0), true), thickness / 2.0);
                     fill.setToolTip(Some(&tooltip));
                     place(&fill, 22.0, row_top + offset, width, thickness);
-                }
-                let caption = panel_label(mtm, "Fable", &NSFont::systemFontOfSize(10.0), &quota_color(row.remaining.unwrap_or(0), true));
-                caption.setToolTip(Some(&tooltip));
-                let fable_reset = compact_fable_reset(provider);
-                place(&caption, 20.0, row_top + 58.0, if fable_reset.is_some() { 138.0 } else { 276.0 }, 13.0);
-                if let Some(reset_text) = fable_reset {
-                    let reset = panel_label(mtm, &reset_text, &NSFont::systemFontOfSize(10.0), &NSColor::secondaryLabelColor());
-                    reset.setAlignment(NSTextAlignment::Right);
-                    reset.setToolTip(Some(&tooltip));
-                    place(&reset, 158.0, row_top + 58.0, 138.0, 13.0);
                 }
             }
             row_top += block_height;
@@ -3105,8 +3086,8 @@ pub fn quota_ui_smoke(directory: &str) {
                             assert!((gap - 2.0).abs() < 0.01, "Fable gap {gap}");
                         }
                         for provider in &providers {
-                            assert_eq!(pair_block_height(provider), 78.0);
-                            assert_eq!(card_height(provider), 94.0);
+                            assert_eq!(pair_block_height(provider), 65.0);
+                            assert_eq!(card_height(provider), 81.0);
                         }
                         fn labels(view: &NSView, out: &mut Vec<String>) {
                             for sub in view.subviews().iter() {
@@ -3118,9 +3099,27 @@ pub fn quota_ui_smoke(directory: &str) {
                         }
                         let mut texts = Vec::new();
                         labels(&panel, &mut texts);
-                        assert_eq!(texts.iter().filter(|s| s.as_str() == "Fable").count(), count);
-                        assert!(!texts.iter().any(|s| s.starts_with("Fable ·")));
-                        println!("NATIVE_FABLE_THIN_PASS {name} {mode}: block=78 gap=2 thickness=3");
+                        assert!(!texts.iter().any(|s| s.contains("Fable")));
+                        fn fable_accessibility(view: &NSView, out: &mut Vec<String>) {
+                            use objc2_app_kit::NSAccessibility;
+                            for sub in view.subviews().iter() {
+                                if sub.isAccessibilityElement() {
+                                    if let Some(label) = sub.accessibilityLabel() {
+                                        let label = label.to_string();
+                                        if label.starts_with("Fable ·") {
+                                            assert!(label.contains('%') && label.contains("Réinitialisation"));
+                                            assert_eq!(sub.toolTip().map(|s| s.to_string()), Some(label.clone()));
+                                            out.push(label);
+                                        }
+                                    }
+                                }
+                                fable_accessibility(&sub, out);
+                            }
+                        }
+                        let mut accessible = Vec::new();
+                        fable_accessibility(&panel, &mut accessible);
+                        assert_eq!(accessible.len(), count);
+                        println!("NATIVE_FABLE_THIN_PASS {name} {mode}: block=65 gap=2 thickness=3 no-caption");
                     }
                     "multi-fable-classic" => assert_eq!(heights, vec![5.0; 12]),
                     "codex-compact" => {
@@ -3964,18 +3963,14 @@ mod tests {
             assert_eq!(fable_rows.len(), usize::from(fable.is_some()));
             if let Some(f) = fable {
                 assert_eq!(fable_rows[0].value, format!("{} %", 100.0 - f));
-                assert_eq!(compact_fable_reset(&panel), None, "same reset is not repeated");
-                let mut different = panel.clone();
-                different.rows[2].reset = "Réinitialisation demain".into();
-                assert_eq!(compact_fable_reset(&different), Some("Réinit. demain".into()));
             } else {
                 assert!(compact_fable(&panel).is_none());
                 assert_eq!(pair_block_height(&panel), 60.0);
             }
-            // Fable adds 18 pt for a fine track and caption, never a 48 pt row.
+            // Fable adds 5 pt for a fine track and gap, never a caption or full row.
             assert_eq!(
                 card_height(&panel),
-                16.0 + PAIR_BLOCK_HEIGHT + if fable.is_some() { 18.0 } else { 0.0 }
+                16.0 + PAIR_BLOCK_HEIGHT + if fable.is_some() { 5.0 } else { 0.0 }
             );
         }
         // Weekly window absent: Fable never takes the weekly slot.
@@ -4450,7 +4445,7 @@ mod tests {
             // Separated rows: taller than the paired block by exactly 2 rows - the paired block.
             assert_eq!(
                 card_height(k) - card_height(c),
-                3.0 * PANEL_ROW_HEIGHT - (PAIR_BLOCK_HEIGHT + 18.0)
+                3.0 * PANEL_ROW_HEIGHT - (PAIR_BLOCK_HEIGHT + 5.0)
             );
         }
         assert_eq!(classic[0].rows[0].value, "73 %");
@@ -4498,12 +4493,12 @@ mod tests {
         assert_eq!(multi[0].rows[1].countdown, "3j 8h");
         assert_eq!(multi[1].rows[0].countdown, "42 min");
         assert_eq!(multi[1].rows[1].countdown, "2j 1h");
-        // Fable becomes a third fine bar and caption in the 78 pt compact block.
+        // Fable becomes a third fine bar without caption in the 65 pt compact block.
         let mut unpaired = multi[0].clone();
         unpaired.compact = false;
         assert_eq!(
             card_height(&unpaired) - card_height(&multi[0]),
-            3.0 * PANEL_ROW_HEIGHT - (PAIR_BLOCK_HEIGHT + 18.0)
+            3.0 * PANEL_ROW_HEIGHT - (PAIR_BLOCK_HEIGHT + 5.0)
         );
     }
 

@@ -351,11 +351,6 @@ html:has(.compact) body {
   .compact-icon.is-busy svg { animation: none; }
 }
 
-.compact-pair.has-fable { height: 78px; }
+.compact-pair.has-fable { height: 65px; }
 .compact-pair.has-fable .compact-pair__bars { grid-template-rows: 5px 3px 3px; }
 .compact-pair__track--fable { grid-row: 3; }
-.compact-pair__fable-caption {
-  display: flex; justify-content: space-between; gap: 8px; margin-top: 2px;
-  color: var(--compact-secondary); font-size: 10px; line-height: 13px;
-  span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-}
