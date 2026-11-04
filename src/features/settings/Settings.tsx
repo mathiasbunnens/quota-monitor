@@ -73,21 +73,23 @@ const claudeLayoutOptions: Choice<ClaudeLayout>[] = [
   </svg> },
 ];
 
-/** Radio group drawn as the existing segmented control, with an icon per
- *  option (`tiles`: pictogram above the label). Native radios keep arrow keys. */
-function Choices<T extends string>({ legend, label, name, options, value, tiles = false, onChange }: {
-  legend: string; label: string; name: string; options: Choice<T>[]; value: T; tiles?: boolean; onChange: (value: T) => void;
+/** One settings row: visible label on the left, the existing segmented
+ *  control on the right (equal segments, one height, small icon before each
+ *  label). Native radios keep arrow keys; `label` is the accessible name and
+ *  contains the visible row label. */
+function Choices<T extends string>({ title, label, name, options, value, onChange }: {
+  title: string; label: string; name: string; options: Choice<T>[]; value: T; onChange: (value: T) => void;
 }) {
-  return <>
-    <legend className="prefs-group__title prefs-group__legend">{legend}</legend>
-    <div className={"prefs-segmented prefs-choices" + (tiles ? " prefs-choices--tiles" : "")} role="radiogroup" aria-label={label}>
+  return <div className="prefs-row">
+    <span className="prefs-option__title prefs-row__label" aria-hidden="true">{title}</span>
+    <div className="prefs-segmented prefs-choices" role="radiogroup" aria-label={label}>
       {options.map((option) => <label key={option.value} className={value === option.value ? "is-selected" : ""} title={option.title}>
         <input type="radio" name={name} value={option.value} checked={value === option.value} onChange={() => onChange(option.value)} />
         <span className="prefs-choices__icon" aria-hidden="true">{option.icon}</span>
         <span>{option.label}</span>
       </label>)}
     </div>
-  </>;
+  </div>;
 }
 
 const claudeStates: Record<ClaudeSnapshot["state"], [string, Tone, string]> = {
@@ -361,17 +363,14 @@ export default function Settings() {
       </div>}
 
       {tab === "menubar" && <div role="tabpanel" id="panel-menubar" aria-labelledby="tab-menubar">
-        {canChooseMode && <fieldset className="prefs-group" aria-busy={busy || undefined}>
-          <Choices legend="Mode d’affichage" label="Mode d’affichage" name="displayMode" tiles options={displayModeOptions}
-            value={prefs.displayMode} onChange={(displayMode) => void update({ displayMode })} />
-        </fieldset>}
-        {(!canChooseMode || prefs.displayMode !== "app") && <fieldset className="prefs-group" aria-busy={busy || undefined}>
-          <Choices legend="Afficher dans la barre des menus" label="Indicateur de la barre des menus (quota 5 heures)" name="indicator"
-            options={indicatorOptions} value={prefs.indicator} onChange={(indicator) => void update({ indicator })} />
-        </fieldset>}
-        {/* One presentation for both providers, without quota collection. */}
-        <fieldset className="prefs-group" aria-busy={busy || undefined}>
-          <Choices legend="Présentation" label="Présentation" name="layout" tiles
+        {/* One group, one row per choice: label left, control right. */}
+        <fieldset className="prefs-group prefs-rows" aria-label="Affichage" aria-busy={busy || undefined}>
+          {canChooseMode && <Choices title="Mode" label="Mode d’affichage" name="displayMode" options={displayModeOptions}
+            value={prefs.displayMode} onChange={(displayMode) => void update({ displayMode })} />}
+          {(!canChooseMode || prefs.displayMode !== "app") && <Choices title="Indicateur" label="Indicateur de la barre des menus (quota 5 heures)" name="indicator"
+            options={indicatorOptions} value={prefs.indicator} onChange={(indicator) => void update({ indicator })} />}
+          {/* One presentation for both providers, without quota collection. */}
+          <Choices title="Présentation" label="Présentation" name="layout"
             options={claudeLayoutOptions} value={layout} onChange={(layout) => void update({ layout })} />
         </fieldset>
       </div>}

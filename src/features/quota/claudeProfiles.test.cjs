@@ -502,7 +502,16 @@ test('Affichage has ONE Présentation control (name=layout); Fournisseurs has no
   const html = renderToStaticMarkup(display({ ...prefs, layout: 'classic' }));
   assert.equal((html.match(/name="layout"/g) || []).length, 2);
   assert.doesNotMatch(html, /name="claudeLayout"|name="codexLayout"|Présentation (Codex|Claude|des comptes)/);
-  assert.equal((html.match(/<legend[^>]*>Présentation<\/legend>/g) || []).length, 1);
+  assert.equal((html.match(/class="prefs-option__title prefs-row__label"[^>]*>Présentation</g) || []).length, 1);
+  // One group of label/control rows (no card per setting), same segmented control everywhere.
+  const panel = html.slice(html.indexOf('id="panel-menubar"'));
+  assert.equal((panel.match(/class="prefs-group[ "]/g) || []).length, 1);
+  assert.equal((panel.match(/<fieldset/g) || []).length, 1);
+  assert.match(panel, /<fieldset class="prefs-group prefs-rows" aria-label="Affichage"/);
+  const rows = [...panel.matchAll(/<div class="prefs-row"><span class="prefs-option__title prefs-row__label" aria-hidden="true">([^<]+)<\/span><div class="prefs-segmented prefs-choices" role="radiogroup" aria-label="([^"]+)"/g)].map(m => [m[1], m[2]]);
+  assert.deepEqual(rows, [['Mode', 'Mode d’affichage'], ['Indicateur', 'Indicateur de la barre des menus (quota 5 heures)'], ['Présentation', 'Présentation']]);
+  for (const [visible, name] of rows) assert.ok(name.toLowerCase().includes(visible.toLowerCase()), 'label in name: ' + visible);
+  assert.doesNotMatch(panel, /prefs-choices--tiles|<legend/);
   const providersTab = renderToStaticMarkup(component('../settings/Settings.tsx', {}, ['providers', { ...prefs, codexEnabled: true }, null, snapshot, null, false, 0, accounts, null, true]));
   assert.doesNotMatch(providersTab, /name="layout"|Compacte|Classique|Présentation/);
 });

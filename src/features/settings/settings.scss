@@ -99,19 +99,39 @@ html:has(.prefs), html:has(.prefs) body { background: var(--desktop-bg); }
   label:has(input:focus-visible) { outline: 2px solid var(--desktop-accent); outline-offset: 1px; }
 }
 
-// Segmented choices with an icon; `--tiles` puts a schematic pictogram above
-// the label. Same track, selected card and focus ring as .prefs-segmented.
+// Segmented choices with a small icon before the label (provider glyph or
+// schematic pictogram, all 14 px high). Same track, selected card and focus
+// ring as .prefs-segmented.
 .prefs-choices {
   label { display: inline-flex; align-items: center; gap: 6px; }
   label.is-selected .prefs-choices__icon { color: var(--desktop-accent); }
   &__icon { display: inline-flex; color: var(--desktop-muted); transition: color 120ms ease;
     svg { display: block; height: 14px; width: auto; }
   }
-  &--tiles {
-    gap: 2px;
-    label { flex-direction: column; gap: 4px; min-width: 104px; padding: 8px 12px 6px; }
-    .prefs-choices__icon svg { width: 48px; height: 32px; }
+}
+
+// Affichage: one group of macOS-style rows. Label left, control right; every
+// control shares one column (same left/right edge, same height) and splits
+// it into equal segments. Thin separators between rows, no per-row card.
+.prefs-group.prefs-rows {
+  display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 16px;
+  padding-block: 0;
+}
+.prefs-row {
+  display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center;
+  min-height: 44px; padding-block: 8px;
+  & + & { border-top: 1px solid var(--desktop-border); }
+  .prefs-segmented {
+    display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 2px;
+    width: 100%; margin: 0;
+    label { justify-content: center; height: 24px; padding: 0 8px; white-space: nowrap; }
   }
+}
+@media (max-width: 440px) {
+  // Narrow window: the label goes above its full-width control (the column
+  // stays shared, nothing is clipped).
+  .prefs-group.prefs-rows { grid-template-columns: minmax(0, 1fr); }
+  .prefs-row { row-gap: 6px; padding-block: 10px; }
 }
 
 .prefs-disclosure {
