@@ -226,13 +226,13 @@ test('dashboard single mode uses selected profile even if hidden in multi mode',
   const html = renderToStaticMarkup(tree);
   assert.match(html, /Sélection/);
   assert.match(html, /81 %/);
-  assert.doesNotMatch(html, /Claude · Travail|paired-bars/);
+  assert.doesNotMatch(html, /provider-card__name">Claude · Travail|paired-bars/);
 });
 test('a sole Compacte card pairs its bars without an added name or extra-usage note', () => {
   const extra = { ...accounts[0], snapshot: { ...snapshot, extraUsage: { enabled: true, limitReached: true } } };
   for (const layout of ['compact', 'classic']) {
     const html = renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, [[], null, snapshot, { ...prefs, layout }, false, null, null, null, false, 0, [extra]]));
-    assert.doesNotMatch(html, /Extra · plafond atteint|Usage supplémentaire|Claude · Principal/);
+    assert.doesNotMatch(html, /Extra · plafond atteint|Usage supplémentaire|provider-card__name">Claude · Principal/);
     assert.equal(/paired-bars/.test(html), layout === 'compact');
   }
 });
@@ -270,16 +270,16 @@ test('multi mode with one visible account follows the saved layout (Classique = 
   const metric = { id: 'claude:five_hour', label: '5 h', usedPercent: 19, resetAt: null, availability: 'available', periodDurationSeconds: 18000, exhausted: false };
   const current = [{ ...accounts[0], snapshot: { ...snapshot, metrics: [metric] } }, { ...accounts[1], visible: false }];
   const render = (layout) => renderToStaticMarkup(component('../../pages/Dashboard/Dashboard.tsx', {}, [[], null, snapshot, { ...prefs, layout, claudeAccounts: { ...prefs.claudeAccounts, mode: 'multi' } }, false, null, null, null, false, 0, current]));
-  assert.doesNotMatch(render('classic'), /paired-bars|Claude · Principal/);
+  assert.doesNotMatch(render('classic'), /paired-bars|provider-card__name">Claude · Principal/);
   assert.match(render('classic'), /81 %/);
   assert.match(render('compact'), /paired-bars/);
-  assert.doesNotMatch(render('compact'), /Claude · Principal/);
+  assert.doesNotMatch(render('compact'), /provider-card__name">Claude · Principal/);
 });
 test('dashboard hides only invisible multi profiles and never shows disabled Claude', () => {
   for (const enabled of [true, false]) {
     const tree = component('../../pages/Dashboard/Dashboard.tsx', {}, [[], null, snapshot, { ...prefs, claudeEnabled: enabled, claudeAccounts: { ...prefs.claudeAccounts, mode: 'multi' } }, false, null, null, null, false, 0, [accounts[0], { ...accounts[1], visible: false }]]);
     const html = renderToStaticMarkup(tree);
-    assert.doesNotMatch(html, /Claude · Travail/);
+    assert.doesNotMatch(html, /provider-card__name">Claude · Travail/);
     assert.equal(html.includes('Quotas Claude'), enabled);
   }
 });
@@ -290,9 +290,9 @@ test('Codex compact and expanded cards retain their existing row counts', () => 
     assert.doesNotMatch(html, /paired-bars/);
   }
 });
-test('multi accounts stack on narrow windows without changing legacy two-provider grids', () => {
+test('multi account cards stack on narrow windows (provider groups keep their columns on wide ones)', () => {
   const css = require('sass').compile(path.join(__dirname, '../../pages/Dashboard/dashboard.scss')).css;
-  assert.match(css, /@media\s*\(max-width: 520px\)\s*\{\s*\.provider-grid--accounts\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\)/s);
+  assert.match(css, /@media\s*\(max-width: 520px\)\s*\{\s*\.provider-group__cards--columns\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\)/s);
 });
 test('settings discovery remains available with provider off and reports discovery failure', async () => {
   invokeCalls = []; stateChanges = []; invokeFailure = new Error('Discovery fixture error');
@@ -546,8 +546,8 @@ test('the saved layout changes a sole card too (Unique, Multi with one visible);
     assert.doesNotMatch(classic, /paired-bars/);
     assert.equal((classic.match(/provider-row__reset/g) || []).length, 2);
     for (const html of [compact, classic]) {
-      assert.doesNotMatch(html, /Claude · Principal/);
-      assert.match(html, /aria-label="Quotas Claude"/);
+      assert.doesNotMatch(html, /provider-card__name">Claude · Principal/);
+      assert.match(html, /aria-label="Quotas Claude · [^"]+"/);
       assert.match(html, /73 %/);
       assert.match(html, /86 %/);
     }

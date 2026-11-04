@@ -50,11 +50,45 @@
 
 .provider-grid { display: grid; gap: 12px; margin: 20px 0; grid-template-columns: minmax(0, 1fr); align-items: start; }
 .provider-grid--two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+// One group per provider: « Codex ↗ » header once, its cards, its + at the bottom right.
+.provider-group {
+  min-width: 0;
+  &__header h2 { margin: 0 0 8px; font-size: 15px; font-weight: 650; }
+  &__cards { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); align-items: start; }
+  &__cards--columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  &__footer { display: flex; justify-content: flex-end; }
+}
+@media (max-width: 520px) { .provider-group__cards--columns { grid-template-columns: minmax(0, 1fr); } }
 .provider-card {
   position: relative; border: 1px solid var(--desktop-border); border-radius: 14px; padding: 18px;
   background: var(--desktop-card); box-shadow: 0 2px 5px #00000005; min-width: 0;
-  &__header { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
-  h2 { margin: 0; font-size: 15px; font-weight: 650; }
+  // Wraps in a narrow column: the state moves under the name instead of squeezing it.
+  &__header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px 8px; margin-bottom: 10px; }
+  // Account name with its plan badge on the same line (never under the name).
+  &__title { display: flex; align-items: center; gap: 6px; min-width: 0; margin: 0; font-size: 14px; font-weight: 650; }
+  &__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  &__title .plan-badge { flex: none; margin-left: 0; font-size: 10.5px; font-weight: 500; }
+  // State then the detail chevron, at the right of the header.
+  &__status { flex: none; display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+  &__pill {
+    flex: none; padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 600; line-height: 16px; color: var(--desktop-muted);
+    &--good { color: #2f8f5b; background: color-mix(in srgb, #30a46c 15%, transparent); }
+    &--warning { color: #b56d00; background: color-mix(in srgb, #d68b12 16%, transparent); }
+    &--error { color: #d93c41; background: color-mix(in srgb, #e5484d 15%, transparent); }
+    &--neutral { background: color-mix(in srgb, var(--desktop-ink) 8%, transparent); }
+  }
+  .dashboard &__chevron {
+    display: inline-grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px;
+    background: transparent; box-shadow: none; color: var(--desktop-muted);
+    svg { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transition: transform 150ms ease; }
+    &:hover { background: color-mix(in srgb, var(--desktop-ink) 7%, transparent); color: var(--desktop-ink); }
+    &[aria-expanded="true"] { color: var(--desktop-accent); svg { transform: rotate(90deg); } }
+  }
+  &__path {
+    display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px;
+    color: var(--desktop-muted); user-select: text; -webkit-user-select: text; cursor: text;
+  }
+  & &__details--inline { position: static; margin: 10px 0 0; padding: 8px 0 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; border-top: 1px solid var(--desktop-border); }
   &__note { margin: 10px 0 0; font-size: 11px; line-height: 1.5; color: var(--desktop-muted); }
   &__error { margin: 0 0 10px; font-size: 12px; color: #e5484d; }
   &__details {
@@ -82,17 +116,16 @@
 // 5 h: inherit the exact Unique track/fill thickness and radius (.dashboard__progress).
 .provider-card__window--short { margin-top: 0; }
 .provider-card__window--week { height: 3px; margin-top: 0; }
-@media (max-width: 520px) { .provider-grid--accounts { grid-template-columns: minmax(0, 1fr); } }
 .provider-card:has(.provider-card__paired-bars) {
   padding: 12px;
-  h2 { font-size: 13px; overflow-wrap: anywhere; }
+  .provider-card__title { font-size: 13px; }
   .plan-badge { font-size: 10px; }
-  .provider-card__header { align-items: flex-start; }
+  .provider-card__header { align-items: center; }
 }
 
 // Provider title doubles as the detailed-usage link (existing external arrow).
 .external-icon { flex: none; vertical-align: -1px; }
-.dashboard .provider-card .provider-card__usage {
+.dashboard .provider-group .provider-card__usage {
   display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 0 2px; margin: 0 -2px; white-space: nowrap; text-align: left;
   border: 0; border-radius: 6px; background: transparent; box-shadow: none; font: inherit; color: inherit; cursor: pointer;
   .external-icon { color: var(--desktop-accent); }
@@ -111,6 +144,6 @@
 }
 // Title and account chip share one wrapping block: a narrow card moves the chip
 // under the title instead of squeezing it, « Détails » stays on the right.
-.provider-card__heading { flex: 1 1 0; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.provider-card__heading { flex: 1 1 7rem; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 // Focusing the chip must not open the card's « Détails » popover (focus is stopped at the wrapper).
 .provider-card__action { display: contents; }

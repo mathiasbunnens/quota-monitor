@@ -16,7 +16,10 @@ export function resetCountdown(resetAt: string | null | undefined, now: number):
 }
 
 type Props = {
+  /** Account name (the provider title lives in the group header). */
   name: string;
+  /** Provider name, only for the accessible name of the card (« Quotas Codex · Travail »). */
+  provider?: string;
   badge?: string | null;
   rows: QuotaRow[];
   /** Neutral status line (waiting, stale…). */
@@ -30,9 +33,11 @@ type Props = {
   /** Local clock (ms) for the visible countdowns of multi-profile cards. */
   now?: number;
   empty?: string;
-  /** Provider title doubles as the detailed-usage link; `icon` is the existing external arrow (kept out of this self-contained module). */
-  usage?: { label: string; onOpen: () => void; icon: ReactNode };
-  /** Account-level control of the header (reset chip), before « Détails ». */
+  /** Connection state of this account (Connecté / Non connecté / Même compte…). */
+  state?: { label: string; tone: "good" | "warning" | "error" | "neutral"; detail?: string };
+  /** Detail of THIS account, opened by the chevron right of its state: its folder. */
+  detail?: { path?: string; label: string };
+  /** Account-level control of the header (reset chip), before the state. */
   action?: ReactNode;
   children?: ReactNode;
 };
@@ -103,13 +108,12 @@ function Row({ row, showReset = true }: { row: QuotaRow; showReset?: boolean }) 
   </div>;
 }
 
-export default function ProviderCard({ name, badge, rows, status, error, compact, accountCompact = false, now = Date.now(), empty, usage, action, children }: Props) {
+export default function ProviderCard({ name, provider, badge, rows, status, error, compact, accountCompact = false, now = Date.now(), empty, state, detail, action, children }: Props) {
   const detailsId = useId();
   const root = useRef<HTMLElement>(null);
   const [hover, setHover] = useState(false);
   const [pinned, setPinned] = useState(false);
   const [focused, setFocused] = useState(false);
-  const open = compact && (hover || pinned || focused);
 
   useEffect(() => {
     if (!pinned) return;
@@ -123,12 +127,14 @@ export default function ProviderCard({ name, badge, rows, status, error, compact
   const [first, ...rest] = rows;
   const paired = pairedRows(rows);
   const shown = compact ? (first ? [first] : []) : rows;
-  const hasDetails = compact && rows.length > 0;
-  const title = <h2>{usage
-    ? <button type="button" className="provider-card__usage" aria-label={usage.label} title={usage.label} onClick={usage.onOpen}>{name} {usage.icon}</button>
-    : name}{badge && <span className="plan-badge">{badge}</span>}</h2>;
+  // Hidden limits of the side-by-side layout, and the folder of the account: both behind the chevron.
+  // (the paired layout already shows every limit: its detail is the folder only)
+  const hasRowDetails = compact && !accountCompact && rows.length > 0;
+  const hasDetails = hasRowDetails || !!detail;
+  const open = hasDetails && (pinned || (hasRowDetails && (hover || focused)));
+  const title = <h3 className="provider-card__title"><span className="provider-card__name">{name}</span>{badge && <span className="plan-badge">{badge}</span>}</h3>;
   return <section ref={root} className={"provider-card" + (compact ? " provider-card--compact" : "")}
-    aria-label={"Quotas " + name}
+    aria-label={"Quotas " + (provider ? provider + " · " : "") + name}
     onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
     onFocus={() => setFocused(true)}
     onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false); }}
@@ -139,8 +145,14 @@ export default function ProviderCard({ name, badge, rows, status, error, compact
           <span className="provider-card__action" onFocus={(event) => event.stopPropagation()}>{action}</span>
         </div>
         : title}
-      {hasDetails && <button type="button" aria-expanded={open} aria-controls={detailsId}
-        onClick={() => setPinned((value) => !value)}>Détails</button>}
+      {(state || hasDetails) && <div className="provider-card__status">
+        {state && <span className={"provider-card__pill provider-card__pill--" + state.tone} title={state.detail || undefined}>{state.label}</span>}
+        {hasDetails && <button type="button" className="provider-card__chevron" aria-expanded={open} aria-controls={open ? detailsId : undefined}
+          aria-label={detail?.label ?? "Détails " + name} title={detail?.label ?? "Détails " + name}
+          onClick={() => setPinned(!pinned)}>
+          <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" /></svg>
+        </button>}
+      </div>}
     </header>
     {error && <p role="alert" className="provider-card__error">{error}</p>}
     {accountCompact ? <>
@@ -156,10 +168,13 @@ export default function ProviderCard({ name, badge, rows, status, error, compact
     </> : shown.map((row) => <Row key={row.id} row={row} showReset={!compact} />)}
     {!rows.length && !error && <p className="provider-card__note">{empty ?? "Aucun quota à afficher."}</p>}
     {status && <p className="provider-card__note" role="status">{status}</p>}
-    {hasDetails && open && <div id={detailsId} className="provider-card__details" role="region" aria-label={"Détails " + name}>
-      {!accountCompact && first && <p className="provider-row__reset">{first.label} · réinitialisation : {first.resetText}</p>}
-      {(accountCompact ? rows : rest).map((row) => <Row key={row.id} row={row} />)}
-      {!accountCompact && !rest.length && <p className="provider-card__note">Aucune autre limite communiquée.</p>}
+    {hasDetails && open && <div id={detailsId} className={"provider-card__details" + (pinned || !hasRowDetails ? " provider-card__details--inline" : "")} role="region" aria-label={"Détails " + name}>
+      {hasRowDetails && <>
+        {!accountCompact && first && <p className="provider-row__reset">{first.label} · réinitialisation : {first.resetText}</p>}
+        {(accountCompact ? rows : rest).map((row) => <Row key={row.id} row={row} />)}
+        {!accountCompact && !rest.length && <p className="provider-card__note">Aucune autre limite communiquée.</p>}
+      </>}
+      {detail?.path && <code className="provider-card__path" title={detail.path}>{detail.path}</code>}
     </div>}
     {children}
   </section>;

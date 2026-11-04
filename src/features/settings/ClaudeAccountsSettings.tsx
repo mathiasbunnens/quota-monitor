@@ -1,9 +1,9 @@
 import { useRef, useState, type ReactNode } from "react";
 import type { ClaudeAccount, ClaudeAccountsPreferences, ClaudeProfile, CodexAccount, Preferences } from "../quota/types";
+import { accountState, codexAccountState, type Tone } from "../quota/accountState";
 import AddAccountFlow, { ABSOLUTE_PATH, ABSOLUTE_PATH_ERROR } from "../accounts/AddAccountFlow";
 import "./claude-accounts.scss";
 
-type Tone = "good" | "warning" | "error" | "neutral";
 
 /** What the shared account list needs from a Claude profile or a Codex home. */
 type ListedAccount = ClaudeProfile & { primary: boolean; available: boolean; refreshing: boolean; tracked?: boolean };
@@ -31,36 +31,7 @@ type Props<A extends ListedAccount = ClaudeAccount> = {
   detailExtra?: (account: A) => ReactNode;
 };
 
-/** Connection state of one profile: [pill, tone, actionable detail]. */
-export function accountState(account: ClaudeAccount): [string, Tone, string] {
-  const s = account.snapshot;
-  if (!account.available) return ["Indisponible", "neutral", "Dossier introuvable : vérifiez qu’il existe encore (disque, renommage)."];
-  if (account.refreshing) return ["Actualisation…", "warning", ""];
-  if (s.state === "disabled") return ["Désactivé", "neutral", ""];
-  if (s.errorKind === "not_signed_in") return ["Non connecté", "warning", s.message || "Profil non connecté dans Claude Code."];
-  switch (s.state) {
-    case "ready": return ["Connecté", "good", ""];
-    case "stale": return ["Connecté", "warning", "Dernières valeurs conservées, nouvelle lecture en attente."];
-    case "waiting_for_data": return ["Lecture…", "warning", ""];
-    case "not_configured": return ["Non installé", "neutral", s.message || "Claude Code introuvable."];
-    default: return ["Erreur", "error", s.message || "Lecture impossible : vérifiez Claude Code."];
-  }
-}
-
-/** Connection state of one Codex home: [pill, tone, actionable detail]. */
-export function codexAccountState(account: CodexAccount): [string, Tone, string] {
-  if (!account.available) return ["Indisponible", "neutral", "Dossier CODEX_HOME introuvable : vérifiez qu’il existe encore (disque, renommage)."];
-  if (account.refreshing) return ["Actualisation…", "warning", ""];
-  if (account.duplicateOf && account.phase === "ready") return ["Même compte", "warning", "Même compte que « " + account.duplicateOf + " » : quotas non additionnés."];
-  switch (account.phase) {
-    case "ready": return ["Connecté", "good", ""];
-    case "signed_out": return ["Non connecté", "warning", account.message || "Dossier non connecté à Codex."];
-    case "disabled": return ["Désactivé", "neutral", ""];
-    case "missing": return ["Non installé", "neutral", account.message];
-    case "error": return ["Erreur", "error", account.message || "Lecture impossible : vérifiez Codex CLI."];
-    default: return ["Connexion…", "warning", ""];
-  }
-}
+export { accountState, codexAccountState };
 
 const pencil = <path d="M10.5 2.8 13.2 5.5 6 12.7 3 13l.3-3 7.2-7.2Z" />;
 const chevron = <path d="M6 3.5 10.5 8 6 12.5" />;

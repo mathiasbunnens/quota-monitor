@@ -109,9 +109,11 @@ test('codexPlan: historical card without accounts or with the primary alone; nam
 test('dashboard: one Codex account keeps the exact historical card', () => {
   const before = dash(basePrefs, []);
   const after = dash(basePrefs, [principal, { ...travail, visible: false }, detected]);
-  // Only the per-account reset chip (now in the card header) is new.
-  assert.equal(after.replace(/<span class="provider-card__action">[\s\S]*?<\/button><\/span><\/div>/, '').replace('<div class="provider-card__heading">', ''), before);
-  assert.match(after, /aria-label="Quotas Codex"/);
+  // Only the per-account reset chip and the detail chevron (header) are new; the card itself is the same.
+  const stripped = after.replace(/<span class="provider-card__action">[\s\S]*?<\/button><\/span><\/div>/, '').replace('<div class="provider-card__heading">', '')
+    .replace(/<button type="button" class="provider-card__chevron"[\s\S]*?<\/button>/, '').replace(/<span class="provider-card__pill[^>]*title="[^"]*"/, m => m.replace(/ title="[^"]*"/, ''));
+  assert.equal(stripped, before);
+  assert.match(after, /aria-label="Quotas Codex · Principal"/);
 });
 
 test('dashboard: several Codex accounts get their own cards, statuses and duplicate note, never aggregated', () => {
