@@ -678,6 +678,62 @@ fn fit_settings_window(window: tauri::WebviewWindow, height: f64) -> Result<(), 
         .map_err(|e| e.to_string())
 }
 
+/// Smallest standalone window height (logical px, title bar included).
+const MAIN_WINDOW_MIN_HEIGHT: f64 = 160.0;
+
+/// Fits the standalone window height to the panel content (logical px),
+/// bounded by the visible screen. Width is untouched; the top edge stays put.
+#[tauri::command]
+fn fit_main_window(
+    window: tauri::WebviewWindow,
+    height: f64,
+    viewport_height: f64,
+) -> Result<(), String> {
+    if window.label() != "main"
+        || !height.is_finite()
+        || !viewport_height.is_finite()
+        || viewport_height <= 0.0
+    {
+        return Ok(());
+    }
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let inner = window
+        .inner_size()
+        .map_err(|e| e.to_string())?
+        .to_logical::<f64>(scale);
+    let monitor = window.current_monitor().map_err(|e| e.to_string())?;
+    let max = monitor
+        .as_ref()
+        .map(|m| m.work_area().size.to_logical::<f64>(scale).height - 40.0)
+        .unwrap_or(900.0)
+        .max(MAIN_WINDOW_MIN_HEIGHT);
+    let wanted = update_window_height(height, viewport_height, inner.height, max)
+        .max(MAIN_WINDOW_MIN_HEIGHT);
+    if (inner.height - wanted).abs() <= 1.0 {
+        return Ok(());
+    }
+    let before = window.outer_position().map_err(|e| e.to_string())?;
+    window
+        .set_size(tauri::LogicalSize::new(inner.width, wanted))
+        .map_err(|e| e.to_string())?;
+    // Keep the top edge where it was (AppKit resizes from the bottom-left),
+    // then keep the window on the visible area if it now overflows.
+    let mut y = before.y;
+    if let Some(monitor) = monitor {
+        let area = monitor.work_area();
+        let size = window.outer_size().map_err(|e| e.to_string())?;
+        let bottom = area.position.y + area.size.height as i32;
+        y = y.min(bottom - size.height as i32).max(area.position.y);
+    }
+    let after = window.outer_position().map_err(|e| e.to_string())?;
+    if after.x != before.x || after.y != y {
+        window
+            .set_position(tauri::PhysicalPosition::new(before.x, y))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Fits intrinsic updater content, bounded by the monitor; overflow scrolls.
 #[tauri::command]
 fn fit_update_window(
@@ -3363,7 +3419,7 @@ fn show_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
         // icons; the flag is set before any script so the first paint is right.
         .initialization_script(COMPACT_VIEW_SCRIPT)
         .inner_size(360.0, 520.0)
-        .min_inner_size(300.0, 260.0)
+        .min_inner_size(300.0, MAIN_WINDOW_MIN_HEIGHT)
         .center()
         .build()?;
         window.on_window_event({
@@ -3588,6 +3644,7 @@ pub fn run() {
             open_claude_usage,
             fit_settings_window,
             fit_update_window,
+            fit_main_window,
             get_update_status,
             start_update_check,
             start_update_install,
