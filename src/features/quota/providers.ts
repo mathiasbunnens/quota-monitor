@@ -122,15 +122,9 @@ export function codexRows(snapshots: QuotaSnapshot[]): QuotaRow[] {
 }
 
 export function claudeRows(snapshot: ClaudeSnapshot, fableEnabled = true): QuotaRow[] {
-  const metrics = snapshot.metrics.filter((metric) => fableEnabled || metric.id !== "claude:weekly_fable");
-  const fable = metrics.find((metric) => metric.id === "claude:weekly_fable");
-  // Compare raw values and a known reset, never rounded percentages or absent data.
-  const duplicate = fable?.availability === "available" && fable.usedPercent !== null && fable.resetAt !== null
-    && metrics.some((metric) => metric.id === "claude:seven_day" && metric.availability === "available"
-      && metric.usedPercent === fable.usedPercent && metric.resetAt === fable.resetAt
-      && metric.periodDurationSeconds === fable.periodDurationSeconds);
-  const displayed = duplicate ? metrics.flatMap((metric) => metric.id === "claude:seven_day" ? [fable!]
-    : metric.id === "claude:weekly_fable" ? [] : [metric]) : metrics;
+  // Every window the provider reported keeps its own row: Fable is never folded into the 7-day
+  // window (even with the same percentage and reset), so neither one depends on the other.
+  const displayed = snapshot.metrics.filter((metric) => fableEnabled || metric.id !== "claude:weekly_fable");
   return displayed.map((metric) => {
     const available = metric.availability === "available" && metric.usedPercent !== null;
     return {

@@ -71,12 +71,9 @@ export default function CompactWindow() {
   const checkUpdates = useCallback(() => void run("update", "start_update_check"), [run]);
   const connect = useCallback(() => void run("connect", "connect_codex_account"), [run]);
 
-  // Provider ↗, account chevron and +: the same pages and Réglages focus as the app and the native menu.
+  // Provider ↗ and +: the same pages and Réglages focus as the app.
   const openUsage = useCallback((kind: ProviderKind) => {
     void invoke(kind === "codex" ? "open_usage_details" : "open_claude_usage").catch((cause) => setError(String(cause)));
-  }, []);
-  const openAccount = useCallback((kind: ProviderKind, accountId: string) => {
-    void invoke("open_settings_focus", { provider: kind, accountId }).catch((cause) => setError(String(cause)));
   }, []);
   const addAccount = useCallback((kind: ProviderKind) => {
     void invoke("open_settings_focus", { provider: kind, add: true }).catch((cause) => setError(String(cause)));
@@ -96,5 +93,5 @@ export default function CompactWindow() {
 
   return <CompactPanel panel={panel} error={error ?? readError} pending={pending}
     onSettings={openSettings} onUpdate={checkUpdates} onConnect={connect}
-    onUsage={openUsage} onAccount={openAccount} onAdd={addAccount} usageIcon={<ExternalIcon />} />;
+    onUsage={openUsage} onAdd={addAccount} usageIcon={<ExternalIcon />} />;
 }

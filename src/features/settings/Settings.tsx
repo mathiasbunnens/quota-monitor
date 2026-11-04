@@ -249,7 +249,7 @@ export default function Settings() {
   };
   // Explicit add (folder chooser or absolute path): the backend validates and
   // deduplicates, then switches to Multi. Errors stay next to the action.
-  const profileAction = async (command: "add_claude_profile" | "untrack_claude_profile", payload: Record<string, string>) => {
+  const profileAction = async (command: "add_claude_profile", payload: Record<string, string>) => {
     if (mutation.current) return false;
     mutation.current = true; setAccountActionError(null); setBusy(true);
     try { setPrefs(await invoke<Preferences>(command, payload)); reload(); return true; }
@@ -263,9 +263,9 @@ export default function Settings() {
     catch (cause) { setAccountActionError(String(cause).replace(/^Error: /, "")); return null; }
     finally { setBusy(false); }
   };
-  // Codex homes: explicit add/untrack commands (detected homes are followed by the backend), never login/logout.
+  // Codex homes: explicit add command (detected homes are followed by the backend), never login/logout.
   // The backend validates and returns the canonical preferences.
-  const codexAction = async (command: "add_codex_profile" | "untrack_codex_profile", payload: Record<string, string>) => {
+  const codexAction = async (command: "add_codex_profile", payload: Record<string, string>) => {
     if (mutation.current) return false;
     mutation.current = true; setCodexActionError(null); setBusy(true);
     try { setPrefs(await invoke<Preferences>(command, payload)); reload(); return true; }
@@ -324,17 +324,13 @@ export default function Settings() {
           {!prefs.codexEnabled && <p className="prefs-state">{codexMessage}</p>}
           {prefs.codexEnabled && !codexReady && <CodexConnection status={status} onChange={reload} />}
           <CodexAccountsSettings prefs={prefs} accounts={codexAccounts} busy={busy} onUpdate={update} focus={focus?.provider === "codex" ? focus : null}
-            // Reset and detail act on the account of their own row (never the primary by default).
+            // The reset acts on the account of its own row (never the primary by default).
             accessory={(account) => account.tracked && account.phase === "ready" && !account.duplicateOf
               ? <ResetCredits accountId={account.id} accountName={account.name} primary={account.primary}
                 ready={account.available} count={account.availableResets} onChange={reload} />
               : null}
             onAdd={(path) => codexAction("add_codex_profile", { path })}
-            onUntrack={(id) => codexAction("untrack_codex_profile", { id })}
-            onChooseFolder={canChooseMode ? chooseCodexFolder : undefined} actionError={codexActionError}
-            // The primary detail also holds the Codex connection (login, executable) once connected;
-            // until then the full connection panel above is shown.
-            detailExtra={(account) => account.primary && codexReady ? <CodexConnection embedded status={status} onChange={reload} /> : null} />
+            onChooseFolder={canChooseMode ? chooseCodexFolder : undefined} actionError={codexActionError} />
           {codexAccountsError && <p className="prefs-state prefs-state--error" role="alert">{codexAccountsError}</p>}
         </section>
 
@@ -359,7 +355,6 @@ export default function Settings() {
                 <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg><span>{account.snapshot.extraUsage.limitReached ? "Plafond" : "Extra"}</span>
               </button>
               : null}
-            onUntrack={(id) => profileAction("untrack_claude_profile", { id })}
             onChooseFolder={canChooseMode ? chooseFolder : undefined} actionError={accountActionError} />
           {accountsError && <p className="prefs-state prefs-state--error" role="alert">{accountsError}</p>}
         </section>

@@ -12,7 +12,7 @@ const compiled = ts.transpileModule(source, {
 }).outputText;
 const moduleSource = compiled.replace(/from "([^"]+)"/g,
   (_, specifier) => `from ${JSON.stringify(import.meta.resolve(specifier))}`);
-const { CompactPanel, updateIndicator, fillColor } = await import(
+const { CompactPanel, updateIndicator, fillColor, pairReset } = await import(
   "data:text/javascript;base64," + Buffer.from(moduleSource).toString("base64"));
 
 const fill = (from, to, fraction, ratio) => ({ from, to, fraction, visible: ratio * 276 >= 5, ratio });
@@ -182,12 +182,13 @@ const multiPanel = {
     { name: "Claude · Travail", section: "CLAUDE · TRAVAIL", compact: true, badge: "Max",
       note: { text: "Usage supplémentaire : plafond atteint", tone: "warning" }, rows: [
       multiRow("Limite sur 42 min", 0, "42 min", { value: "Épuisé", low: true, fill: fill("red", "red", 0, 0) }),
-      multiRow("Limite Fable", 86, "3j 8h", { model: true }),
+      multiRow("Limite sur 2j 1h", 20, "2j 1h", { reset: "Réinitialisation le 02/11 à 12h00" }),
+      multiRow("Limite Fable", 86, "3j 8h", { model: true, reset: "Réinitialisation le 03/11 à 19h00" }),
     ] },
   ],
 };
 
-test("multi-account cards pair 5 h and 7 j with visible countdowns, like the menu", () => {
+test("multi-account cards pair 5 h and 7 j with countdowns above and resets below, Fable stays its own row", () => {
   const markup = html({ panel: multiPanel });
   assert.equal((markup.match(/class="compact-pair"/g) ?? []).length, 2);
   assert.match(markup, /CLAUDE · PERSONNEL/);
@@ -197,13 +198,20 @@ test("multi-account cards pair 5 h and 7 j with visible countdowns, like the men
   assert.match(markup, />3j 8h · 86 %</);
   assert.match(markup, />42 min · Épuisé</);
   assert.match(markup, /aria-label="Limite 5 heures : Limite sur 3h30 · 73 % restant"/);
-  // Weekly window coalesced into Fable keeps the model name visible.
-  assert.match(markup, />Fable · 3j 8h · 86 %</);
+  // The pair is always 5 h + 7 j: Fable never takes the weekly slot, whatever it reports.
+  assert.match(markup, />2j 1h · 20 %</);
+  assert.doesNotMatch(markup, />Fable · /);
+  // Reset of each window under its bar, independent of Fable (Personnel has one, Travail another).
+  assert.equal((markup.match(/class="compact-pair__resets"/g) ?? []).length, 2);
+  assert.match(markup, /compact-pair__resets"><span title="[^"]*">Réinit\. à 15h40<\/span><span title="[^"]*">Réinit\. à 15h40<\/span>/);
+  assert.match(markup, />Réinit\. le 02\/11 à 12h00</);
+  assert.equal(pairReset({ reset: "Réinitialisation non communiquée" }), "Réinit. non communiquée");
   // 5 h track = the Unique track class (same 5 px), 7 j finer.
   assert.equal((markup.match(/compact-row__track compact-pair__track--short/g) ?? []).length, 2);
   assert.equal((markup.match(/compact-row__track compact-pair__track--week/g) ?? []).length, 2);
   // A separate Fable row stays visible as a normal row (nothing dropped).
-  assert.match(markup, /Limite <span style="color:var\(--compact-teal\)">Fable<\/span>/);
+  assert.equal((markup.match(/Limite <span style="color:var\(--compact-teal\)">Fable<\/span>/g) ?? []).length, 2);
+  assert.equal((markup.match(/class="compact-row"/g) ?? []).length, 2, "one Fable row per account");
   assert.match(markup, /Usage supplémentaire : plafond atteint/);
 });
 
@@ -220,11 +228,13 @@ test("compact window thickness: 5 h inherits the 5 px Unique track, 7 j is 3 px 
   assert.doesNotMatch(css, /\.compact-pair__track--short\s*\{[^}]*height:/);
   assert.match(css, /\.compact-pair__track--week\s*\{[^}]*height: 3px[^}]*border-radius: 1\.5px/);
   assert.match(css, /\.compact-pair__bars\s*\{[^}]*gap: 2px/);
+  assert.match(css, /\.compact-pair\s*\{[^}]*height: 54px/);
+  assert.match(css, /\.compact-pair__resets\s*\{[^}]*font-size: 10px/);
 });
 
-// --- Provider header ↗, account state + chevron, + (same logic as the Dashboard) ---------
+// --- Provider header ↗, account state, + (same logic as the Dashboard) ---------
 const account = (kind, id, name, badge, state, tone = "good", rows = [multiRow("Limite sur 3h30", 73, "3h30"), multiRow("Limite sur 3j 8h", 86, "3j 8h")]) => ({
-  kind, accountId: id, accountName: name, state: { label: state, tone },
+  kind, accountName: name, state: { label: state, tone },
   name: `${kind === "codex" ? "Codex" : "Claude"} · ${name}`, section: `${kind.toUpperCase()} · ${name.toUpperCase()}`, compact: true, badge, note: null, rows,
 });
 const groupedPanel = {
@@ -237,7 +247,7 @@ const groupedPanel = {
   ],
 };
 const calls = [];
-const handlers = { onUsage: (kind) => calls.push(["usage", kind]), onAccount: (kind, id) => calls.push(["account", kind, id]), onAdd: (kind) => calls.push(["add", kind]) };
+const handlers = { onUsage: (kind) => calls.push(["usage", kind]), onAdd: (kind) => calls.push(["add", kind]) };
 const groupedProps = (extra = {}) => props({ panel: groupedPanel, usageIcon: createElement("svg", { className: "external-icon" }), ...handlers, ...extra });
 
 test("one header « CODEX ↗ » per provider before its account cards, then its +", () => {
@@ -254,24 +264,23 @@ test("one header « CODEX ↗ » per provider before its account cards, then its
   assert.doesNotMatch(groups[0], /Ajouter un compte Claude/);
 });
 
-test("each card: account name, plan beside it, state, then the chevron of THAT account", () => {
+test("each card: account name, plan beside it, then its state; no chevron, no detail", () => {
   const markup = renderToStaticMarkup(createElement(CompactPanel, groupedProps()));
   const cards = markup.split('<section class="compact-provider"').slice(1);
-  assert.match(cards[0], /<span class="compact-provider__name">Principal<\/span><span class="compact-provider__badge">Plus<\/span><span class="compact-provider__state compact-tone--good">Connecté<\/span><button[^>]*aria-label="Détail Codex Principal"/);
-  assert.match(cards[1], /compact-tone--warning">Non connecté<\/span><button[^>]*aria-label="Détail Codex Travail"/);
-  assert.match(cards[2], /aria-label="Détail Claude Personnel"/);
-  assert.doesNotMatch(markup, /Détails<|>Détails/);
+  assert.match(cards[0], /<span class="compact-provider__name">Principal<\/span><span class="compact-provider__badge">Plus<\/span><span class="compact-provider__state compact-tone--good">Connecté<\/span><\/div>/);
+  assert.match(cards[1], /compact-tone--warning">Non connecté<\/span><\/div>/);
+  assert.doesNotMatch(markup, /Détail|compact-provider__chevron|<path d="M6 3\.5 10\.5 8 6 12\.5"/);
 });
 
-test("header ↗, chevron and + route to their own provider and account", () => {
+test("header ↗ and + route to their own provider; no account detail handler exists", () => {
   calls.length = 0;
   const tree = CompactPanel(groupedProps());
   const buttons = find(tree, (n) => n.type === "button");
   const click = (label) => buttons.find((b) => b.props["aria-label"] === label).props.onClick();
   click("Codex : usage détaillé"); click("Claude : usage détaillé");
-  click("Détail Codex Travail"); click("Détail Claude Personnel");
   click("Ajouter un compte Claude"); click("Ajouter un compte Codex");
-  assert.deepEqual(calls, [["usage", "codex"], ["usage", "claude"], ["account", "codex", "profile:travail"], ["account", "claude", "primary"], ["add", "claude"], ["add", "codex"]]);
+  assert.deepEqual(calls, [["usage", "codex"], ["usage", "claude"], ["add", "claude"], ["add", "codex"]]);
+  assert.equal(buttons.some((b) => /Détail/.test(b.props["aria-label"] ?? "")), false);
 });
 
 test("an enabled provider without a visible card still offers its header and its +; a disabled one has none", () => {
@@ -284,7 +293,7 @@ test("an enabled provider without a visible card still offers its header and its
   assert.doesNotMatch(without, /Codex/);
 });
 
-test("models without provider information (older fixtures) render as before, without header, chevron or +", () => {
+test("models without provider information (older fixtures) render as before, without header or +", () => {
   const markup = html();
   assert.doesNotMatch(markup, /compact-group|compact-provider__state|Ajouter un compte|usage détaillé/);
 });

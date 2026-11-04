@@ -186,18 +186,18 @@ test('the title arrow is the existing external-link icon, not a chevron, and ope
   assert.deepEqual(invokeCalls.map(call => call.command), ['open_usage_details', 'open_claude_usage']);
 });
 
-test('each Codex account row carries its own reset chip, state and detail chevron, then its visibility switch', () => {
+test('each Codex account row carries its own reset chip, state, then its visibility switch (no chevron)', () => {
   const html = settingsHtml(multiPrefs, [principal, travail, vide, perso, alias]);
   const list = rows(section(html, 'codex-heading'));
   assert.equal(list.length, 5);
-  const order = (item) => ['reset-chip', 'prefs-pill', 'aria-label="Détail', 'role="switch"'].map(token => item.indexOf(token));
+  const order = (item) => ['reset-chip', 'prefs-pill', 'role="switch"'].map(token => item.indexOf(token));
   // Principal (2 resets), Travail (1), Vide (0, disabled chip).
   assert.match(list[0], /aria-label="Réinitialisations disponibles : 2 — Principal"/);
   assert.match(list[1], /aria-label="Réinitialisations disponibles : 1 — Travail"/);
   assert.match(list[2], /class="reset-chip" disabled=""[^>]*aria-label="Réinitialisations disponibles : 0 — Vide"|aria-label="Réinitialisations disponibles : 0 — Vide"[^>]*disabled=""/);
   for (const item of list.slice(0, 3)) {
-    const [chipAt, pillAt, chevronAt, switchAt] = order(item);
-    assert.ok(chipAt > 0 && chipAt < pillAt && pillAt < chevronAt && chevronAt < switchAt, 'order: reset, connected, chevron, switch');
+    const [chipAt, pillAt, switchAt] = order(item);
+    assert.ok(chipAt > 0 && chipAt < pillAt && pillAt < switchAt, 'order: reset, connected, switch');
     assert.match(item, /prefs-pill--good">Connecté</);
   }
   // Signed-out and duplicate accounts: no reset icon at all, their own state.
@@ -205,19 +205,21 @@ test('each Codex account row carries its own reset chip, state and detail chevro
   assert.match(list[3], />Non connecté</);
   assert.doesNotMatch(list[4], /reset-chip/);
   assert.match(list[4], />Même compte</);
-  // Detail chevron, named with provider and account.
-  assert.match(list[1], /aria-label="Détail Codex Travail"[^>]*>/);
+  // No chevron and no detail panel on any row.
+  assert.doesNotMatch(html, /aria-label="Détail|aria-expanded="(true|false)"[^>]*aria-controls|claude-accounts__detail/);
 });
 
-test('a single account has the same placement; Claude has a state and chevron but never a reset', () => {
+test('a single account has the same placement; Claude has a state but never a reset, and no chevron', () => {
   const html = settingsHtml(basePrefs, [principal], [claudeAccount('Principal', { snapshot: claudeSnap({ extraUsage: { enabled: true, limitReached: true } }) })]);
   const codexRow = rows(section(html, 'codex-heading'));
   assert.equal(codexRow.length, 1);
-  assert.match(codexRow[0], /reset-chip[\s\S]*prefs-pill--good">Connecté[\s\S]*aria-label="Détail Codex Principal"/);
+  assert.match(codexRow[0], /reset-chip[\s\S]*prefs-pill--good">Connecté/);
+  assert.doesNotMatch(codexRow[0], /Détail/);
   const claudeRow = rows(section(html, 'claude-heading'));
   assert.equal(claudeRow.length, 1);
   assert.doesNotMatch(claudeRow[0], /Réinitialisations disponibles/);
-  assert.match(claudeRow[0], /prefs-pill--good">Connecté[\s\S]*aria-label="Détail Principal"/);
+  assert.match(claudeRow[0], /prefs-pill--good">Connecté/);
+  assert.doesNotMatch(claudeRow[0], /Détail/);
   // Extra usage (kept) now belongs to the account that has it.
   assert.match(claudeRow[0], /aria-label="Usage supplémentaire Claude : Principal"[\s\S]*Plafond/);
   assert.doesNotMatch(header(html, 'claude-heading'), /Plafond|Extra/);
@@ -239,60 +241,32 @@ test('the manual add is a single + icon button at the end of every provider list
   }
 });
 
-test('the chevron opens only that account, inline: its folder and « Supprimer » and nothing else', () => {
-  // CodexAccountsSettings state: path, pathError, open, details.
-  const props = { prefs: multiPrefs, accounts: [principal, travail, perso], busy: false, onUpdate: async () => true, onAdd: async () => true, onUntrack: async () => true };
-  const open = (id, extra = {}) => {
-    const element = component('../settings/ClaudeAccountsSettings.tsx', { ...props, ...extra }, [], 'CodexAccountsSettings');
-    return renderToStaticMarkup(component('../settings/ClaudeAccountsSettings.tsx', element.props, ['', null, false, id]));
-  };
-  const travailOpen = open(travail.id);
-  const detail = travailOpen.match(/<div id="codex-detail-profile:Travail"[\s\S]*?<\/div>/)[0];
-  assert.match(detail, /<code class="claude-accounts__path" title="\/fixtures\/\.codex-Travail">\/fixtures\/\.codex-Travail<\/code>/);
-  assert.match(detail, />Supprimer Travail<\/button>/);
-  assert.equal(detail.replace(/<[^>]+>/g, '|').split('|').filter(Boolean).join(' / '), '/fixtures/.codex-Travail / Supprimer Travail', 'path + Supprimer only');
-  assert.doesNotMatch(travailOpen, /% restants|Réinitialisation :|Quotas synchronisés|<p>|prefs-pill[^>]*>[^<]*<\/span><\/div>/);
-  assert.equal((travailOpen.match(/aria-expanded="true"/g) || []).length, 1);
-  assert.doesNotMatch(travailOpen, /\.codex-Principal<\/code>|\.codex-Perso<\/code>/, 'never the folder of another account');
-  // Principal: the path only, never a Supprimer.
-  const principalOpen = open(principal.id);
-  assert.match(principalOpen, /id="codex-detail-profile:Principal"/);
-  assert.doesNotMatch(principalOpen, /Supprimer/);
-  // Signed-out: same minimal detail; its state stays on the row (« Non connecté »).
-  const persoOpen = open(perso.id);
-  assert.doesNotMatch(persoOpen.match(/<div id="codex-detail-profile:Perso"[\s\S]*?<\/div>/)[0], /codex login|Non connecté|% restants/, 'the state stays on the row, not in the detail');
-  assert.match(persoOpen, />Non connecté</);
-  assert.doesNotMatch(open(null), /claude-accounts__detail/);
-  // Without a removal handler (nothing to remove): the path only.
-  assert.doesNotMatch(open(travail.id, { onUntrack: undefined }), /Supprimer/);
+test('no chevron, no detail panel, no folder, no Supprimer, no connection block on any account row', () => {
+  // CodexAccountsSettings state: path, pathError, open.
+  const props = { prefs: multiPrefs, accounts: [principal, travail, perso], busy: false, onUpdate: async () => true, onAdd: async () => true };
+  const element = component('../settings/ClaudeAccountsSettings.tsx', props, [], 'CodexAccountsSettings');
+  const html = renderToStaticMarkup(component('../settings/ClaudeAccountsSettings.tsx', element.props, ['', null, false]));
+  assert.doesNotMatch(html, /Détail|claude-accounts__detail|claude-accounts__path|Supprimer|\.codex-Travail|M6 3\.5 10\.5 8 6 12\.5|aria-controls/);
+  assert.equal(rows(html).length, 3, 'the account rows themselves are kept');
+  // Name, state and visibility stay on the row.
+  assert.match(html, /aria-label="Renommer Travail"/);
+  assert.match(html, /aria-label="Afficher Codex Travail"/);
+  assert.match(html, />Non connecté</);
 });
 
-test('Supprimer calls the untrack handler with the account id only (preference, never a file)', async () => {
-  const removed = [];
-  const element = component('../settings/ClaudeAccountsSettings.tsx', { prefs: multiPrefs, accounts: [principal, travail], busy: false, onUpdate: async () => true, onAdd: async () => true, onUntrack: async id => { removed.push(id); return true; } }, [], 'CodexAccountsSettings');
-  global.window = { requestAnimationFrame: fn => { fn(); return 1; } };
-  const tree = component('../settings/ClaudeAccountsSettings.tsx', element.props, ['', null, false, travail.id]);
-  const button = find(tree, node => node.props?.className?.includes('claude-accounts__remove'));
-  assert.ok(button && !find(tree, node => node.props?.id === 'codex-detail-profile:Principal'));
-  await button.props.onClick();
-  delete global.window;
-  assert.deepEqual(removed, [travail.id]);
-});
-
-test('each provider routes its + and Supprimer to its own commands; neither touches the other provider or a login', async () => {
+test('each provider routes its + to its own commands; neither touches the other provider or a login', async () => {
   invokeCalls = []; invokeFailure = null; invokeResult = multiPrefs;
   const tree = component('../settings/Settings.tsx', {}, ['providers', multiPrefs, status, null, null, false, 0, [claudeAccount('Principal'), claudeAccount('Travail')], null, true, null, [principal, travail], null, null]);
   const codexBlock = find(tree, node => node.type?.name === 'CodexAccountsSettings');
   const claudeBlock = find(tree, node => node.type?.name === 'ClaudeAccountsSettings');
   assert.equal(await codexBlock.props.onAdd('/fixtures/.codex-new'), true);
   assert.equal(await claudeBlock.props.onAdd('/fixtures/.claude-new'), true);
-  assert.equal(await codexBlock.props.onUntrack(travail.id), true);
-  assert.equal(await claudeBlock.props.onUntrack('claude:Travail'), true);
+  assert.equal(codexBlock.props.onUntrack, undefined);
+  assert.equal(claudeBlock.props.onUntrack, undefined);
+  assert.equal(codexBlock.props.detailExtra, undefined);
   assert.deepEqual(invokeCalls.map(c => [c.command, c.payload]), [
     ['add_codex_profile', { path: '/fixtures/.codex-new' }],
     ['add_claude_profile', { path: '/fixtures/.claude-new' }],
-    ['untrack_codex_profile', { id: travail.id }],
-    ['untrack_claude_profile', { id: 'claude:Travail' }],
   ]);
   assert.ok(!invokeCalls.some(c => /login|logout|delete|remove_file/.test(c.command)));
   // The + opens each provider's own folder chooser.

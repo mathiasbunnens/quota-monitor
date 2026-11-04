@@ -62,7 +62,12 @@ export function pairHeading(row: CompactRow): string {
   return row.model ? `Fable · ${text}` : text;
 }
 
-/** Multi-account block (40 pt like the menu): 5 h + 7 j, countdowns visible. */
+/** Same short reset line as the native paired block: « Réinit. à 14h30 ». */
+export function pairReset(row: CompactRow): string {
+  return row.reset.replace("Réinitialisation", "Réinit.");
+}
+
+/** Compacte block (54 pt like the menu): 5 h + 7 j, countdowns above, resets below. */
 function Pair({ rows }: { rows: CompactRow[] }) {
   const windows = ["Limite 5 heures", "Limite hebdomadaire"];
   return <div className="compact-pair">
@@ -86,6 +91,10 @@ function Pair({ rows }: { rows: CompactRow[] }) {
             style={{ width: `${row.fill.ratio * 100}%`, background: fillColor(row.fill, row.model) }} />}
         </div>;
       })}
+    </div>
+    <div className="compact-pair__resets">
+      {rows.map((row, index) => <span key={index} style={{ marginLeft: row.pairSlot === 1 ? "auto" : undefined }}
+        title={`${windows[row.pairSlot ?? index]} · ${row.label} · ${row.reset}`}>{pairReset(row)}</span>)}
     </div>
   </div>;
 }
@@ -138,10 +147,6 @@ export function compactGroups(panel: CompactPanelModel): CompactGroup[] {
   return groups;
 }
 
-function ChevronIcon() {
-  return <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3.5 10.5 8 6 12.5" /></svg>;
-}
-
 function PlusIcon() {
   return <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 3.5v9M3.5 8h9" /></svg>;
 }
@@ -155,8 +160,6 @@ export type CompactPanelProps = {
   onConnect: () => void;
   /** « CODEX ↗ »: detailed usage of the provider. */
   onUsage?: (kind: ProviderKind) => void;
-  /** Chevron of one card: that account's detail (Réglages → Fournisseurs). */
-  onAccount?: (kind: ProviderKind, accountId: string) => void;
   /** + of a provider: its add-account flow (Réglages → Fournisseurs). */
   onAdd?: (kind: ProviderKind) => void;
   /** The app's external arrow (ExternalIcon), passed in to keep this view import-free. */
@@ -176,11 +179,14 @@ function Card({ provider }: { provider: CompactProvider }) {
 function pairRowsOf(provider: CompactProvider) {
   if (!provider.compact) return [];
   // Compatibility for historical Claude fixture models without pairSlot.
-  if (provider.name !== "Codex" && provider.rows.every((r) => r.pairSlot === undefined)) return provider.rows.length >= 2 ? provider.rows.slice(0, 2) : [];
+  if (provider.name !== "Codex" && provider.rows.every((r) => r.pairSlot === undefined)) {
+    const windows = provider.rows.filter((r) => !r.model).slice(0, 2);
+    return windows.length >= 2 ? windows : [];
+  }
   return provider.rows.filter((r) => r.pairSlot === 0 || r.pairSlot === 1).sort((a, b) => a.pairSlot! - b.pairSlot!);
 }
 
-export function CompactPanel({ panel, error, pending, onSettings, onUpdate, onConnect, onUsage, onAccount, onAdd, usageIcon }: CompactPanelProps) {
+export function CompactPanel({ panel, error, pending, onSettings, onUpdate, onConnect, onUsage, onAdd, usageIcon }: CompactPanelProps) {
   const update = updateIndicator(panel?.update ?? null);
   const updateTitle = update.state === "idle"
     ? "Vérifier les mises à jour…"
@@ -229,8 +235,6 @@ export function CompactPanel({ panel, error, pending, onSettings, onUpdate, onCo
               <span className="compact-provider__name">{name}</span>
               {provider.badge && <span className="compact-provider__badge">{provider.badge}</span>}
               {provider.state && <span className={`compact-provider__state compact-tone--${provider.state.tone}`}>{provider.state.label}</span>}
-              {provider.accountId && <button type="button" className="compact-provider__chevron" aria-label={`Détail ${title} ${name}`}
-                title={`Détail ${title} ${name}`} onClick={() => onAccount?.(group.kind, provider.accountId as string)}><ChevronIcon /></button>}
             </div>
             <div className="compact-card"><Card provider={provider} /></div>
           </section>;

@@ -23,13 +23,9 @@ type Props<A extends ListedAccount = ClaudeAccount> = {
   provider?: "Claude" | "Codex";
   stateOf?: (account: A) => [string, Tone, string];
   planOf?: (account: A) => string | null | undefined;
-  /** « Supprimer <compte> » : stops tracking an additional account (never deletes its folder). */
-  onUntrack?: (id: string) => Promise<boolean>;
   /** Per-account control shown before the connection state (reset, extra usage). */
   accessory?: (account: A) => ReactNode;
-  /** Extra content under the folder in the detail of an account (Codex: connection of the primary). */
-  detailExtra?: (account: A) => ReactNode;
-  /** Pointed at from the menu bar or the compact window: unfold this account or open the add flow. `nonce` re-arms a repeated request. */
+  /** Pointed at from the compact window: open the add flow. `nonce` re-arms a repeated request. */
   focus?: SettingsFocusRequest | null;
 };
 
@@ -39,7 +35,6 @@ export type SettingsFocusRequest = { accountId: string | null; add: boolean; non
 export { accountState, codexAccountState };
 
 const pencil = <path d="M10.5 2.8 13.2 5.5 6 12.7 3 13l.3-3 7.2-7.2Z" />;
-const chevron = <path d="M6 3.5 10.5 8 6 12.5" />;
 const plus = <path d="M8 3.5v9M3.5 8h9" />;
 
 function Glyph({ children }: { children: ReactNode }) {
@@ -75,11 +70,10 @@ export function AccountName({ account, disabled, onSave }: { account: { name: st
 }
 
 export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeAccount>({ prefs, accounts, busy, onUpdate, onAdd, onChooseFolder, actionError = null,
-  provider = "Claude", stateOf, planOf, onUntrack, accessory, detailExtra, focus = null }: Props<A>) {
+  provider = "Claude", stateOf, planOf, accessory, focus = null }: Props<A>) {
   const [path, setPath] = useState("");
   const [pathError, setPathError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
-  const [details, setDetails] = useState<string | null>(null);
   const pathInput = useRef<HTMLInputElement>(null);
   const addButton = useRef<HTMLButtonElement>(null);
   const root = useRef<HTMLDivElement>(null);
@@ -88,7 +82,6 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
   const slug = codex ? "codex" : "claude";
   // Visibility labels stay unique when both providers list a « Principal ».
   const show = (account: A) => "Afficher " + (codex ? "Codex " : "") + account.name;
-  const detailLabel = (account: A) => "Détail " + (codex ? "Codex " : "") + account.name;
   const state = stateOf ?? ((account: A) => accountState(account as unknown as ClaudeAccount));
   const plan = planOf ?? ((account: A) => (account as unknown as ClaudeAccount).snapshot?.planType);
   const settings: ClaudeAccountsPreferences = prefs[key] ?? { mode: "single", selectedId: null, profiles: [] };
@@ -121,11 +114,6 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
     const chosen = await onChooseFolder();
     if (chosen && await onAdd(chosen)) setOpen(false);
   };
-  // Supprimer: stops tracking only. The row disappears, so focus moves to the + of this list.
-  const remove = async (account: A) => {
-    if (busy || !onUntrack) return;
-    if (await onUntrack(account.id)) { setDetails(null); window.requestAnimationFrame(() => addButton.current?.focus()); }
-  };
   const submitPath = async () => {
     if (busy) return;
     if (!ABSOLUTE_PATH.test(path)) { setPathError(ABSOLUTE_PATH_ERROR); return; }
@@ -140,8 +128,6 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
     if (focus.add) {
       setOpen(true);
       window.requestAnimationFrame(() => pathInput.current?.focus());
-    } else if (focus.accountId && listed.some((account) => account.id === focus.accountId)) {
-      setDetails(focus.accountId);
     } else return;
     applied.current = focus.nonce;
     root.current?.scrollIntoView?.({ block: "nearest" });
@@ -158,10 +144,8 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
     {accounts.length > 0 && <ul className="claude-accounts__list" aria-label={"Comptes " + provider}>
       {accounts.map((account) => {
         const [pill, tone, detail] = state(account);
-        const detailId = slug + "-detail-" + account.id;
         const tracked = account.tracked !== false;
         const planType = plan(account);
-        const isOpen = details === account.id;
         return <li className="claude-accounts__row" key={account.id}>
           <div className="claude-accounts__who">
             <AccountName key={account.id} account={account} disabled={busy || !tracked} onSave={(name) => saveProfile(account, { name })} />
@@ -170,9 +154,6 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
           </div>
           {accessory?.(account)}
           <span className={"prefs-pill prefs-pill--" + tone} title={detail || undefined}>{pill}</span>
-          <button type="button" id={detailId + "-toggle"} className="claude-accounts__icon" aria-label={detailLabel(account)}
-            aria-expanded={isOpen} aria-controls={isOpen ? detailId : undefined}
-            onClick={() => setDetails((value) => value === account.id ? null : account.id)}><Glyph>{chevron}</Glyph></button>
           {multi
             ? <label className="prefs-switch"><input type="checkbox" role="switch" aria-label={show(account)}
               checked={storedVisible(account)}
@@ -180,17 +161,6 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
             : several && <label className="claude-accounts__pick"><input type="radio" name={slug + "-selected"} aria-label={show(account)}
               checked={account.id === selected?.id}
               onChange={() => void onUpdate({ [key]: { ...settings, selectedId: account.id } })} /><span aria-hidden="true" /></label>}
-          {isOpen && <div id={detailId} className="claude-accounts__detail" role="group" aria-label={detailLabel(account)}
-            onKeyDown={(event) => {
-              if (event.key !== "Escape") return;
-              event.stopPropagation(); setDetails(null);
-              window.requestAnimationFrame(() => document.getElementById(detailId + "-toggle")?.focus());
-            }}>
-            <code className="claude-accounts__path" title={account.path}>{account.path}</code>
-            {detailExtra?.(account)}
-            {onUntrack && !account.primary && <button type="button" className="prefs-link claude-accounts__remove" disabled={busy}
-              title="Le dossier et son contenu ne sont pas modifiés" onClick={() => void remove(account)}>Supprimer {account.name}</button>}
-          </div>}
         </li>;
       })}
     </ul>}

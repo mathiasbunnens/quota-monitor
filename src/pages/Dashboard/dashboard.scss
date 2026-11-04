@@ -68,7 +68,7 @@
   &__title { display: flex; align-items: center; gap: 6px; min-width: 0; margin: 0; font-size: 14px; font-weight: 650; }
   &__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   &__title .plan-badge { flex: none; margin-left: 0; font-size: 10.5px; font-weight: 500; }
-  // State then the detail chevron, at the right of the header.
+  // Connection state, at the right of the header.
   &__status { flex: none; display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
   &__pill {
     flex: none; padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 600; line-height: 16px; color: var(--desktop-muted);
@@ -77,24 +77,8 @@
     &--error { color: #d93c41; background: color-mix(in srgb, #e5484d 15%, transparent); }
     &--neutral { background: color-mix(in srgb, var(--desktop-ink) 8%, transparent); }
   }
-  .dashboard &__chevron {
-    display: inline-grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px;
-    background: transparent; box-shadow: none; color: var(--desktop-muted);
-    svg { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transition: transform 150ms ease; }
-    &:hover { background: color-mix(in srgb, var(--desktop-ink) 7%, transparent); color: var(--desktop-ink); }
-    &[aria-expanded="true"] { color: var(--desktop-accent); svg { transform: rotate(90deg); } }
-  }
-  &__path {
-    display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px;
-    color: var(--desktop-muted); user-select: text; -webkit-user-select: text; cursor: text;
-  }
-  & &__details--inline { position: static; margin: 10px 0 0; padding: 8px 0 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; border-top: 1px solid var(--desktop-border); }
   &__note { margin: 10px 0 0; font-size: 11px; line-height: 1.5; color: var(--desktop-muted); }
   &__error { margin: 0 0 10px; font-size: 12px; color: #e5484d; }
-  &__details {
-    position: absolute; z-index: 5; left: 8px; right: 8px; top: 100%; margin-top: -6px; padding: 14px;
-    border: 1px solid var(--desktop-border); border-radius: 12px; background: var(--desktop-card); box-shadow: 0 10px 30px #0003;
-  }
 }
 .provider-row + .provider-row { margin-top: 14px; }
 .provider-row__missing { font-size: 13px !important; font-weight: 500; color: var(--desktop-muted); letter-spacing: 0 !important; }
@@ -116,7 +100,20 @@
 // 5 h: inherit the exact Unique track/fill thickness and radius (.dashboard__progress).
 .provider-card__window--short { margin-top: 0; }
 .provider-card__window--week { height: 3px; margin-top: 0; }
+// Reset of each window under its bar (like the Classique « Réinitialisation » line): 5 h left, 7 j right.
+.provider-card__paired-resets {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin-top: 6px;
+  font-size: 10.5px; line-height: 1.4; color: var(--desktop-muted); font-variant-numeric: tabular-nums;
+  span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  span:last-child { text-align: right; }
+}
 .provider-card:has(.provider-card__paired-bars) {
+  // Further limits (Fable…) keep the compact scale of the paired block.
+  .provider-row { margin-top: 10px; }
+  .provider-row .dashboard__quota-heading { font-size: 11px; gap: 6px; }
+  .provider-row .dashboard__quota-heading strong { font-size: 15px; letter-spacing: -0.2px; }
+  .provider-row .dashboard__progress { margin-top: 6px; }
+  .provider-row__reset { margin-top: 4px; font-size: 10.5px; }
   padding: 12px;
   .provider-card__title { font-size: 13px; }
   .plan-badge { font-size: 10px; }
@@ -143,7 +140,6 @@
   &:disabled { color: var(--desktop-muted); border-color: var(--desktop-border); background: transparent; opacity: 1; }
 }
 // Title and account chip share one wrapping block: a narrow card moves the chip
-// under the title instead of squeezing it, « Détails » stays on the right.
+// under the title instead of squeezing it, the state stays on the right.
 .provider-card__heading { flex: 1 1 7rem; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
-// Focusing the chip must not open the card's « Détails » popover (focus is stopped at the wrapper).
 .provider-card__action { display: contents; }

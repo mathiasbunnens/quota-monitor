@@ -29,16 +29,19 @@ test("optional Fable uses normal remaining-percentage and reset rendering", () =
   });
 });
 
-test("matching weekly and explicit Fable merge only in presentation, with Fable as source", () => {
+test("matching weekly and explicit Fable are never merged: 5 h, 7 j and Fable keep their own rows", () => {
   const reset = "2026-10-30T14:00:00Z";
   const general = metric("claude:seven_day", 37.5, reset);
   const fable = metric("claude:weekly_fable", 37.5, reset);
   const input = snapshot([metric("claude:five_hour", 10), general, fable]);
   const before = structuredClone(input);
   const rows = claudeRows(input);
-  assert.deepEqual(rows.map((row) => row.id), ["claude:five_hour", "claude:weekly_fable"]);
-  assert.equal(rows[1].label, "Limite Fable");
-  assert.equal(rows[1].remaining, 63);
+  assert.deepEqual(rows.map((row) => row.id), ["claude:five_hour", "claude:seven_day", "claude:weekly_fable"]);
+  assert.equal(rows[1].modelLabel, undefined);
+  assert.equal(rows[1].resetAt, reset);
+  assert.equal(rows[2].label, "Limite Fable");
+  assert.equal(rows[2].remaining, 63);
+  assert.equal(rows[2].resetAt, reset);
   assert.deepEqual(input, before);
   assert.deepEqual(claudeRows(input, false).map((row) => row.id), ["claude:five_hour", "claude:seven_day"]);
   assert.equal(claudeRows(snapshot([general]))[0].modelLabel, undefined);
@@ -50,6 +53,8 @@ test("matching weekly and explicit Fable merge only in presentation, with Fable 
     assert.equal(claudeRows(snapshot([general, { ...fable, ...changed }])).length, 2);
   }
   assert.equal(claudeRows(snapshot([{ ...general, resetAt: null }, { ...fable, resetAt: null }])).length, 2);
+  // Fable absent in the data (older Claude Code): nothing is invented, 7 j stays alone.
+  assert.deepEqual(claudeRows(snapshot([metric("claude:five_hour", 10), general])).map((row) => row.id), ["claude:five_hour", "claude:seven_day"]);
 });
 
 test("old snapshots do not fabricate Fable; expired windows remain unavailable", () => {
@@ -102,7 +107,8 @@ test("Fable alone is bar-coloured, without a dot or dimming", () => {
     metric("claude:five_hour", 20), metric("claude:seven_day", 50, reset),
     metric("claude:weekly_fable", 50, reset),
   ]));
-  assert.equal((merged.match(/role="progressbar"/g) || []).length, 2);
+  // Same percentage AND reset as the weekly window: Fable is still its own bar, 7 j keeps its own.
+  assert.equal((merged.match(/role="progressbar"/g) || []).length, 3);
   assert.equal((merged.match(/aria-label="Limite Fable"/g) || []).length, 1);
   assert.doesNotMatch(html, /opacity/);
   const rows = html.split('<div class="provider-row').slice(1);
@@ -118,7 +124,7 @@ test("Fable alone is bar-coloured, without a dot or dimming", () => {
   const low = render(true, false, snapshot([metric("claude:weekly_fable", 90)]));
   assert.match(low, /provider-row--model.*dashboard__progress--low/);
   assert.doesNotMatch(render(false), /Fable|model/);
-  assert.doesNotMatch(render(true, true), /Fable|model/); // Secondary rows remain in details.
+  assert.match(render(true, true), /provider-row__model-label">Fable/); // Nothing hides behind a details chevron any more.
   const fableOnly = render(true, true, snapshot([metric("claude:weekly_fable", 30)]));
   assert.match(fableOnly, /<div class="provider-row provider-row--model provider-row--healthy">/);
   for (const [used, state] of [[0, "healthy"], [70, "warning"], [90, "low"], [100, "low"], [null, "low"]]) {

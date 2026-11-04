@@ -509,7 +509,7 @@ pub fn accounts(app: &tauri::AppHandle) -> Vec<AccountSnapshot> {
     let fable = prefs::current(app).fable_enabled;
     collect_accounts(app, Some(fable))
 }
-/// Raw view (no Fable filtering/coalescing) for notifications.
+/// Raw view (no Fable filtering/relabelling) for notifications.
 pub fn raw_accounts(app: &tauri::AppHandle) -> Vec<AccountSnapshot> {
     collect_accounts(app, None)
 }
@@ -538,7 +538,7 @@ fn collect_accounts(app: &tauri::AppHandle, fable: Option<bool>) -> Vec<AccountS
         .collect()
 }
 /// Per-account projection. `fable: Some(enabled)` is the display view (v3.1.0
-/// Fable visibility + "Limite Fable" coalescing); `None` keeps raw metrics.
+/// Fable visibility + "Limite Fable" label); `None` keeps raw metrics.
 pub(crate) fn account_view(
     snap: ClaudeSnapshot,
     enabled: bool,
@@ -610,43 +610,20 @@ fn filter_fable(mut snap: ClaudeSnapshot, enabled: bool) -> ClaudeSnapshot {
 }
 
 /// Presentation only: never change raw observations or notification identities.
-/// Equal rounded percentages alone are not evidence of a duplicate window.
+/// Every real window keeps its own row: the 7-day window is never folded into
+/// Fable (even when both report the same percentage and reset), so the weekly
+/// countdown does not depend on Fable and the Fable bar stays visible.
 pub(crate) fn display_metrics(metrics: &[Metric]) -> Vec<Metric> {
-    let duplicate = metrics
+    metrics
         .iter()
-        .find(|m| m.id == "claude:weekly_fable")
-        .filter(|f| {
-            f.availability == "available" && f.used_percent.is_some() && f.reset_at.is_some()
+        .cloned()
+        .map(|mut m| {
+            if m.id == "claude:weekly_fable" {
+                m.label = "Limite Fable";
+            }
+            m
         })
-        .is_some_and(|f| {
-            metrics.iter().any(|w| {
-                w.id == "claude:seven_day"
-                    && w.availability == "available"
-                    && w.used_percent == f.used_percent
-                    && w.reset_at == f.reset_at
-                    && w.period_duration_seconds == f.period_duration_seconds
-            })
-        });
-    let mut rows = Vec::new();
-    for m in metrics {
-        if duplicate && m.id == "claude:seven_day" {
-            rows.push(
-                metrics
-                    .iter()
-                    .find(|m| m.id == "claude:weekly_fable")
-                    .unwrap()
-                    .clone(),
-            );
-        } else if !(duplicate && m.id == "claude:weekly_fable") {
-            rows.push(m.clone());
-        }
-    }
-    for m in &mut rows {
-        if m.id == "claude:weekly_fable" {
-            m.label = "Limite Fable";
-        }
-    }
-    rows
+        .collect()
 }
 
 fn prepare_snapshot(mut snap: ClaudeSnapshot, enabled: bool, available: bool) -> ClaudeSnapshot {
@@ -946,7 +923,7 @@ mod tests {
     }
 
     #[test]
-    fn fable_display_merges_only_matching_known_weekly_windows() {
+    fn fable_is_never_merged_into_the_weekly_window_even_when_they_match() {
         let reset = iso(NOW + 3600).unwrap();
         let raw = usage_snapshot(
             &json!({"rate_limits": {
@@ -956,16 +933,19 @@ mod tests {
             }}),
             NOW,
         );
+        // Same percentage, reset and duration: the 7 j row stays, Fable stays too.
         let shown = filter_fable(raw.clone(), true);
-        assert_eq!(shown.metrics.len(), 2);
-        assert_eq!(shown.metrics[1].id, "claude:weekly_fable");
-        assert_eq!(shown.metrics[1].label, "Limite Fable");
-        assert_eq!(shown.metrics[1].used_percent, Some(37.5));
+        assert_eq!(shown.metrics.len(), 3);
+        assert_eq!(shown.metrics[1].id, "claude:seven_day");
+        assert_eq!(shown.metrics[1].label, "Limite hebdomadaire");
+        assert_eq!(shown.metrics[2].id, "claude:weekly_fable");
+        assert_eq!(shown.metrics[2].label, "Limite Fable");
+        assert_eq!(shown.metrics[2].used_percent, Some(37.5));
         assert_eq!(raw.metrics.len(), 3);
-        assert_eq!(raw.metrics[1].id, "claude:seven_day");
         let hidden = filter_fable(raw.clone(), false);
         assert_eq!(hidden.metrics.len(), 2);
         assert_eq!(hidden.metrics[1].id, "claude:seven_day");
+        // Any other combination keeps three rows as well; the values are the real ones.
         for kind in 0..6 {
             let mut changed = raw.clone();
             let f = &mut changed.metrics[2];
@@ -979,10 +959,6 @@ mod tests {
             }
             assert_eq!(filter_fable(changed, true).metrics.len(), 3);
         }
-        let mut unknown = raw;
-        unknown.metrics[1].reset_at = None;
-        unknown.metrics[2].reset_at = None;
-        assert_eq!(filter_fable(unknown, true).metrics.len(), 3);
     }
 
     #[test]
@@ -1469,7 +1445,7 @@ cat >/dev/null
         );
     }
     #[test]
-    fn fable_visibility_and_coalescing_apply_to_each_account_view_but_not_raw() {
+    fn fable_visibility_applies_to_each_account_view_and_never_replaces_the_weekly_window() {
         let reset = iso(NOW + 3600).unwrap();
         let raw = usage_snapshot(
             &json!({"rate_limits": {
@@ -1479,10 +1455,14 @@ cat >/dev/null
             }}),
             NOW,
         );
-        // Display view of one account: v3.1.0 coalescing into "Limite Fable".
+        // Display view of one account: 5 h, 7 j AND Fable, even when Fable equals the
+        // weekly window (same percentage and reset): nothing is folded.
         let shown = account_view(raw.clone(), true, true, Some(true));
-        assert_eq!(shown.metrics.len(), 2);
-        assert_eq!(shown.metrics[1].label, "Limite Fable");
+        let ids: Vec<_> = shown.metrics.iter().map(|m| m.id).collect();
+        assert_eq!(ids, ["claude:five_hour", "claude:seven_day", "claude:weekly_fable"]);
+        assert_eq!(shown.metrics[1].label, "Limite hebdomadaire");
+        assert_eq!(shown.metrics[2].label, "Limite Fable");
+        assert_eq!(shown.metrics[2].used_percent, Some(37.5));
         // Fable hidden by the persisted preference: hidden for this account too.
         let hidden = account_view(raw.clone(), true, true, Some(false));
         assert!(hidden.metrics.iter().all(|m| m.id != "claude:weekly_fable"));

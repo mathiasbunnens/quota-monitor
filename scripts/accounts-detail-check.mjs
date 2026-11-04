@@ -1,4 +1,4 @@
-// Settings → Fournisseurs (Codex AND Claude): minimal account detail, automatic detection, + button.
+// Settings → Fournisseurs (Codex AND Claude): account rows WITHOUT chevron or detail panel, automatic detection, + button.
 // Offline: real React views, mocked IPC (scripts/claude-renderer-fixture.mjs), headless Chrome over CDP.
 //   node scripts/claude-renderer-fixture.mjs node_modules/.cache/dac-after
 //   AFTER_SITE=node_modules/.cache/dac-after/site [BEFORE_SITE=…] [SHOTS=dir] node scripts/accounts-detail-check.mjs
@@ -36,118 +36,64 @@ try{
  const one='view=settings&scenario=one&codex=yes&codexAccounts=one&clock=controlled&platform=macos&layout=compact';
 
  // ---- screenshots, before / after, both schemes ----
- for(const scheme of ['light','dark'])for(const which of Object.keys(roots)){
-  for(const [name,query] of [['one',one],['multi',base]]){
-   await open(which,query,scheme);report[`${name}-${which}-${scheme}`]={rows:{codex:await rows('codex'),claude:await rows('claude')}};await shot(`settings-${name}-${which}-${scheme}`);
-  }
-  await open(which,base,scheme);
-  await ev(`document.querySelector('[aria-label="Détail Codex Travail"]').click();document.querySelector('[aria-label="Détail Travail"]').click()`);await sleep(250);await shot(`settings-detail-${which}-${scheme}`);
+ for(const scheme of ['light','dark'])for(const which of Object.keys(roots))for(const [name,query] of [['one',one],['multi',base]]){
+  await open(which,query,scheme);report[`${name}-${which}-${scheme}`]={rows:{codex:await rows('codex'),claude:await rows('claude')}};await shot(`settings-${name}-${which}-${scheme}`);
  }
 
  // ---- assertions on the new build ----
  await open('after',base);
- // 1. detected homes are plain accounts: no "Détecté", no "Suivre", states per account
+ // 1. detected homes are plain accounts: states per account, nothing to unfold
  const codexRows=await rows('codex');report.codexRows=codexRows;
- assert.equal(codexRows.length,5);assert.ok(codexRows.every(r=>!/Détecté|Suivre|Ne plus suivre/.test(r)),codexRows.join('|'));
+ assert.equal(codexRows.length,5);assert.ok(codexRows.every(r=>!/Détecté|Suivre|Ne plus suivre|Supprimer/.test(r)),codexRows.join('|'));
  assert.match(codexRows[2],/Perso.*Non connecté/);assert.match(codexRows[3],/Alias.*Même compte/);assert.match(codexRows[4],/detecte.*Connecté/);
- // 2. detail of a followed account = path + Supprimer, nothing else, inline under the row
- await ev(`document.querySelector('[aria-label="Détail Codex Travail"]').focus()`);await key('Enter','Enter',13,'\r');
- const detail=await ev(`(()=>{const d=document.querySelector('#codex-detail-profile\\\\:travail');const li=d.closest('li');const code=d.querySelector('code');return {parentIsRow:li.classList.contains('claude-accounts__row'),children:[...d.children].map(c=>c.tagName+':'+c.textContent.trim()),text:d.innerText.replace(/\\s+/g,' ').trim(),title:code.title,select:getComputedStyle(code).userSelect,ellipsis:getComputedStyle(code).textOverflow,belowRow:d.getBoundingClientRect().top>=li.querySelector('.claude-accounts__who').getBoundingClientRect().bottom-1,count:document.querySelectorAll('.claude-accounts__detail').length,dialogs:document.querySelectorAll('dialog[open],[role=dialog]').length,expanded:document.querySelector('[aria-label="Détail Codex Travail"]').getAttribute('aria-expanded')}})()`);
- report.detail=detail;
- assert.deepEqual(detail.children,['CODE:/fixtures/.codex-travail','BUTTON:Supprimer Travail']);
- assert.equal(detail.text,'/fixtures/.codex-travail Supprimer Travail');assert.equal(detail.title,'/fixtures/.codex-travail');
- assert.equal(detail.select,'text');assert.equal(detail.ellipsis,'ellipsis');assert.ok(detail.parentIsRow&&detail.belowRow);assert.equal(detail.count,1);assert.equal(detail.dialogs,0);assert.equal(detail.expanded,'true');
- // 3. primary: path only, no Supprimer
- await click('[aria-label="Détail Codex Principal"]');await sleep(150);
- const primary=await ev(`(()=>{const d=document.querySelector('#codex-detail-primary');return {children:[...d.children].map(c=>c.tagName),buttons:d.querySelectorAll('button').length,open:document.querySelectorAll('.claude-accounts__detail').length}})()`);
- assert.deepEqual(primary.children,['CODE','SECTION']);assert.equal(primary.buttons,4,'login x2 + path x2, inside the embedded connection only');
- // 4. keyboard: Escape closes the detail and returns focus to its chevron
- await ev(`document.querySelector('[aria-label="Détail Codex Travail"]').click()`);await sleep(100);
- await ev(`document.querySelector('#codex-detail-profile\\\\:travail button').focus()`);await key('Escape','Escape',27);await sleep(100);
- const esc=await ev(`({open:document.querySelectorAll('.claude-accounts__detail').length,focus:document.activeElement.getAttribute('aria-label')})`);
- assert.deepEqual(esc,{open:0,focus:'Détail Codex Travail'});
- // 5. + : one icon button per provider, bottom right, accessible names, no "Ajouter un compte" line
- const plus=await ev(`(()=>{const f=p=>{const s=document.getElementById(p+'-heading').closest('section');const b=s.querySelector('.claude-accounts__add');const l=s.querySelector('.claude-accounts__list').getBoundingClientRect();const r=b.getBoundingClientRect();return {label:b.getAttribute('aria-label'),text:b.textContent.trim(),right:Math.round(l.right-r.right),below:r.top>=l.bottom-1,w:Math.round(r.width),h:Math.round(r.height),svg:!!b.querySelector('svg'),line:/Ajouter un compte/.test(s.innerText)}};return {codex:f('codex'),claude:f('claude')}})()`);
+ // 2. no chevron, no detail, no folder, no Supprimer, no connection block, on any row of any provider/scene
+ for(const [name,query] of [['multi',base],['one',one],['signedout',base+'&codexPhase=signed_out']]){
+  await open('after',query);
+  const none=await ev(`({chevrons:document.querySelectorAll('[aria-label^="Détail"],[aria-controls*="detail"]').length,details:document.querySelectorAll('.claude-accounts__detail,.claude-accounts__path,.claude-accounts__remove').length,remove:/Supprimer/.test(document.getElementById('panel-providers').innerText),embedded:document.querySelectorAll('.codex-connection--embedded').length,rowParts:[...document.querySelectorAll('.claude-accounts__row')].every(r=>r.querySelector('.claude-accounts__who')&&r.querySelector('.prefs-pill')&&r.querySelector('[aria-label^="Renommer"]'))})`);
+  report['none-'+name]=none;assert.deepEqual(none,{chevrons:0,details:0,remove:false,embedded:0,rowParts:true},name);
+ }
+ // the not-connected Codex keeps its full connection panel above the list (login stays reachable)
+ await open('after',base+'&codexPhase=signed_out');
+ assert.equal(await ev(`document.querySelectorAll('#codex-title').length`),1);
+ // 3. + : one icon button per provider, bottom right, accessible names, no "Ajouter un compte" line
+ await open('after',base);
+ const plus=await ev(`(()=>{const f=p=>{const s=document.getElementById(p+'-heading').closest('section');const b=s.querySelector('.claude-accounts__add');const l=s.querySelector('.claude-accounts__list').getBoundingClientRect();const r=b.getBoundingClientRect();return {label:b.getAttribute('aria-label'),text:b.textContent.trim(),right:Math.round(l.right-r.right),below:r.top>=l.bottom-1,w:Math.round(r.width),h:Math.round(r.height),svg:!!b.querySelector('svg')}};return {codex:f('codex'),claude:f('claude')}})()`);
  report.plus=plus;
- for(const [p,label] of [['codex','Ajouter un compte Codex'],['claude','Ajouter un compte Claude']]){const v=plus[p];assert.equal(v.label,label);assert.equal(v.text,'');assert.ok(v.svg&&v.below&&v.right<=2&&v.w>=22&&v.h>=22,JSON.stringify(v));assert.equal(v.line,false);}
- // 6. Supprimer (Codex): stops tracking only; command carries the account id; focus lands on the +; stays gone after a refresh
- await open('after',base+'&pickCodex=/fixtures/.codex-travail&pick=/fixtures/.claude-work');
- await click('[aria-label="Détail Codex Travail"]');await sleep(100);
- await ev(`document.querySelector('#codex-detail-profile\\\\:travail button').focus()`);await key('Enter','Enter',13,'\r');await sleep(500);
- let c=await calls();assert.deepEqual(c,[['untrack_codex_profile',{id:'profile:travail'}]]);
- const after=await rows('codex');assert.equal(after.length,4);assert.ok(!after.some(r=>/Travail/.test(r)));
- assert.equal(await ev(`document.activeElement.getAttribute('aria-label')`),'Ajouter un compte Codex');
- assert.equal(await ev(`window.__fixture.prefs.codexAccounts.excluded.join()`),'profile:travail');
- await ev(`window.__fixture.emit()`);await sleep(400);assert.equal((await rows('codex')).length,4);
- // 7. + routes to the right provider: Codex + → add_codex_profile only; the removed home is back
+ for(const [p,label] of [['codex','Ajouter un compte Codex'],['claude','Ajouter un compte Claude']]){const v=plus[p];assert.equal(v.label,label);assert.equal(v.text,'');assert.ok(v.svg&&v.below&&v.right<=2&&v.w>=22&&v.h>=22,JSON.stringify(v));}
+ // 4. + routes to the right provider (folder chooser then add_*_profile); no remove command exists in the UI any more
+ await open('after',base+'&pickCodex=/fixtures/.codex-nouveau&pick=/fixtures/.claude-work');
  await addVia('Codex');
- c=await calls();assert.deepEqual(c.slice(1),[['add_codex_profile',{path:'/fixtures/.codex-travail'}]]);
- assert.equal((await rows('codex')).length,5);
- // Claude: Supprimer then + restores; commands never cross providers
- await click('[aria-label="Détail Travail"]');await sleep(100);
- const claudeDetail=await ev(`(()=>{const d=document.querySelector('[aria-label="Détail Travail"]').closest('li').querySelector('.claude-accounts__detail');return [...d.children].map(x=>x.tagName+':'+x.textContent.trim())})()`);
- assert.deepEqual(claudeDetail,['CODE:/fixtures/.claude-work','BUTTON:Supprimer Travail']);
- await ev(`document.querySelector('[aria-label="Détail Travail"]').closest('li').querySelector('.claude-accounts__remove').click()`);await sleep(500);
- assert.equal((await rows('claude')).length,1);
- assert.equal(await ev(`document.activeElement.getAttribute('aria-label')`),'Ajouter un compte Claude');
- await addVia('Claude');
- c=await calls();assert.deepEqual(c.slice(2).map(x=>x[0]),['untrack_claude_profile','add_claude_profile']);
- // (the fixture folder chooser returns the removed path for Claude through ?pick, which is /fixtures/.claude-work)
- assert.equal((await rows('claude')).length,2);
- assert.ok(c.slice(2).every(x=>!/codex/.test(x[0])),'no Codex command from the Claude +');
- // 8. without a native folder chooser (not macOS) the + opens the absolute-path field
+ let c=await calls();assert.deepEqual(c,[['add_codex_profile',{path:'/fixtures/.codex-nouveau'}]]);
+ assert.equal((await rows('codex')).length,6);
+ assert.ok(!(await ev(`window.__fixture.calls.some(c=>/untrack|delete|remove|login|logout/.test(c.command))`)),'no removal/login command');
+ // 5. without a native folder chooser (not macOS) the + opens the absolute-path field
  await open('after',base.replace('platform=macos','platform=linux'));
  await click('[aria-label="Ajouter un compte Codex"]');await sleep(300);
- const manual=await ev(`({focus:document.activeElement.getAttribute('aria-label'),open:!!document.querySelector('.add-account__manual')})`);
- assert.deepEqual(manual,{focus:'Chemin absolu d’un dossier CODEX_HOME',open:true});
- // 9. single account: principal alone has the path, never a Supprimer
- await open('after',one);await click('[aria-label="Détail Codex Principal"]');await click('[aria-label="Détail Personnel"]');await sleep(150);
- const solo=await ev(`[...document.querySelectorAll('.claude-accounts__detail')].map(d=>[...d.children].map(c=>c.tagName).join())`);
- assert.deepEqual(solo,['CODE,SECTION','CODE']);
- await shot('settings-one-detail-after-light');
- // 10. finition: a single + (no chevron, no Actualiser, no relay), one flow, one « Principal », connection in the primary detail
+ assert.deepEqual(await ev(`({focus:document.activeElement.getAttribute('aria-label'),open:!!document.querySelector('.add-account__manual')})`),{focus:'Chemin absolu d’un dossier CODEX_HOME',open:true});
+ // 6. one flow, Escape closes it, a relative path is refused with no command
  await open('after',base);
- const bare=await ev(`({more:document.querySelectorAll('.prefs-more,[aria-label="Chemins et options avancées"]').length,text:/Actualiser|relais/i.test(document.getElementById('panel-providers').innerText),adds:document.querySelectorAll('.claude-accounts__add').length,flows:document.querySelectorAll('.add-account__flow').length,detection:[...new Set(window.__fixture.calls.filter(c=>/^get_(codex|claude)_accounts$/.test(c.command)).map(c=>c.command))].sort()})`);
- report.bare=bare;assert.deepEqual(bare,{more:0,text:false,adds:2,flows:0,detection:['get_claude_accounts','get_codex_accounts']});
  await click('[aria-label="Ajouter un compte Codex"]');await sleep(200);
  const flow=await ev(`(()=>{const f=document.querySelector('.add-account__flow');const s=document.getElementById('codex-heading').closest('section');return {choose:!!f.querySelector('.add-account__choose'),input:f.querySelector('input').getAttribute('aria-label'),inSection:s.contains(f),dialogs:document.querySelectorAll('dialog,[role=dialog]').length}})()`);
  report.flow=flow;assert.deepEqual(flow,{choose:true,input:'Chemin absolu d’un dossier CODEX_HOME',inSection:true,dialogs:0});
  await shot('settings-add-flow-after-light');
  await ev(`document.querySelector('.add-account__flow input').focus()`);await key('Escape','Escape',27);await sleep(100);
  assert.equal(await ev(`document.querySelectorAll('.add-account__flow').length`),0);
- // a relative path is refused inside the flow, no command sent
  await click('[aria-label="Ajouter un compte Claude"]');await sleep(100);
  await ev(`(()=>{const i=document.querySelector('.add-account__flow input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(i,'relatif/dossier');i.dispatchEvent(new Event('input',{bubbles:true}))})()`);await sleep(80);
  await ev(`document.querySelector('.add-account__flow form button[type=submit]').click()`);await sleep(150);
  assert.match(await ev(`document.querySelector('.add-account__flow [role=alert]')?.textContent||''`),/Chemin absolu requis/);
  assert.ok(!(await calls()).some(c=>c[0]==='add_claude_profile'));
+ // 7. one « Principal » on the primary row; rename/visibility unchanged
  await open('after',base);
  const principals=await ev(`[...document.getElementById('codex-heading').closest('section').querySelectorAll('.claude-accounts__row')].map(r=>(r.querySelector('.claude-accounts__who').innerText.match(/Principal/g)||[]).length)`);
  report.principals=principals;assert.equal(principals[0],1,'one « Principal » on the primary row');
- await click('[aria-label="Détail Codex Principal"]');await sleep(200);
- const conn=await ev(`(()=>{const d=document.querySelector('#codex-detail-primary');const c=d.querySelector('.codex-connection--embedded');const r={primary:!!c,buttons:[...c.querySelectorAll('button')].map(b=>b.textContent.trim()),summary:c.querySelector('summary').textContent,intro:/Connexion directe|Les quotas sont lus/.test(d.innerText),belowPath:c.getBoundingClientRect().top>=d.querySelector('code').getBoundingClientRect().bottom-1};c.querySelector('details').open=true;return r})()`);
- report.connection=conn;assert.deepEqual(conn,{primary:true,buttons:['Se connecter avec ChatGPT','Connexion par code','Utiliser ce chemin','Détection automatique'],summary:'Emplacement de Codex',intro:false,belowPath:true});
- await shot('settings-primary-connection-after-light');
- await click('[aria-label="Détail Codex Travail"]');await sleep(150);
- assert.equal(await ev(`document.querySelectorAll('.codex-connection').length`),0,'an additional account has no connection panel');
- // not connected: the full panel sits above the list, never a second one inside the detail
- await open('after',base+'&codexPhase=signed_out');await click('[aria-label="Détail Codex Principal"]');await sleep(150);
- assert.deepEqual(await ev(`({full:document.querySelectorAll('#codex-title').length,embedded:document.querySelectorAll('.codex-connection--embedded').length})`),{full:1,embedded:0});
- // 11. pointed at from the native menu / compact window: Réglages lands on that provider's account or add flow
- const landing=async q=>{await open('after',base+q);return ev(`({open:[...document.querySelectorAll('.claude-accounts__detail')].map(d=>d.id),flows:[...document.querySelectorAll('.add-account__flow')].map(f=>f.closest('section').getAttribute('aria-labelledby')),tab:document.querySelector('[role=tab][aria-selected=true]').id,taken:window.__fixture.calls.filter(c=>c.command==='take_settings_focus').length>0})`);};
- report.landing={
-  codexAccount:await landing('&focus=codex|profile:travail'),
-  claudeAccount:await landing('&focus=claude|work'),
-  claudeAdd:await landing('&focus=claude&focusAdd=1'),
-  codexAdd:await landing('&focus=codex&focusAdd=1'),
-  none:await landing(''),
- };
- assert.deepEqual(report.landing.codexAccount.open,['codex-detail-profile:travail']);assert.deepEqual(report.landing.codexAccount.flows,[]);
- assert.deepEqual(report.landing.claudeAccount.open,['claude-detail-work']);
- assert.deepEqual(report.landing.claudeAdd.flows,['claude-heading']);assert.deepEqual(report.landing.claudeAdd.open,[]);
- assert.deepEqual(report.landing.codexAdd.flows,['codex-heading']);
- assert.deepEqual(report.landing.none,{open:[],flows:[],tab:'tab-providers',taken:true});
- assert.ok(Object.values(report.landing).every(l=>l.tab==='tab-providers'&&l.taken));
+
+ // 8. pointed at from the compact window: Réglages lands on that provider's add flow; an account id opens nothing
+ const landing=async q=>{await open('after',base+q);return ev(`({open:document.querySelectorAll('.claude-accounts__detail').length,flows:[...document.querySelectorAll('.add-account__flow')].map(f=>f.closest('section').getAttribute('aria-labelledby')),tab:document.querySelector('[role=tab][aria-selected=true]').id,taken:window.__fixture.calls.filter(c=>c.command==='take_settings_focus').length>0})`);};
+ report.landing={claudeAdd:await landing('&focus=claude&focusAdd=1'),codexAdd:await landing('&focus=codex&focusAdd=1'),codexAccount:await landing('&focus=codex|profile:travail'),none:await landing('')};
+ assert.deepEqual(report.landing.claudeAdd.flows,['claude-heading']);assert.deepEqual(report.landing.codexAdd.flows,['codex-heading']);
+ assert.deepEqual(report.landing.codexAccount,{open:0,flows:[],tab:'tab-providers',taken:true});
+ assert.deepEqual(report.landing.none,{open:0,flows:[],tab:'tab-providers',taken:true});
  assert.deepEqual(errors,[]);
  fs.writeFileSync(path.join(out,'report.json'),JSON.stringify(report,null,2));console.log('ACCOUNTS_DETAIL_PASS',Object.keys(report).length);
 }finally{clearTimeout(kill);ws?.close();chrome.kill();servers.forEach(s=>s.close());}

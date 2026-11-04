@@ -250,34 +250,6 @@ fn inspect(
     stray
 }
 
-/// Account entries below the panel (same shape as production): « Codex ↗ »,
-/// its accounts (submenu ›), « + Ajouter un compte », then the same for Claude.
-fn account_entries() -> Vec<account_menu::MenuProvider> {
-    let account = |id: &str, name: &str, state: &str, tone: Tone| account_menu::MenuAccount {
-        id: id.into(),
-        name: name.into(),
-        state: state.into(),
-        tone,
-        path: format!("/fixture/{name}"),
-        primary: id == "primary",
-    };
-    vec![
-        account_menu::MenuProvider {
-            kind: "codex",
-            title: "Codex",
-            accounts: vec![
-                account("primary", "Principal", "Connecté", Tone::Good),
-                account("profile:travail", "Travail", "Non connecté", Tone::Warning),
-            ],
-        },
-        account_menu::MenuProvider {
-            kind: "claude",
-            title: "Claude",
-            accounts: vec![account("primary", "Personnel", "Connecté", Tone::Good)],
-        },
-    ]
-}
-
 /// Returns `false` when a stray band was observed in the production variant.
 pub fn menu_tracking_fixture(directory: &str) -> bool {
     use Step::*;
@@ -291,32 +263,7 @@ pub fn menu_tracking_fixture(directory: &str) -> bool {
     let production_bands = Rc::new(Cell::new(0usize));
     // Keyboard: Réglages, dwell with refreshes, then Vérifier les MAJ.
     // Mouse: the same two items reached with posted mouse-moved events.
-    // The account entries come first: the panel is refreshed (same height, then
-    // another height) while « Codex ↗ » and an account row are highlighted.
-    let entries = account_entries();
-    let entries_height: f64 = entries
-        .iter()
-        .map(|p| (2 + p.accounts.len()) as f64 * 24.0 + 11.0)
-        .sum();
     let plan = [
-        Key,
-        Capture("00-codex-usage"),
-        Update(1),
-        Capture("00-codex-usage-tick"),
-        Key,
-        Update(2),
-        Capture("00-account-height"),
-        Key,
-        Update(3),
-        Capture("00-account-back"),
-        Key,
-        Key,
-        Key,
-        Key,
-        Key,
-        Key,
-        Key,
-        Capture("00-last-account-entry"),
         Key,
         Capture("01-reglages"),
         Update(1),
@@ -352,10 +299,8 @@ pub fn menu_tracking_fixture(directory: &str) -> bool {
             let variant = if legacy { "legacy" } else { "production" };
             app.setAppearance(NSAppearance::appearanceNamed(appearance).as_deref());
             let views = scenes(mtm);
-            let (menu, panel) =
-                make_native_quota_menu(mtm, &target, &views[0], None, "fixture", &entries);
+            let (menu, panel) = make_native_quota_menu(mtm, &target, &views[0], None, "fixture");
             let index = Cell::new(0usize);
-            let entries_height2 = entries_height;
             let dir = format!("{directory}/{mode}-{variant}");
             std::fs::create_dir_all(&dir).unwrap();
             let _ = writeln!(report.borrow_mut(), "== {mode} {variant}");
@@ -382,12 +327,7 @@ pub fn menu_tracking_fixture(directory: &str) -> bool {
                                 .unwrap_or(0.0);
                             let panel_h =
                                 panel2.view().map(|v| v.frame().size.height).unwrap_or(0.0);
-                            let y_in = 5.0
-                                + panel_h
-                                + 11.0
-                                + entries_height2
-                                + (item as f64 - 2.0) * 24.0
-                                + 12.0;
+                            let y_in = 5.0 + panel_h + 11.0 + (item as f64 - 2.0) * 24.0 + 12.0;
                             let top = screen_h - (f.origin.y + f.size.height);
                             post_mouse_moved(CGPoint {
                                 x: f.origin.x + f.size.width / 2.0,

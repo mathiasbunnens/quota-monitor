@@ -52,39 +52,33 @@ test('B: the header opens the provider usage page', async () => {
   assert.deepEqual(env.calls.map(c => c.command), ['open_usage_details', 'open_claude_usage']);
 });
 
-test('B: the card shows name, plan badge beside the title, reset, state, then the detail chevron', () => {
+test('B: the card shows name, plan badge beside the title, reset, then the state (no chevron)', () => {
   const html = dash(prefs, tracked, claudes);
   const first = cards(html)[0];
   const title = first.match(/<h3 class="provider-card__title">([\s\S]*?)<\/h3>/)[1];
   assert.match(title, /^<span class="provider-card__name">Principal<\/span><span class="plan-badge">plus<\/span>$/, 'name and badge in one title line');
-  const order = ['provider-card__title', 'reset-chip', 'provider-card__pill', 'aria-label="Détail Codex Principal"'].map(t => first.indexOf(t));
-  assert.ok(order.every(i => i > 0) && order.every((v, i) => i === 0 || v > order[i - 1]), 'title, reset, state, chevron: ' + order);
+  const order = ['provider-card__title', 'reset-chip', 'provider-card__pill'].map(t => first.indexOf(t));
+  assert.ok(order.every(i => i > 0) && order.every((v, i) => i === 0 || v > order[i - 1]), 'title, reset, state: ' + order);
   assert.match(first, /provider-card__pill provider-card__pill--good">Connecté</);
-  assert.doesNotMatch(html, />Détails</, 'the Détails button is replaced by the chevron');
+  assert.doesNotMatch(html, />Détails<|aria-label="Détail|provider-card__chevron|provider-card__details|provider-card__path/, 'no Détails button, no chevron, no detail panel');
   const list = cards(html);
   assert.match(list[2], /provider-card__pill--warning"[^>]*>Non connecté</);
   assert.match(list[3], /provider-card__pill--warning"[^>]*>Même compte</);
   assert.doesNotMatch(list[2], /reset-chip/);
   assert.match(cards(html)[4], /aria-label="Quotas Claude · Principal"/);
-  assert.match(cards(html)[5], /aria-label="Détail Claude Travail"/);
 });
 
-test('B: the chevron opens the detail of THAT account only (its folder), and toggles', () => {
-  const props = { name: 'Travail', provider: 'Codex', badge: 'pro', rows: [], compact: false, now: NOW, state: { label: 'Connecté', tone: 'good', detail: '' }, detail: { path: '/fixtures/.codex-Travail', label: 'Détail Codex Travail' } };
-  const closed = renderToStaticMarkup(component('../quota/ProviderCard.tsx', props, []));
-  assert.match(closed, /<button[^>]*aria-expanded="false"[^>]*aria-label="Détail Codex Travail"/);
-  assert.doesNotMatch(closed, /\.codex-Travail/);
-  // ProviderCard state order: hover, pinned, focused.
-  const open = renderToStaticMarkup(component('../quota/ProviderCard.tsx', props, [false, true, false]));
-  assert.match(open, /aria-expanded="true"/);
-  assert.match(open, /<code[^>]*>\/fixtures\/\.codex-Travail<\/code>/);
-  const tree = component('../quota/ProviderCard.tsx', props, []);
-  const chevron = find(tree, n => n.props?.['aria-label'] === 'Détail Codex Travail');
-  env.changes = []; chevron.props.onClick();
-  assert.ok(env.changes.some(c => c.index === 1), 'toggles the pinned state of this card');
-  // Two accounts: each region shows its own folder.
-  const html = dash(prefs, tracked, claudes);
-  assert.equal((html.match(/aria-label="Détail (Codex |Claude )?[^"]+"/g) || []).length, 6);
+test('B: no card opens a detail: no chevron, no folder, no hover/pinned popover, every limit is on the card', () => {
+  const props = { name: 'Travail', provider: 'Codex', badge: 'pro', now: NOW, state: { label: 'Connecté', tone: 'good', detail: '' },
+    rows: [{ id: 'a', label: 'Codex · 5 heures', remaining: 40, exhausted: false, missing: '', resetText: 'sam. 31 oct., 12:35', resetAt: null },
+      { id: 'b', label: 'Réserve', remaining: 80, exhausted: false, missing: '', resetText: 'mer. 4 nov., 11:00', resetAt: null }] };
+  // Whatever the previous side-by-side flag was, the card shows ALL its rows, each with its reset.
+  const html = renderToStaticMarkup(component('../quota/ProviderCard.tsx', { ...props, compact: true, detail: { path: '/fixtures/.codex-Travail', label: 'Détail' } }, []));
+  assert.doesNotMatch(html, /<button|aria-expanded|\.codex-Travail|provider-card__details/);
+  assert.equal((html.match(/role="progressbar"/g) || []).length, 2);
+  assert.equal((html.match(/Réinitialisation :/g) || []).length, 2);
+  // Dashboard: no detail control of any card.
+  assert.doesNotMatch(dash(prefs, tracked, claudes), /aria-label="Détail|provider-card__chevron/);
 });
 
 test('B: the + at the bottom right of each provider names it, and sits after its cards', () => {
@@ -128,7 +122,7 @@ test('B: a single account per provider keeps header, card, state and + (no « Co
   const html = dash({ ...prefs, codexAccounts: { mode: 'single', selectedId: null, profiles: [] }, claudeAccounts: { mode: 'single', selectedId: null, profiles: [] } }, [tracked[0]], [claudes[0]]);
   assert.equal(groups(html).length, 2);
   assert.deepEqual(text('<section class="provider-card' + cards(html)[0].replace(/^[^>]*>/, '>')).slice(0, 2), ['Principal', 'plus']);
-  assert.match(html, /aria-label="Détail Claude Principal"/);
+  assert.doesNotMatch(html, /Détail/);
 });
 
 test('B: a disabled provider has no group, header or +', () => {

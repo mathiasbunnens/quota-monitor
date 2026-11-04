@@ -1,5 +1,5 @@
 // Dashboard (React, Windows/Linux window): header « Codex ↗ » / « Claude ↗ » per provider, account cards
-// (name + plan on one line, reset, state, chevron), + per provider. Offline: real React views, mocked IPC
+// (name + plan on one line, reset, state; no chevron, no detail), + per provider. Offline: real React views, mocked IPC
 // (scripts/claude-renderer-fixture.mjs), headless Chrome over CDP.
 //   node scripts/claude-renderer-fixture.mjs node_modules/.cache/qm-b
 //   AFTER_SITE=node_modules/.cache/qm-b/site [BEFORE_SITE=…] [SHOTS=dir] node scripts/dashboard-accounts-check.mjs
@@ -40,24 +40,19 @@ try{
 
  // ---- assertions on the new build ----
  await open('after',scenes['multi-compact']);
- const model=await ev(`(()=>{const gs=[...document.querySelectorAll('.provider-group')];return gs.map(g=>{const h=g.querySelector('h2');const cs=[...g.querySelectorAll('.provider-card')];return {heading:h.innerText.trim(),usage:g.querySelectorAll('.provider-card__usage').length,cards:cs.map(c=>{const t=c.querySelector('.provider-card__title');const n=t.querySelector('.provider-card__name').getBoundingClientRect();const b=t.querySelector('.plan-badge')?.getBoundingClientRect();const pill=c.querySelector('.provider-card__pill').getBoundingClientRect();const chev=c.querySelector('.provider-card__chevron').getBoundingClientRect();const reset=c.querySelector('.reset-chip')?.getBoundingClientRect();return {name:t.querySelector('.provider-card__name').textContent,badge:b?t.querySelector('.plan-badge').textContent:null,sameLine:b?Math.abs((b.top+b.height/2)-(n.top+n.height/2))<4:null,pill:c.querySelector('.provider-card__pill').textContent,chevronAfterPill:chev.left>=pill.right-1,resetBeforePill:reset?reset.right<=pill.left+1:null,label:c.querySelector('.provider-card__chevron').getAttribute('aria-label')}}),plus:(()=>{const b=g.querySelector('.add-account__button');const r=b.getBoundingClientRect();const last=cs[cs.length-1].getBoundingClientRect();const gr=g.getBoundingClientRect();return {label:b.getAttribute('aria-label'),below:r.top>=last.bottom-1,right:Math.round(gr.right-r.right)}})()}})})()`);
+ const model=await ev(`(()=>{const gs=[...document.querySelectorAll('.provider-group')];return gs.map(g=>{const h=g.querySelector('h2');const cs=[...g.querySelectorAll('.provider-card')];return {heading:h.innerText.trim(),usage:g.querySelectorAll('.provider-card__usage').length,cards:cs.map(c=>{const t=c.querySelector('.provider-card__title');const n=t.querySelector('.provider-card__name').getBoundingClientRect();const b=t.querySelector('.plan-badge')?.getBoundingClientRect();const pill=c.querySelector('.provider-card__pill').getBoundingClientRect();const reset=c.querySelector('.reset-chip')?.getBoundingClientRect();return {name:t.querySelector('.provider-card__name').textContent,badge:b?t.querySelector('.plan-badge').textContent:null,sameLine:b?Math.abs((b.top+b.height/2)-(n.top+n.height/2))<4:null,pill:c.querySelector('.provider-card__pill').textContent,noChevron:!c.querySelector('.provider-card__chevron,.provider-card__details,.provider-card__path'),resetBeforePill:reset?reset.right<=pill.left+1:null}}),plus:(()=>{const b=g.querySelector('.add-account__button');const r=b.getBoundingClientRect();const last=cs[cs.length-1].getBoundingClientRect();const gr=g.getBoundingClientRect();return {label:b.getAttribute('aria-label'),below:r.top>=last.bottom-1,right:Math.round(gr.right-r.right)}})()}})})()`);
  report.model=model;
  assert.deepEqual(model.map(g=>[g.heading,g.usage]),[['Codex',1],['Claude',1]]);
  assert.deepEqual(model[0].cards.map(c=>c.name),['Principal','Travail','Perso','Alias','detecte']);
  assert.deepEqual(model[1].cards.map(c=>c.name),['Personnel','Travail']);
- for(const g of model){for(const c of g.cards){assert.ok(c.chevronAfterPill,JSON.stringify(c));if(c.badge)assert.equal(c.sameLine,true,'badge beside the title: '+JSON.stringify(c));if(c.resetBeforePill!==null)assert.equal(c.resetBeforePill,true);}assert.ok(g.plus.below&&g.plus.right<=2,JSON.stringify(g.plus));}
+ for(const g of model){for(const c of g.cards){assert.ok(c.noChevron,JSON.stringify(c));if(c.badge)assert.equal(c.sameLine,true,'badge beside the title: '+JSON.stringify(c));if(c.resetBeforePill!==null)assert.equal(c.resetBeforePill,true);}assert.ok(g.plus.below&&g.plus.right<=2,JSON.stringify(g.plus));}
  assert.deepEqual(model[0].cards.map(c=>c.pill),['Connecté','Connecté','Non connecté','Même compte','Connecté']);
  assert.deepEqual(model.map(g=>g.plus.label),['Ajouter un compte Codex','Ajouter un compte Claude']);
  assert.equal(await ev(`[...document.querySelectorAll('.dashboard button')].filter(b=>b.textContent.trim()==='Détails').length`),0,'no « Détails » button');
- // chevron → detail of THAT account only, then closes
- await click('[aria-label="Détail Codex Travail"]');await sleep(150);
- const detail=await ev(`(()=>{const ds=[...document.querySelectorAll('.provider-card__details')];return {count:ds.length,owner:ds[0]?.closest('.provider-card').getAttribute('aria-label'),paths:[...document.querySelectorAll('.provider-card__path')].map(p=>p.textContent),expanded:document.querySelector('[aria-label="Détail Codex Travail"]').getAttribute('aria-expanded')}})()`);
- report.detail=detail;assert.deepEqual(detail,{count:1,owner:'Quotas Codex · Travail',paths:['/fixtures/.codex-travail'],expanded:'true'});
- await shot('dashboard-multi-compact-detail-after-light');
- await click('[aria-label="Détail Claude Travail"]');await sleep(150);
- assert.deepEqual(await ev(`[...document.querySelectorAll('.provider-card__path')].map(p=>p.textContent)`),['/fixtures/.codex-travail','/fixtures/.claude-work']);
- await click('[aria-label="Détail Codex Travail"]');await sleep(100);
- assert.deepEqual(await ev(`[...document.querySelectorAll('.provider-card__path')].map(p=>p.textContent)`),['/fixtures/.claude-work']);
+ // no card has a chevron, a folder path or any detail panel
+await shot('dashboard-multi-compact-nodetail-after-light');
+const nodetail=await ev(`({chevrons:document.querySelectorAll('.provider-card__chevron').length,details:document.querySelectorAll('.provider-card__details').length,paths:document.querySelectorAll('.provider-card__path').length,detailLabels:[...document.querySelectorAll('[aria-label^="Détail"]')].length,expanded:[...document.querySelectorAll('.provider-card [aria-expanded]')].length})`);
+report.nodetail=nodetail;assert.deepEqual(nodetail,{chevrons:0,details:0,paths:0,detailLabels:0,expanded:0});
  // usage arrows: once per provider, opens that provider's page
  await click('#codex-group button');await click('#claude-group button');
  assert.deepEqual((await calls()).map(c=>c[0]),['open_usage_details','open_claude_usage']);
@@ -83,12 +78,25 @@ try{
   const s=await ev(`({groups:document.querySelectorAll('.provider-group').length,usage:document.querySelectorAll('.provider-card__usage').length,plus:document.querySelectorAll('.add-account__button').length,bars:document.querySelectorAll('.provider-card__paired-bars').length>0,overflow:document.documentElement.scrollWidth>window.innerWidth})`);
   assert.deepEqual(s,{groups:2,usage:2,plus:2,bars:expectBars,overflow:false},name);
  }
- // Classique with both providers side by side: the chevron also reveals the limits hidden by the short card, then the folder
+ // Classique with both providers side by side: nothing hides behind a chevron any more, every limit is on its card
  await open('after',scenes['one-classic']);
- await click('[aria-label="Détail Codex Principal"]');await sleep(150);
- const classic=await ev(`(()=>{const d=document.querySelector('.provider-card__details');return {rows:d.querySelectorAll('.provider-row').length,reset:/Réinitialisation/.test(d.innerText),path:d.querySelector('.provider-card__path').textContent,owner:d.closest('.provider-card').getAttribute('aria-label')}})()`);
- report.classic=classic;assert.deepEqual(classic,{rows:1,reset:true,path:'~/.codex',owner:'Quotas Codex · Principal'});
- await shot('dashboard-one-classic-detail-after-light');
+ const classic=await ev(`(()=>{const c=document.querySelector('#codex-group').closest('section').querySelector('.provider-card');return {bars:c.querySelectorAll('[role=progressbar]').length,resets:(c.innerText.match(/Réinitialisation/g)||[]).length,buttons:[...c.querySelectorAll('button')].map(b=>b.className)}})()`);
+ report.classic=classic;assert.equal(classic.bars,2);assert.equal(classic.resets,2);assert.deepEqual(classic.buttons.filter(c=>/chevron/.test(c)),[]);
+ await shot('dashboard-one-classic-after-light');
+ // Compacte: 5 h and 7 j each get their reset line under the bars, with Fable on, off and absent
+ for(const [name,q] of [['fable-on',common+'&scenario=fable&layout=compact'],['fable-off',common+'&scenario=fable&layout=compact&fable=off'],['fable-absent',common+'&scenario=multi&layout=compact']]){
+  await open('after',q);
+  const p=await ev(`[...document.querySelector('#claude-group').closest('section').querySelectorAll('.provider-card')].map(c=>({resets:[...c.querySelectorAll('.provider-card__paired-resets span')].map(s=>s.textContent),countdown:[...c.querySelectorAll('.provider-card__paired-values span')].map(s=>s.textContent),fable:c.querySelectorAll('.provider-row__model-label').length,bars:c.querySelectorAll('[role=progressbar]').length}))`);
+  report['pair-'+name]=p;
+  for(const c of p){assert.equal(c.resets.length,2,name);assert.ok(c.resets.every(t=>/^Réinit\. /.test(t)&&!/non communiquée/.test(t)),name+JSON.stringify(c.resets));assert.ok(c.countdown.every(t=>/\d/.test(t)),name);}
+  assert.deepEqual(p.map(c=>c.fable),name==='fable-on'?[1,1]:[0,0],name);
+  assert.deepEqual(p.map(c=>c.bars),name==='fable-on'?[3,3]:[2,2],name);
+  await shot('dashboard-'+name+'-compact-after-light');
+ }
+ // Codex gets the same reset lines
+ await open('after',scenes['multi-compact']);
+ const cx=await ev(`[...document.querySelector('#codex-group').closest('section').querySelectorAll('.provider-card')].filter(c=>c.querySelector('.provider-card__paired-resets')).map(c=>[...c.querySelectorAll('.provider-card__paired-resets span')].map(s=>s.textContent))`);
+ report.codexResets=cx;assert.ok(cx.length>=2&&cx.every(r=>r.length===2&&r.every(t=>/^Réinit\. /.test(t))||r[1]===''));
  // a signed-out Claude account: state shown on its card
  await open('after',scenes['signedout-compact']);
  assert.equal(await ev(`[...document.querySelectorAll('#claude-group')][0].closest('section').querySelectorAll('.provider-card__pill')[1].textContent`),'Non connecté');

@@ -250,13 +250,31 @@ test('multi card keeps a separate Fable row visible with its model label (nothin
   assert.match(html, /provider-row__model-label">Fable/);
   assert.match(html, /60 %/);
 });
-test('coalesced weekly Fable is the 7 j bar and keeps the Fable name visible', () => {
+test('Compacte: Fable never takes the 7 j slot; both keep their own countdown, reset line and bar', () => {
   const now = Date.parse('2026-10-31T10:00:00Z');
   const html = renderToStaticMarkup(component('./ProviderCard.tsx', { name: 'Claude · Travail', compact: true, accountCompact: true, now,
-    rows: [{ ...rows[0], id: 'claude:five_hour' }, { ...fableRow, resetAt: new Date(now + 80 * 3600000).toISOString() }] }));
-  assert.equal((html.match(/role="progressbar"/g) || []).length, 2);
+    rows: [{ ...rows[0], id: 'claude:five_hour', resetAt: new Date(now + 210 * 60000).toISOString(), resetText: 'sam. 31 oct., 14:30' },
+      { ...rows[1], id: 'claude:seven_day', resetAt: new Date(now + 80 * 3600000).toISOString(), resetText: 'mar. 3 nov., 19:00' },
+      { ...fableRow, resetAt: new Date(now + 80 * 3600000).toISOString() }] }));
+  assert.equal((html.match(/role="progressbar"/g) || []).length, 3);
   assert.match(html, /provider-card__window--week/);
-  assert.match(html, /Fable · 3j 8h/);
+  // 7 j: countdown above its bar and its reset below, whatever Fable reports.
+  assert.match(html, /<span title="[^"]*" aria-label="[^"]*temps restant : 3j 8h">3j 8h<\/span>/);
+  const { pairedResetLabel } = require('./ProviderCard.tsx');
+  const label = (minutes) => pairedResetLabel({ resetAt: new Date(now + minutes * 60000).toISOString(), resetText: 'x' });
+  assert.match(label(210), /^Réinit\. \d\d\/\d\d \d\d:\d\d$/);
+  assert.ok(html.includes('provider-card__paired-resets"><span title="' ) || html.includes('provider-card__paired-resets"><span'));
+  assert.ok(html.includes('>' + label(210) + '</span><span'), 'reset of the 5 h window');
+  assert.ok(html.includes('>' + label(80 * 60) + '</span></div>'), 'reset of the 7 j window');
+  assert.equal(pairedResetLabel({ resetAt: null, resetText: 'non communiquée' }), 'Réinit. non communiquée');
+  assert.doesNotMatch(html, /Fable · /);
+  assert.match(html, /provider-row__model-label">Fable/);
+  // Without any Fable row (switch off / not reported) the pair and its resets are unchanged.
+  const without = renderToStaticMarkup(component('./ProviderCard.tsx', { name: 'Claude', accountCompact: true, now,
+    rows: [{ ...rows[0], id: 'claude:five_hour', resetAt: null, resetText: 'a' }, { ...rows[1], id: 'claude:seven_day', resetAt: null, resetText: 'b' }] }));
+  assert.equal((without.match(/role="progressbar"/g) || []).length, 2);
+  assert.match(without, /Réinit\. a<\/span><span[^>]*>Réinit\. b</);
+  assert.doesNotMatch(without, /Fable/);
 });
 test('Fable preference applies to every multi account card', () => {
   const fable = { id: 'claude:weekly_fable', label: 'Limite hebdomadaire Fable', usedPercent: 40, resetAt: null, availability: 'available', periodDurationSeconds: 604800, exhausted: false };
@@ -283,11 +301,12 @@ test('dashboard hides only invisible multi profiles and never shows disabled Cla
     assert.equal(html.includes('Quotas Claude'), enabled);
   }
 });
-test('Codex compact and expanded cards retain their existing row counts', () => {
+test('Classique cards show every row with its reset, whatever the side-by-side layout (no hidden limits)', () => {
   for (const compact of [true, false]) {
     const html = renderToStaticMarkup(component('./ProviderCard.tsx', { name: 'Codex', rows, compact }));
-    assert.equal((html.match(/role="progressbar"/g) || []).length, compact ? 1 : 4);
-    assert.doesNotMatch(html, /paired-bars/);
+    assert.equal((html.match(/role="progressbar"/g) || []).length, 4);
+    assert.equal((html.match(/Réinitialisation :/g) || []).length, 4);
+    assert.doesNotMatch(html, /paired-bars|<button/);
   }
 });
 test('multi account cards stack on narrow windows (provider groups keep their columns on wide ones)', () => {
@@ -378,13 +397,8 @@ test('Multi: one flat list (name, plan, state, info, visibility switch), then th
   assert.match(html, /prefs-pill--warning" title="[^"]*claude auth login[^"]*">Non connecté/);
   assert.match(html, /prefs-pill--neutral" title="[^"]*">Indisponible/);
   assert.equal((html.match(/aria-label="Renommer /g) || []).length, 3);
-  assert.equal((html.match(/aria-label="Détail /g) || []).length, 3, 'every account has its detail chevron');
+  assert.doesNotMatch(html, /aria-label="Détail|claude-accounts__detail|claude-accounts__path|M6 3\.5 10\.5 8 6 12\.5/, 'no chevron, no detail panel');
   assert.ok(html.indexOf('claude-accounts__add') > html.lastIndexOf('role="switch"'));
-  // The chevron opens the account's detail inline (one level, no sub-panel).
-  const open = renderToStaticMarkup(accountsUx({ prefs: current, accounts: list }, ['', null, false, 'Travail']));
-  assert.match(open, /aria-expanded="true"[^>]*><svg[\s\S]*<div id="claude-detail-Travail" class="claude-accounts__detail" role="group" aria-label="Détail Travail"><code class="claude-accounts__path" title="([^"]+)">\1<\/code><\/div>/);
-  assert.doesNotMatch(open.match(/<div id="claude-detail-Travail"[\s\S]*?<\/div>/)[0], /<p>|claude auth login|Non connecté/, 'the state is on the row, not repeated in the detail');
-  assert.equal((open.match(/class="claude-accounts__detail"/g) || []).length, 1, 'only that account');
 });
 test('inline rename: pencil swaps in a field, Enter saves the trimmed name, Escape cancels', async () => {
   global.window = { requestAnimationFrame: () => 0 };

@@ -186,25 +186,20 @@ test('Codex settings: two followed homes are needed for Unique/Multi; states are
   assert.equal(codexAccountState({ ...principal, phase: 'disabled' })[0], 'Désactivé');
 });
 
-test('Codex settings edits only codexAccounts (visibility, selection, rename) and untracks by id', async () => {
+test('Codex settings edits only codexAccounts (visibility, selection, rename); no removal or detail on a row', async () => {
   let patch;
-  const untracked = [];
-  const tree = codexUx({ onUpdate: async value => { patch = value; return true; }, onUntrack: async id => { untracked.push(id); return true; } }, ['', null, true, null]);
+  const tree = codexUx({ onUpdate: async value => { patch = value; return true; } }, ['', null, true]);
   find(tree, node => node.props?.['aria-label'] === 'Afficher Codex Travail').props.onChange({ target: { checked: false } });
   assert.deepEqual(Object.keys(patch), ['codexAccounts']);
   assert.deepEqual(patch.codexAccounts.profiles, [{ id: travail.id, path: travail.path, name: 'Travail', visible: false }]);
   await find(tree, node => node.type?.name === 'AccountName').props.onSave('Maison');
   assert.deepEqual(Object.keys(patch), ['codexAccounts']);
   assert.equal(patch.codexAccounts.profiles[0].name, 'Maison');
-  // Secondary area (open) keeps only the manual path field; paths and Supprimer live in each detail.
+  // Secondary area (open) keeps only the manual path field; rows carry neither path nor Supprimer.
   const html = renderToStaticMarkup(tree);
   assert.doesNotMatch(html, /Ne plus suivre|Suivre/);
   assert.match(html, /placeholder="\/Users\/nom\/\.codex-travail"/);
-  const detail = codexUx({ onUntrack: async id => { untracked.push(id); return true; } }, ['', null, false, travail.id]);
-  global.window = { requestAnimationFrame: () => 0 };
-  await find(detail, node => String(node.props?.className).includes('claude-accounts__remove')).props.onClick();
-  delete global.window;
-  assert.deepEqual(untracked, [travail.id]);
+  assert.doesNotMatch(html, /Supprimer|claude-accounts__detail|claude-accounts__path|aria-label="Détail/);
   // Unique selection.
   const single = codexUx({ prefs: basePrefs, onUpdate: async value => { patch = value; return true; } });
   find(single, node => node.props?.['aria-label'] === 'Afficher Codex Travail').props.onChange();
@@ -216,7 +211,7 @@ test('Codex settings edits only codexAccounts (visibility, selection, rename) an
 // codexAccountsError, codexActionError.
 const settingsState = (prefs, list) => ['providers', prefs, status, null, null, false, 0, [], null, true, null, list, null, null];
 
-test('Settings: Codex accounts block uses explicit Codex commands; old prefs without codexAccounts default to Unique', async () => {
+test('Settings: Codex accounts block uses the explicit add command; old prefs without codexAccounts default to Unique', async () => {
   invokeCalls = []; stateChanges = []; invokeFailure = null;
   const tree = component('../settings/Settings.tsx', {}, settingsState(basePrefs, [principal, travail]));
   const block = find(tree, node => node.type?.name === 'CodexAccountsSettings');
@@ -225,12 +220,11 @@ test('Settings: Codex accounts block uses explicit Codex commands; old prefs wit
   invokeResult = basePrefs;
   assert.equal(await block.props.onAdd('/fixtures/.codex-new'), true);
   assert.equal(block.props.onFollow, undefined, 'detected homes are followed by the backend, no Follow step');
-  assert.equal(await block.props.onUntrack(travail.id), true);
+  assert.equal(block.props.onUntrack, undefined, 'no removal from the account rows');
   invokeResult = '/fixtures/.codex-picked';
   assert.equal(await block.props.onChooseFolder(), '/fixtures/.codex-picked');
   assert.deepEqual(invokeCalls.map(c => [c.command, c.payload]), [
     ['add_codex_profile', { path: '/fixtures/.codex-new' }],
-    ['untrack_codex_profile', { id: travail.id }],
     ['choose_codex_profile_folder', undefined],
   ]);
   assert.ok(!invokeCalls.some(c => /login|logout|claude/.test(c.command)), 'no login, logout or Claude call');

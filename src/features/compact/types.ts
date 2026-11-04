@@ -36,8 +36,6 @@ export type ProviderKind = "codex" | "claude";
 export type CompactProvider = {
   /** Groups the cards under one provider header; absent in older models. */
   kind?: ProviderKind;
-  /** Account of this card: routes its chevron to its detail in Réglages. */
-  accountId?: string | null;
   /** Account name, the card title under the provider header. */
   accountName?: string | null;
   /** Connection state of that account (Connecté, Non connecté, Même compte…). */

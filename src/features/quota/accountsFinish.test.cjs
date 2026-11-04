@@ -66,46 +66,32 @@ test('A: « Principal » is shown once per row (name with rename), the label onl
   assert.match(renamed.split('<li class="claude-accounts__row"')[1], /<small>Principal<\/small>/);
 });
 
-test('A: the Codex connection (login, executable path) lives in the primary detail, only when connected', () => {
+test('A: no connection block, folder or detail is attached to any account row; the full connection panel stays for a not-ready Codex', () => {
   const marker = 'EXTRA-CONNEXION';
-  const open = (id) => renderToStaticMarkup(list({ detailExtra: (a) => a.primary ? marker : null }, ['', null, false, id]));
-  assert.match(open('primary'), new RegExp(marker));
-  assert.doesNotMatch(open(travail.id), new RegExp(marker));
-  assert.doesNotMatch(open(null), new RegExp(marker));
-  // Settings wires it: embedded connection for the primary when ready; none otherwise (the full panel is shown instead).
-  const wired = (st) => find(settings({ status: st }), n => n.type?.name === 'CodexAccountsSettings').props.detailExtra;
-  const extra = wired(status);
-  assert.equal(typeof extra, 'function');
-  const node = extra(principal);
-  assert.equal(node.props.embedded, true);
-  assert.equal(extra(travail), null);
-  const off = wired({ ...status, phase: 'signed_out' });
-  assert.ok(!off || off(principal) == null);
-});
-
-test('A: the embedded connection keeps login and executable path, without the intro text or the retry button', () => {
-  const html = renderToStaticMarkup(component('../setup/CodexConnection.tsx', { status, onChange() {}, embedded: true }, [null, '', false]));
-  assert.match(html, /Se connecter avec ChatGPT/);
-  assert.match(html, /Connexion par code/);
-  assert.match(html, /Emplacement de Codex/);
-  assert.match(html, /Utiliser ce chemin/);
-  assert.doesNotMatch(html, /Connexion directe à Codex|Les quotas sont lus automatiquement|Réessayer/);
-  const full = renderToStaticMarkup(component('../setup/CodexConnection.tsx', { status, onChange() {} }, [null, '', false]));
-  assert.match(full, /Connexion directe à Codex/);
+  const html = renderToStaticMarkup(list({ detailExtra: () => marker }, ['', null, false]));
+  assert.doesNotMatch(html, new RegExp(marker + '|claude-accounts__detail|Détail|Supprimer'));
+  assert.equal(find(settings({ status }), n => n.type?.name === 'CodexAccountsSettings').props.detailExtra, undefined);
+  const full = (st) => renderToStaticMarkup(settings({ status: st }));
+  assert.doesNotMatch(full(status), /Connexion directe à Codex|codex-connection/, 'connected: no connection block anywhere');
+  assert.match(full({ ...status, phase: 'signed_out' }), /Connexion directe à Codex/, 'not connected: the panel is shown above the accounts');
+  const panel = renderToStaticMarkup(component('../setup/CodexConnection.tsx', { status, onChange() {} }, [null, '', false]));
+  assert.match(panel, /Connexion directe à Codex/);
+  assert.match(panel, /Réessayer/);
+  assert.doesNotMatch(panel, /codex-connection--embedded/);
 });
 
 // ---- Réglages focus from the native menu / compact window (volet C) ----------------------
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-test('C: an account list unfolds the detail of the account it is pointed at, or opens its add flow', () => {
+test('C: an account list opens its add flow when pointed at; nothing else is unfolded', () => {
   global.window = { requestAnimationFrame: fn => { fn(); return 1; } };
   const run = (focus) => {
     env.changes = [];
-    list({ focus }, ['', null, false, null]);
+    list({ focus }, ['', null, false]);
     env.effects.forEach(effect => effect());
     return env.changes.map(c => [c.index, c.value]);
   };
-  assert.deepEqual(run({ accountId: 'profile:Travail', add: false, nonce: 1 }), [[3, 'profile:Travail']]);
+  assert.deepEqual(run({ accountId: 'profile:Travail', add: false, nonce: 1 }), [], 'there is no account detail to unfold any more');
   assert.deepEqual(run({ accountId: null, add: true, nonce: 2 }), [[2, true]]);
   assert.deepEqual(run({ accountId: 'unknown', add: false, nonce: 3 }), [], 'an unknown account changes nothing');
   assert.deepEqual(run(null), []);
