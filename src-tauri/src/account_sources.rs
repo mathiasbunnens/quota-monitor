@@ -10,7 +10,9 @@
 //! user's Unique/Multi mode, custom names, visibility, exclusions and manual
 //! additions; discovery itself never changes the mode. Collection must follow
 //! [`Collect`]: `Inherit` (primary, environment untouched), `Isolated` (child
-//! only, variable set to the raw path) or `Blocked` (listed, never launched).
+//! only, variable set to the raw path), `Credential` (aip profile read over
+//! HTTPS with its own saved credential, see `oauth_usage`) or `Blocked`
+//! (listed, never read).
 use crate::aip;
 use crate::claude_accounts::{identity, normalized, AccountPrefs, Profile};
 use std::path::{Path, PathBuf};
@@ -24,10 +26,9 @@ pub struct Provider {
     /// Whether `~/<base>` is listed as a sibling when the primary is elsewhere
     /// (historical Codex behaviour; Claude never did).
     pub base_is_sibling: bool,
-    /// aip payload file whose presence (never contents) marks a complete profile.
+    /// aip payload file whose presence marks a complete profile (its content
+    /// is only loaded in memory by the collector, see `Collect::Credential`).
     pub aip_payload: &'static str,
-    /// Why an aip profile of this provider cannot be collected by the app.
-    pub aip_blocker: Blocker,
     /// aip's `_current` profile is the account the primary already shows
     /// (Claude: the marker names the keychain's account; Codex: it only selects
     /// the next `aip codex` launch).
@@ -38,7 +39,6 @@ pub const CLAUDE: Provider = Provider {
     prefix: ".claude-",
     base_is_sibling: false,
     aip_payload: aip::CLAUDE_PAYLOAD,
-    aip_blocker: Blocker::SnapshotOnly,
     aip_current_is_primary: true,
 };
 pub const CODEX: Provider = Provider {
@@ -46,7 +46,6 @@ pub const CODEX: Provider = Provider {
     prefix: ".codex-",
     base_is_sibling: true,
     aip_payload: aip::CODEX_PAYLOAD,
-    aip_blocker: Blocker::GrantUnverified,
     aip_current_is_primary: false,
 };
 
@@ -68,13 +67,6 @@ pub enum Origin {
 /// provider module; none of these carries a secret.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Blocker {
-    /// aip Claude profile: a keychain snapshot, not a Claude Code home; reading
-    /// it would need `aip` to switch the active account (never done).
-    SnapshotOnly,
-    /// aip Codex profile: an independent OAuth grant cannot be told apart from
-    /// an imported copy of the primary's without reading `auth.json` (never
-    /// done); launching an imported copy could rotate the primary's token.
-    GrantUnverified,
     /// aip profile folder without its documented payload file (empty/corrupted).
     Incomplete,
 }
@@ -85,7 +77,12 @@ pub enum Collect {
     Inherit,
     /// Runnable home: set the provider variable to the raw path on the child only.
     Isolated,
-    /// Listed and explainable, never launched.
+    /// aip profile: read with the credential saved in the profile folder
+    /// (`raw`), over the provider's usage API, in memory for one request —
+    /// never a child process, never a refresh, never a switch of the active
+    /// account (`oauth_usage`).
+    Credential,
+    /// Listed and explainable, never read.
     Blocked(Blocker),
 }
 
@@ -131,7 +128,8 @@ impl Candidate {
     pub fn isolation(&self) -> Option<&Path> {
         matches!(self.collect, Collect::Isolated).then(|| Path::new(&self.raw))
     }
-    /// Can be read by the app right now (exists, not blocked).
+    /// Can be read by the app right now (exists, not blocked): launched
+    /// (`Inherit`/`Isolated`) or read with its own credential (`Credential`).
     pub fn collectable(&self) -> bool {
         self.available && !matches!(self.collect, Collect::Blocked(_))
     }
@@ -212,25 +210,27 @@ pub fn saved(prefs: &AccountPrefs) -> Vec<Candidate> {
 }
 
 /// aip profiles of this provider (`~/<base>/profiles/<name>`, aip's order).
-/// They are listed with their aip name and the provider's blocker: never
-/// launched by the app. When the primary is the default `~/<base>` and the
-/// provider's `_current` means "the keychain's account", that profile is
-/// marked as the same account as `primary` so it is folded, not duplicated.
+/// They are listed with their aip name and read through their own saved
+/// credential (`Collect::Credential`), never launched as a CLI home; a
+/// profile without its payload is `Blocked(Incomplete)`. When the primary is
+/// the default `~/<base>` and the provider's `_current` means "the keychain's
+/// account", that profile is marked as the same account as `primary` so it is
+/// folded, not duplicated.
 pub fn aip_profiles(home: &Path, provider: &Provider, primary: &Candidate) -> Vec<Candidate> {
     let base = home.join(provider.base);
     let primary_is_base = normalized(&base) == normalized(Path::new(&primary.raw));
     aip::profiles(&base, provider.aip_payload)
         .into_iter()
         .map(|p| {
-            let blocker = if p.complete {
-                provider.aip_blocker
+            let collect = if p.complete {
+                Collect::Credential
             } else {
-                Blocker::Incomplete
+                Collect::Blocked(Blocker::Incomplete)
             };
             let mut c = Candidate::new(
                 p.raw,
                 Origin::Aip { active: p.active },
-                Collect::Blocked(blocker),
+                collect,
                 Some(p.name),
             );
             if p.active && p.complete && primary_is_base && provider.aip_current_is_primary {
@@ -496,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn aip_claude_profiles_are_listed_blocked_and_the_current_one_folds_into_the_primary() {
+    fn aip_claude_profiles_are_readable_by_credential_and_the_current_one_folds_into_the_primary() {
         let h = home("aip-claude");
         std::fs::create_dir_all(h.join(".claude")).unwrap();
         aip_profile(&h, &CLAUDE, "perso", true);
@@ -517,24 +517,28 @@ mod tests {
         assert_eq!(prefs.mode, "single");
         let w = &found[2].candidate;
         assert_eq!(w.origin, Origin::Aip { active: false });
-        assert_eq!(w.collect, Collect::Blocked(Blocker::SnapshotOnly));
-        assert!(w.available && !w.collectable() && w.isolation().is_none());
+        assert_eq!(w.collect, Collect::Credential);
+        assert!(
+            w.available && w.collectable() && w.isolation().is_none(),
+            "readable with its own credential, never launched as a home"
+        );
         assert_eq!(w.raw, work.to_str().unwrap());
         assert_eq!(w.id, identity(&work));
         assert_eq!(
             found[1].candidate.collect,
             Collect::Blocked(Blocker::Incomplete)
         );
-        // Multi: blocked accounts are listed but not displayed until the user asks.
+        // Multi: readable aip profiles are displayed by default like any other
+        // collectable account; the incomplete one is not.
         let found = reconcile(all(&h, &CLAUDE, None, &multi()), &multi());
-        assert_eq!(visible(&found), vec!["Principal"]);
+        assert_eq!(visible(&found), vec!["Principal", "work"]);
         // The sentinel payloads were never opened or changed.
         assert_eq!(
             std::fs::read_to_string(work.join(aip::CLAUDE_PAYLOAD)).unwrap(),
             "SYNTHETIC-SENTINEL"
         );
         // A custom CLAUDE_CONFIG_DIR means the keychain's account is not the
-        // primary: nothing is folded, the current profile stays a blocked entry.
+        // primary: nothing is folded, the current profile is read on its own.
         let custom = h.join("custom");
         std::fs::create_dir_all(&custom).unwrap();
         let found = reconcile(all(&h, &CLAUDE, Some(&custom), &prefs), &prefs);
@@ -545,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn aip_codex_homes_expose_their_raw_path_but_stay_blocked_until_a_grant_is_proven() {
+    fn aip_codex_homes_expose_their_raw_path_and_are_read_by_credential_never_launched() {
         let h = home("aip-codex");
         std::fs::create_dir_all(h.join(".codex")).unwrap();
         std::fs::create_dir_all(h.join(".codex-travail")).unwrap();
@@ -558,17 +562,17 @@ mod tests {
         // `_current` only selects the next `aip codex` launch: no fold.
         assert_eq!(p.origin, Origin::Aip { active: true });
         assert!(found[0].aliases.is_empty());
-        assert_eq!(p.collect, Collect::Blocked(Blocker::GrantUnverified));
+        assert_eq!(p.collect, Collect::Credential);
         assert_eq!(
             p.raw,
             perso.to_str().unwrap(),
-            "raw CODEX_HOME value kept for a future policy"
+            "raw profile folder: where auth.json is loaded from"
         );
         assert!(
-            p.isolation().is_none(),
-            "never launched by the common layer"
+            p.isolation().is_none() && p.collectable(),
+            "never launched by the common layer, read with its credential"
         );
-        assert_eq!(visible(&found), vec!["Principal", "travail"]);
+        assert_eq!(visible(&found), vec!["Principal", "travail", "perso"]);
         // The sibling home is collected as before.
         assert_eq!(found[1].candidate.collect, Collect::Isolated);
         assert_eq!(
@@ -599,11 +603,11 @@ mod tests {
         assert_eq!(names(&found), vec!["Principal", "Boulot", "other"]);
         assert!(found[1].saved && found[1].candidate.origin == Origin::Aip { active: false });
         assert_eq!(found[1].candidate.raw, raw);
+        assert!(found[1].visible, "explicit visibility kept");
         assert!(
-            found[1].visible,
-            "explicit visibility wins over the blocked default"
+            found[2].visible,
+            "readable aip profile shown by default in Multi"
         );
-        assert!(!found[2].visible);
         // Removal is remembered across scans; the primary cannot be removed.
         prefs.exclude(&id);
         prefs.exclude(&found[0].candidate.id);
@@ -647,16 +651,12 @@ mod tests {
             name: "A".into(),
             raw: "/synthetic/a".into(),
             origin: Origin::Aip { active: true },
-            collect: Collect::Blocked(Blocker::SnapshotOnly),
+            collect: Collect::Credential,
             available: true,
             same_account_as: Some("profile:missing".into()),
         };
         let found = reconcile(vec![a.clone()], &multi());
-        assert_eq!(
-            found.len(),
-            1,
-            "no target listed: kept as its own blocked entry"
-        );
+        assert_eq!(found.len(), 1, "no target listed: kept as its own entry");
         assert!(found[0].aliases.is_empty());
         // Renaming an aip profile is delete + save: a new folder is a new identity,
         // the old saved name does not migrate (same rule as moved folders).

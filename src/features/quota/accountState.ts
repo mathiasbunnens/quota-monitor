@@ -10,7 +10,9 @@ export function claudeSnapshotState(s: ClaudeSnapshot, available = true, refresh
   if (refreshing) return ["Actualisation…", "warning", ""];
   if (s.state === "disabled") return ["Désactivé", "neutral", ""];
   if (s.errorKind === "not_signed_in") return ["Non connecté", "warning", s.message || "Profil non connecté dans Claude Code."];
-  if (s.errorKind === "profile_blocked") return ["Non collectable", "neutral", s.message || "Profil détecté, non lisible sans changer de compte actif."];
+  // aip snapshot whose saved token no longer works: actionable, never a quota.
+  if (s.errorKind === "session_expired") return ["Session expirée", "warning", s.message || "Session du profil aip expirée : réactivez-le dans aip pour la renouveler."];
+  if (s.errorKind === "profile_blocked") return ["Non collectable", "neutral", s.message || "Profil aip incomplet, rien à lire."];
   switch (s.state) {
     case "ready": return ["Connecté", "good", ""];
     case "stale": return ["Connecté", "warning", "Dernières valeurs conservées, nouvelle lecture en attente."];
@@ -25,14 +27,15 @@ export function accountState(account: ClaudeAccount): AccountState {
 }
 
 /** State of the primary Codex collector (no account list: older backend). */
-export function codexPhaseState(phase: CodexStatus["phase"] | "unavailable" | "blocked" | undefined, message = ""): AccountState {
+export function codexPhaseState(phase: CodexStatus["phase"] | "unavailable" | "blocked" | "expired" | undefined, message = ""): AccountState {
   switch (phase) {
     case "ready": return ["Connecté", "good", ""];
     case "signed_out": return ["Non connecté", "warning", message || "Dossier non connecté à Codex."];
     case "disabled": return ["Désactivé", "neutral", ""];
     case "missing": return ["Non installé", "neutral", message];
     case "error": return ["Erreur", "error", message || "Lecture impossible : vérifiez Codex CLI."];
-    case "blocked": return ["Non collectable", "neutral", message || "Profil aip détecté, non lu par Quota Monitor."];
+    case "expired": return ["Session expirée", "warning", message || "Session du profil aip expirée : relancez-le avec aip codex pour la renouveler."];
+    case "blocked": return ["Non collectable", "neutral", message || "Profil aip incomplet, rien à lire."];
     default: return ["Connexion…", "warning", ""];
   }
 }

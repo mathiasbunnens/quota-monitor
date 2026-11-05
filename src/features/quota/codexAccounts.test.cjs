@@ -186,14 +186,20 @@ test('Codex settings: two followed homes are needed for Unique/Multi; states are
   assert.equal(codexAccountState({ ...principal, phase: 'disabled' })[0], 'Désactivé');
 });
 
-// ---- aip : home Codex détecté mais non collectable (connexion invérifiable) ----
+// ---- aip : home Codex incomplet (non collectable) et home expiré ----
 test('a blocked aip Codex home reads « Non collectable » with its reason, never as an error', () => {
   const { codexAccountState } = require('../settings/ClaudeAccountsSettings.tsx');
-  const message = 'Profil aip non collectable : Quota Monitor ne peut pas vérifier sans lire ses identifiants qu’il a sa propre connexion (aip codex login).';
+  const message = 'Profil aip incomplet (aucun auth.json) : rien à lire.';
   const blocked = { ...perso, name: 'boulot', path: '/fixtures/.codex/profiles/boulot', tracked: false, phase: 'blocked', message, planType: null, rows: [] };
   assert.deepEqual(codexAccountState(blocked), ['Non collectable', 'neutral', message]);
   assert.equal(codexAccountState({ ...blocked, message: '' })[0], 'Non collectable');
   assert.equal(codexAccountState({ ...blocked, available: false })[0], 'Indisponible');
+  // An aip home read with its own token behaves like any followed home (tracked,
+  // ready with rows) and reads « Session expirée » when its token no longer works.
+  const expired = { ...perso, name: 'perso', path: '/fixtures/.codex/profiles/perso', tracked: true, phase: 'expired', message: 'Session du profil aip « perso » expirée : lancez « aip codex ».', planType: null, rows: [] };
+  assert.deepEqual(codexAccountState(expired), ['Session expirée', 'warning', expired.message]);
+  assert.equal(codexAccountState({ ...expired, message: '' })[0], 'Session expirée');
+  assert.equal(codexAccountState({ ...expired, available: false })[0], 'Indisponible');
   const html = renderToStaticMarkup(codexUx({ accounts: [principal, blocked] }));
   assert.match(html, />Non collectable</);
   assert.doesNotMatch(html, />Erreur</);

@@ -603,14 +603,27 @@ test('compact Fable has no visible caption and keeps accessible details; Classiq
   }
 });
 
-// ---- aip : profil détecté mais non collectable (instantané du trousseau) ----
+// ---- aip : profil incomplet (non collectable) et instantané expiré ----
 test('a blocked aip snapshot reads « Non collectable » with its reason, not as an error', () => {
   const { claudeSnapshotState } = require('./accountState.ts');
-  const message = 'Profil aip : sauvegarde des identifiants du trousseau, pas un dossier Claude Code.';
+  const message = 'Profil aip incomplet (aucune sauvegarde credentials.json) : rien à lire.';
   const blocked = { ...snapshot, state: 'error', errorKind: 'profile_blocked', planType: null, metrics: [], message };
   assert.deepEqual(claudeSnapshotState(blocked), ['Non collectable', 'neutral', message]);
   assert.equal(claudeSnapshotState({ ...blocked, message: '' })[0], 'Non collectable');
   // An unavailable folder still wins; other errors are unchanged.
   assert.equal(claudeSnapshotState(blocked, false)[0], 'Indisponible');
   assert.equal(claudeSnapshotState({ ...blocked, errorKind: 'timeout' })[1], 'error');
+});
+
+test('an aip snapshot whose token expired reads « Session expirée » with its own hint, never a quota', () => {
+  const { claudeSnapshotState } = require('./accountState.ts');
+  const message = 'Session du profil aip « boulot » expirée ou révoquée. Pour la renouveler : « aip switch boulot », lancez Claude Code, puis revenez à votre profil habituel.';
+  const expired = { ...snapshot, state: 'error', errorKind: 'session_expired', planType: null, metrics: [], message };
+  assert.deepEqual(claudeSnapshotState(expired), ['Session expirée', 'warning', message]);
+  assert.equal(claudeSnapshotState({ ...expired, message: '' })[0], 'Session expirée');
+  assert.equal(claudeSnapshotState(expired, false)[0], 'Indisponible');
+  // Other usage-API failures stay ordinary errors with their message.
+  for (const errorKind of ['rate_limited', 'transport', 'http_error', 'malformed', 'forbidden', 'credential_unreadable']) {
+    assert.deepEqual(claudeSnapshotState({ ...expired, errorKind, message: 'x' }), ['Erreur', 'error', 'x'], errorKind);
+  }
 });

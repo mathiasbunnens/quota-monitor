@@ -4,8 +4,10 @@
 //! (inherited `CLAUDE_CONFIG_DIR`, else `~/.claude`), `~/.claude-*` folders,
 //! `aip` profiles (`~/.claude/profiles/<name>`, dqn/aip v0.11.0) and saved
 //! entries. aip Claude profiles are keychain snapshots, not Claude Code homes:
-//! they are listed with their aip name but never launched (`Collect::Blocked`),
-//! and aip's `_current` profile is folded into the primary.
+//! they are listed with their aip name and never launched; the collector
+//! (`claude.rs`) reads them over HTTPS with the token saved in the snapshot
+//! (`Collect::Credential`, see `oauth_usage`), and aip's `_current` profile is
+//! folded into the primary.
 use crate::account_sources::{self, Blocker, Collect, Origin};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -106,8 +108,10 @@ pub struct Discovered {
     pub available: bool,
     pub visible: bool,
     /// How the app may read this account: `Inherit` (primary), `Isolated`
-    /// (child with `CLAUDE_CONFIG_DIR` = `launch`) or `Blocked` (listed and
-    /// explained, never launched: aip credential snapshots).
+    /// (child with `CLAUDE_CONFIG_DIR` = `launch`), `Credential` (aip
+    /// snapshot read over HTTPS with its own saved token, `profile.path` =
+    /// the profile folder) or `Blocked` (listed and explained, never read:
+    /// incomplete aip profile).
     pub collect: Collect,
     pub origin: Origin,
     /// aip profile names folded into this account (aip `_current` = the
@@ -195,9 +199,9 @@ pub fn manual_profile(
 /// User-facing reason of a blocked account (no path, no secret).
 pub fn blocked_message(blocker: Blocker) -> &'static str {
     match blocker {
-        Blocker::SnapshotOnly => "Profil aip : sauvegarde des identifiants du trousseau, pas un dossier Claude Code. Quota Monitor ne change jamais de compte actif : ses quotas sont lus seulement quand ce compte est le compte actif (Principal).",
-        Blocker::Incomplete => "Profil aip incomplet (aucune sauvegarde credentials.json) : rien à lire.",
-        Blocker::GrantUnverified => "Profil non collectable : sa connexion indépendante ne peut pas être vérifiée sans lire ses identifiants.",
+        Blocker::Incomplete => {
+            "Profil aip incomplet (aucune sauvegarde credentials.json) : rien à lire."
+        }
     }
 }
 
@@ -375,8 +379,9 @@ pub fn discover(home: &Path, config: Option<&Path>, prefs: &AccountPrefs) -> Vec
 }
 
 /// A `~/.claude-*` folder or a saved path that resolves into an aip profile
-/// (symlink, alias spelling) is that aip snapshot: it inherits its blocker and
-/// fold, so no spelling of a snapshot is ever launched as a Claude Code home.
+/// (symlink, alias spelling) is that aip snapshot: it inherits its collection
+/// mode (credential read, or blocked when incomplete) and fold, so no spelling
+/// of a snapshot is ever launched as a Claude Code home.
 /// The first spelling keeps its raw path and position (first source wins).
 fn route_through_aip(candidates: &mut [account_sources::Candidate]) {
     let aip: Vec<_> = candidates
@@ -1005,11 +1010,14 @@ mod tests {
         // Background discovery never changes the mode: Unique shows the primary.
         assert_eq!(shown(&found), ["Principal"]);
         assert_eq!(prefs, AccountPrefs::default());
-        // Multi: the non-collectable snapshots are listed but not displayed by default.
+        // Multi: readable aip snapshots are displayed by default like any
+        // collectable account; the incomplete one is listed only.
         assert_eq!(
             shown(&discover(&home, None, &multi())),
-            ["Principal", "work"]
+            ["Principal", "work", "boulot"]
         );
+        assert_eq!(b.collect, Collect::Credential);
+        assert!(b.launch.is_none(), "never a CLAUDE_CONFIG_DIR child");
         // Stable across scans (startup and every refresh rescan the same way).
         let again = discover(&home, None, &prefs);
         assert_eq!(
@@ -1128,8 +1136,9 @@ mod tests {
             "unreadable _current folds nothing"
         );
         assert_eq!(found[1].blocker(), Some(Blocker::Incomplete));
-        assert_eq!(found[2].blocker(), Some(Blocker::SnapshotOnly));
-        assert!(found[1..].iter().all(|a| a.launch.is_none() && !a.visible));
+        assert!(found[1].launch.is_none() && !found[1].visible);
+        assert_eq!(found[2].collect, Collect::Credential);
+        assert!(found[2].launch.is_none() && found[2].visible);
         // `_current` naming a missing profile folds nothing either.
         set_current(&home, "ghost");
         assert!(discover(&home, None, &multi())[0].aliases.is_empty());
@@ -1159,9 +1168,9 @@ mod tests {
         });
         let found = discover(&home, None, &prefs);
         assert_eq!(names(&found), ["Principal", "work", "Boulot", "temp"]);
-        assert!(found[2].visible && found[2].blocker() == Some(Blocker::SnapshotOnly));
+        assert!(found[2].visible && found[2].collect == Collect::Credential);
         // aip rename = new folder = new identity; the saved entry lingers as
-        // unavailable (never launched: read_usage_for refuses a missing dir).
+        // unavailable (never read: the credential file is gone with the folder).
         std::fs::rename(&boulot, aip_dir(&home).join("pro")).unwrap();
         // Unsaved profile deleted by `aip delete`: simply gone.
         std::fs::remove_dir_all(aip_dir(&home).join("temp")).unwrap();
@@ -1171,7 +1180,7 @@ mod tests {
         assert!(!old.available && old.profile.name == "Boulot" && old.visible);
         let pro = after.iter().find(|a| a.profile.name == "pro").unwrap();
         assert_ne!(pro.profile.id, id);
-        assert_eq!(pro.blocker(), Some(Blocker::SnapshotOnly));
+        assert_eq!(pro.collect, Collect::Credential);
         // Removing the stale entry is remembered; the folder stays untouched.
         let next = remove(&home, None, &prefs, &id).unwrap();
         assert_eq!(
@@ -1179,13 +1188,15 @@ mod tests {
             ["Principal", "work", "pro"]
         );
         assert_eq!(next.mode, "multi", "work is still a readable extra");
-        // Removing the last readable extra returns to Unique even with snapshots left.
+        // A readable aip snapshot counts as an extra: removing the sibling keeps Multi.
         let work = identity(&home.join(".claude-work"));
-        let alone = remove(&home, None, &next, &work).unwrap();
-        assert_eq!(alone.mode, "single");
-        // A blocked snapshot can be removed from the list (preference only).
+        let with_pro = remove(&home, None, &next, &work).unwrap();
+        assert_eq!(with_pro.mode, "multi", "pro is still a readable extra");
+        // Removing the last readable extra returns to Unique (preference only,
+        // the folder stays untouched).
         let pro_id = pro.profile.id.clone();
-        let hidden = remove(&home, None, &alone, &pro_id).unwrap();
+        let hidden = remove(&home, None, &with_pro, &pro_id).unwrap();
+        assert_eq!(hidden.mode, "single");
         assert_eq!(names(&discover(&home, None, &hidden)), ["Principal"]);
         assert!(aip_dir(&home)
             .join("pro")
@@ -1219,25 +1230,32 @@ mod tests {
             std::os::unix::fs::symlink(&boulot, home.join(".claude-boulot")).unwrap();
         }
         let found = discover(&home, None, &prefs);
-        // One primary, carrying aip's active profile; one Boulot entry, blocked.
+        // One primary, carrying aip's active profile; one Boulot entry, read
+        // with its own credential (never launched, whatever its spelling).
         assert_eq!(names(&found), ["Principal", "Boulot"]);
         assert_eq!(found[0].aliases, ["Perso"]);
         assert!(found[0].launch.is_none() && found[0].collect == Collect::Inherit);
-        assert_eq!(found[1].blocker(), Some(Blocker::SnapshotOnly));
+        assert_eq!(found[1].collect, Collect::Credential);
         assert!(found[1].launch.is_none());
-        // Exactly one launchable account: the primary.
-        assert_eq!(found.iter().filter(|a| a.blocker().is_none()).count(), 1);
-        // Explicit add of a snapshot (folder picker or detected id): refused
-        // with the reason, preferences unchanged.
+        // Exactly one launchable account (the primary); one credential read.
+        assert_eq!(
+            found
+                .iter()
+                .filter(|a| a.collect != Collect::Credential)
+                .count(),
+            1
+        );
+        // Explicit add of an already displayed snapshot (folder picker or
+        // detected id): same answer as any displayed account, preferences unchanged.
         for target in [
             FollowTarget::Path(boulot.to_str().unwrap()),
             FollowTarget::Detected(&found[1].profile.id),
         ] {
             let err = follow(&home, None, &prefs, target).unwrap_err();
-            assert!(err.contains("aip"), "{err}");
+            assert!(err.contains("déjà affiché"), "{err}");
         }
         // A custom CLAUDE_CONFIG_DIR: the keychain account is not the primary,
-        // so aip's `_current` is no longer folded; it is listed, blocked.
+        // so aip's `_current` is no longer folded; it is listed and read alone.
         let custom = home.join("custom");
         std::fs::create_dir_all(&custom).unwrap();
         let found = discover(&home, Some(&custom), &multi());
@@ -1246,12 +1264,12 @@ mod tests {
             .iter()
             .find(|a| a.origin == Origin::Aip { active: true })
             .unwrap();
-        assert_eq!(current.blocker(), Some(Blocker::SnapshotOnly));
+        assert_eq!(current.collect, Collect::Credential);
         std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
-    fn following_a_real_profile_with_aip_snapshots_around_keeps_them_hidden_and_unsaved() {
+    fn following_a_real_profile_with_aip_snapshots_around_treats_them_like_siblings() {
         let home = fresh("follow");
         std::fs::create_dir_all(home.join(".claude-work")).unwrap();
         aip_profile(&home, "boulot", true);
@@ -1260,8 +1278,16 @@ mod tests {
         let next = follow(&home, None, &prefs, FollowTarget::Detected(&work)).unwrap();
         assert_eq!(next.mode, "multi");
         assert_eq!(shown(&discover(&home, None, &next)), ["Principal", "work"]);
-        assert!(next.profiles.iter().all(|p| !p.path.contains("profiles")));
-        // With only snapshots besides it, a chosen folder is the single account.
+        // Leaving Unique keeps the other readable accounts hidden instead of
+        // defaulting them visible (same rule as a `~/.claude-*` sibling).
+        let saved_aip = next
+            .profiles
+            .iter()
+            .find(|p| p.path.contains("profiles"))
+            .expect("the readable aip snapshot is saved hidden like a sibling");
+        assert!(!saved_aip.visible);
+        // A readable snapshot is a usable second account: a chosen folder
+        // joins it in Multi.
         let solo = fresh("follow-solo");
         aip_profile(&solo, "boulot", true);
         let extra = solo.join("extra");
@@ -1274,8 +1300,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            next.mode, "single",
-            "a blocked snapshot is not a usable second account"
+            next.mode, "multi",
+            "a readable snapshot is a usable second account"
         );
         std::fs::remove_dir_all(home).unwrap();
         std::fs::remove_dir_all(solo).unwrap();

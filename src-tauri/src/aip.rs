@@ -12,7 +12,9 @@
 //!
 //! This module only lists directory names and the presence of files. It never
 //! opens `credentials.json`, `auth.json` or `aip-imported-refresh.sha256`,
-//! never writes anything and never calls the `aip` executable.
+//! never writes anything and never calls the `aip` executable. Loading a
+//! profile's credential in memory for one usage read is the collector's job
+//! (`oauth_usage`), which never writes it back either.
 use std::path::{Path, PathBuf};
 
 pub const PROFILES_DIR: &str = "profiles";

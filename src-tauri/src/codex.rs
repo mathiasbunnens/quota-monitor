@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -227,7 +227,10 @@ impl Provider {
     pub fn reconcile(&self, app: &tauri::AppHandle) {
         let prefs = crate::prefs::current(app);
         let wanted: Vec<_> = if prefs.codex_enabled {
-            collection_plan(discovered(app, &prefs))
+            let found = discovered(app, &prefs);
+            let mut plan = collection_plan(found.clone());
+            plan.extend(credential_plan(found));
+            plan
         } else {
             vec![]
         };
@@ -237,7 +240,7 @@ impl Provider {
             let mut store = self.store.lock().unwrap();
             extras.retain(|id, handle| {
                 let keep = wanted.iter().any(|a| {
-                    &a.profile.id == id && a.launch.as_deref() == Some(handle.launch.as_path())
+                    &a.profile.id == id && Transport::of(a) == Some(handle.transport.clone())
                 });
                 if !keep {
                     // Worker exits within 250 ms; dropping its session stops the child.
@@ -252,14 +255,15 @@ impl Provider {
                     continue;
                 }
                 changed = true;
-                let launch = a.launch.clone().expect("followed extra has a launch home");
+                let transport = Transport::of(a).expect("planned extra has a transport");
                 let generation = store.register(&a.profile.id);
                 let shared = Arc::new(Shared::default());
                 let (tx, rx) = mpsc::channel();
                 let worker = ExtraWorker {
                     id: a.profile.id.clone(),
                     generation,
-                    launch: launch.clone(),
+                    transport: transport.clone(),
+                    usage_base: crate::oauth_usage::CODEX_USAGE_BASE.into(),
                     shared: shared.clone(),
                     store: self.store.clone(),
                     executable: {
@@ -286,7 +290,14 @@ impl Provider {
                     first_poll: Instant::now() + Duration::from_secs(2 * index as u64 + 1),
                 };
                 std::thread::spawn(move || run_extra(worker, rx));
-                extras.insert(a.profile.id.clone(), ExtraHandle { shared, tx, launch });
+                extras.insert(
+                    a.profile.id.clone(),
+                    ExtraHandle {
+                        shared,
+                        tx,
+                        transport,
+                    },
+                );
             }
         }
         if changed {
@@ -1134,7 +1145,27 @@ impl AccountStore {
 struct ExtraHandle {
     shared: Arc<Shared>,
     tx: Sender<ExtraAction>,
-    launch: PathBuf,
+    transport: Transport,
+}
+/// How one additional account is read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Transport {
+    /// Own `codex app-server` child with `CODEX_HOME` = the raw followed value.
+    AppServer { launch: PathBuf },
+    /// aip home: `auth.json` loaded in memory, one HTTPS usage read, no child
+    /// process, no refresh (`oauth_usage`).
+    Credential { home: PathBuf },
+}
+impl Transport {
+    fn of(a: &crate::codex_accounts::Discovered) -> Option<Self> {
+        match (&a.credential, &a.launch) {
+            (Some(home), _) => Some(Self::Credential { home: home.clone() }),
+            (None, Some(launch)) => Some(Self::AppServer {
+                launch: launch.clone(),
+            }),
+            (None, None) => None,
+        }
+    }
 }
 enum ExtraAction {
     Refresh,
@@ -1144,8 +1175,10 @@ enum ExtraAction {
 pub(crate) struct ExtraWorker {
     id: String,
     generation: u64,
-    /// Raw followed value, set as CODEX_HOME on this child only.
-    launch: PathBuf,
+    transport: Transport,
+    /// Usage-API base for `Transport::Credential` (`CODEX_USAGE_BASE` in
+    /// production, a loopback server in tests).
+    usage_base: String,
     shared: Arc<Shared>,
     store: Arc<Mutex<AccountStore>>,
     executable: Box<dyn Fn() -> Option<PathBuf> + Send>,
@@ -1161,15 +1194,141 @@ fn signed_out_message(launch: &std::path::Path) -> String {
     )
 }
 
+/// Floor between two usage-API reads of one aip home (per-token rate limit).
+const CREDENTIAL_MIN_SECS: u64 = 120;
+/// Pause after an HTTP 429 without `retry-after`.
+const CREDENTIAL_RATE_LIMITED_SECS: u64 = 900;
+
+/// Read-only polling of one aip home over the usage API with the token saved
+/// in its `auth.json`: no child process, no login, no refresh, no reset. The
+/// answer goes through the same `normalize` as app-server's rate limits and
+/// the same identity fingerprint as `account/read`.
+fn poll_credential(w: &ExtraWorker, home: &Path, failures: &mut u32) -> (Reading, Duration) {
+    use crate::oauth_usage::ReadError;
+    let now = || Some(chrono::Utc::now().to_rfc3339());
+    let floor =
+        |plan: Option<&str>| Duration::from_secs((w.interval)(plan).max(CREDENTIAL_MIN_SECS));
+    let backoff = |failures: u32| {
+        Duration::from_secs((15 * (1 << failures)).max((w.interval)(None).max(CREDENTIAL_MIN_SECS)))
+    };
+    // aip's own name is the canonical folder (a `~/.codex-*` link into the
+    // profiles folder keeps its spelling, not its name).
+    let aip_name = crate::claude_accounts::normalized(home)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "profil".into());
+    let read = crate::oauth_usage::read_codex_home(
+        home,
+        &w.usage_base,
+        crate::oauth_usage::DEFAULT_TIMEOUT,
+        chrono::Utc::now().timestamp(),
+    );
+    match read {
+        Ok(usage) => match normalize(&usage.rate_limits) {
+            Ok(rows) => {
+                *failures = 0;
+                let delay = floor(usage.plan_type.as_deref());
+                let mut reading = Reading::new(
+                    "ready",
+                    if rows.is_empty() {
+                        "Connecté à ChatGPT. Aucune fenêtre de quota n’est disponible pour ce compte."
+                    } else {
+                        "Quotas lus via l’API d’usage ChatGPT avec la sauvegarde du profil aip."
+                    },
+                );
+                reading.plan_type = usage.plan_type;
+                reading.identity = account_fingerprint(&json!({
+                    "account": {"email": usage.email},
+                    "workspaceRouting": {"chatgptAccountId": usage.account_id},
+                }));
+                reading.available_resets = available_resets(&usage.rate_limits);
+                reading.rows = Some(rows);
+                reading.last_checked = now();
+                (reading, delay)
+            }
+            Err(error) => {
+                *failures = (*failures + 1).min(4);
+                let mut reading = Reading::new("error", &error);
+                reading.last_checked = now();
+                (reading, backoff(*failures))
+            }
+        },
+        Err(err) => {
+            let switch = crate::claude::shell_word(&aip_name);
+            let (phase, message, delay) = match err {
+                ReadError::CredentialUnreadable => (
+                    "error",
+                    format!("Fichier auth.json du profil aip « {aip_name} » illisible. Refaites « aip save codex {switch} » depuis ce compte."),
+                    floor(None),
+                ),
+                ReadError::NoToken => (
+                    "signed_out",
+                    format!("Profil aip « {aip_name} » sans jeton ChatGPT (clé API ou déconnecté) : sélectionnez-le dans aip puis « aip codex login »."),
+                    floor(None).max(Duration::from_secs(120)),
+                ),
+                ReadError::Expired | ReadError::Unauthorized => (
+                    "expired",
+                    format!("Session du profil aip « {aip_name} » expirée ou révoquée : sélectionnez-le dans aip puis lancez « aip codex » (ou « aip codex login ») pour la renouveler. Quota Monitor ne rafraîchit jamais un jeton."),
+                    floor(None).max(Duration::from_secs(300)),
+                ),
+                ReadError::Forbidden => (
+                    "error",
+                    format!("ChatGPT refuse la lecture des quotas du profil aip « {aip_name} » (HTTP 403)."),
+                    floor(None),
+                ),
+                ReadError::RateLimited(retry) => (
+                    "error",
+                    format!("Trop de lectures pour « {aip_name} » : l’API d’usage impose une pause, nouvelle tentative plus tard."),
+                    Duration::from_secs(retry.unwrap_or(CREDENTIAL_RATE_LIMITED_SECS).clamp(60, 3600)),
+                ),
+                ReadError::Timeout | ReadError::Transport => {
+                    *failures = (*failures + 1).min(4);
+                    (
+                        "error",
+                        format!("Lecture des quotas de « {aip_name} » impossible (réseau ou délai dépassé)."),
+                        backoff(*failures),
+                    )
+                }
+                ReadError::Http(code) => {
+                    *failures = (*failures + 1).min(4);
+                    (
+                        "error",
+                        format!("API ChatGPT : HTTP {code} pour « {aip_name} »."),
+                        backoff(*failures),
+                    )
+                }
+                ReadError::Malformed => (
+                    "error",
+                    format!("Réponse d’usage ChatGPT illisible pour « {aip_name} »."),
+                    floor(None),
+                ),
+                ReadError::InsecureBase => (
+                    "error",
+                    "Adresse de l’API d’usage refusée (HTTPS requis).".into(),
+                    floor(None),
+                ),
+            };
+            let mut reading = Reading::new(phase, &message);
+            reading.last_checked = now();
+            (reading, delay)
+        }
+    }
+}
+
 /// Read-only polling of one additional environment: `account/read`
 /// (`refreshToken:false`), then `account/rateLimits/read` for a ChatGPT
 /// account only. Never logs in/out, never redeems a reset, never starts a
-/// turn. A signed-out home (`account: null`) is reported as such.
+/// turn. A signed-out home (`account: null`) is reported as such. An aip home
+/// (`Transport::Credential`) is read by [`poll_credential`] instead.
 fn poll_extra(
     w: &ExtraWorker,
     session: &mut Option<Session>,
     failures: &mut u32,
 ) -> (Reading, Duration) {
+    let launch = match &w.transport {
+        Transport::Credential { home } => return poll_credential(w, home, failures),
+        Transport::AppServer { launch } => launch,
+    };
     let now = || Some(chrono::Utc::now().to_rfc3339());
     let backoff = |failures: u32, base: u64| Duration::from_secs((15 * (1 << failures)).max(base));
     if session.is_none() {
@@ -1182,7 +1341,7 @@ fn poll_extra(
                 Duration::from_secs(60),
             );
         };
-        match Session::start_in(&exe, w.shared.clone(), Some(&w.launch)) {
+        match Session::start_in(&exe, w.shared.clone(), Some(launch)) {
             Ok(value) => *session = Some(value),
             Err(error) => {
                 *failures = (*failures + 1).min(4);
@@ -1235,7 +1394,7 @@ fn poll_extra(
         Ok(None) => {
             // A new session later picks up a login made outside the app.
             *session = None;
-            let mut reading = Reading::new("signed_out", &signed_out_message(&w.launch));
+            let mut reading = Reading::new("signed_out", &signed_out_message(launch));
             reading.last_checked = now();
             (reading, Duration::from_secs((w.interval)(None).max(120)))
         }
@@ -1258,6 +1417,13 @@ fn run_extra(w: ExtraWorker, rx: Receiver<ExtraAction>) {
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(ExtraAction::Refresh) => next_poll = Instant::now(),
             Ok(ExtraAction::Redeem(key, reply)) => {
+                if matches!(w.transport, Transport::Credential { .. }) {
+                    // Read-only transport: no reset is ever spent for an aip home.
+                    let _ = reply.send(Err(
+                        "Réinitialisation indisponible pour un profil aip (lecture seule).".into(),
+                    ));
+                    continue;
+                }
                 let ready = w
                     .store
                     .lock()
@@ -1336,6 +1502,24 @@ pub(crate) fn collection_plan(
         .into_iter()
         .filter(|a| {
             !a.primary && a.tracked && a.available && a.blocker.is_none() && a.launch.is_some()
+        })
+        .take(crate::codex_accounts::MAX_EXTRA)
+        .collect()
+}
+/// aip homes read with their own credential, in discovery order (bounded
+/// apart from the app-server children): never launched, never the primary.
+pub(crate) fn credential_plan(
+    found: Vec<crate::codex_accounts::Discovered>,
+) -> Vec<crate::codex_accounts::Discovered> {
+    found
+        .into_iter()
+        .filter(|a| {
+            !a.primary
+                && a.tracked
+                && a.available
+                && a.blocker.is_none()
+                && a.launch.is_none()
+                && a.credential.is_some()
         })
         .take(crate::codex_accounts::MAX_EXTRA)
         .collect()
@@ -1775,7 +1959,10 @@ done
         let worker = ExtraWorker {
             id: id.into(),
             generation,
-            launch: launch.to_path_buf(),
+            transport: Transport::AppServer {
+                launch: launch.to_path_buf(),
+            },
+            usage_base: crate::oauth_usage::CODEX_USAGE_BASE.into(),
             shared: shared.clone(),
             store: store.clone(),
             executable: Box::new(move || Some(exe.clone())),
@@ -1992,8 +2179,16 @@ done
         let plan = collection_plan(found.clone());
         assert_eq!(
             plan.iter().map(|a| a.launch.clone()).collect::<Vec<_>>(),
-            [Some(work.clone()), Some(PathBuf::from(&manual))],
-            "only the ordinary home and the 3.2.0 manual entry get a child"
+            [Some(work.clone())],
+            "only the ordinary home gets a child; every aip spelling is read by credential"
+        );
+        assert_eq!(
+            credential_plan(found.clone())
+                .iter()
+                .map(|a| a.credential.clone().unwrap())
+                .collect::<Vec<_>>(),
+            [home.join(".codex-boulot-link"), PathBuf::from(&manual)],
+            "raw spellings kept for the credential reads"
         );
         let store = Arc::new(Mutex::new(AccountStore::default()));
         // Startup then one refresh: same plan, re-read.
@@ -2019,13 +2214,13 @@ done
                 .lines()
                 .map(|l| l.split('|').nth(1).unwrap())
                 .collect();
-            let mut expected = vec![work.to_str().unwrap(), manual.as_str()];
-            expected.sort();
-            assert_eq!(homes.into_iter().collect::<Vec<_>>(), expected, "{calls}");
-            // Auto-discovered aip homes (and their symlinked spelling): never.
-            for name in ["boulot", "vide"] {
-                assert!(!calls.contains(&format!("profiles/{name}")), "{calls}");
-            }
+            assert_eq!(
+                homes.into_iter().collect::<Vec<_>>(),
+                [work.to_str().unwrap()],
+                "{calls}"
+            );
+            // aip homes (auto-discovered, symlinked spelling, saved by hand): never.
+            assert!(!calls.contains(crate::aip::PROFILES_DIR), "{calls}");
             assert!(!calls.contains(".codex-boulot-link"), "{calls}");
             for line in calls.lines() {
                 let method = line.split('|').next().unwrap();
@@ -2053,7 +2248,8 @@ done
             handle.join().unwrap();
         }
         result.unwrap();
-        // Listed with their aip name (saved name wins), explained, never read.
+        // Listed with their aip name (saved name wins); the incomplete one is
+        // explained and never read, the others are credential-read accounts.
         let views: Vec<CodexAccount> = found
             .iter()
             .cloned()
@@ -2067,20 +2263,22 @@ done
             views[1].profile.path,
             home.join(".codex-boulot-link").to_str().unwrap()
         );
-        for v in views
-            .iter()
-            .filter(|v| ["boulot", "vide"].contains(&v.profile.name.as_str()))
-        {
-            assert_eq!(v.phase, "blocked", "{}", v.profile.name);
-            assert!(!v.tracked && v.rows.is_empty() && v.plan_type.is_none());
-            assert!(v.message.contains("aip"), "{}", v.message);
-            assert!(redeem_route(&views, &v.profile.id).is_err());
-        }
+        let vide = views.iter().find(|v| v.profile.name == "vide").unwrap();
+        assert_eq!(vide.phase, "blocked");
+        assert!(!vide.tracked && vide.rows.is_empty() && vide.plan_type.is_none());
+        assert!(vide.message.contains("aip"), "{}", vide.message);
+        assert!(redeem_route(&views, &vide.profile.id).is_err());
+        let boulot = views.iter().find(|v| v.profile.name == "boulot").unwrap();
+        assert!(
+            boulot.tracked && boulot.phase == "starting",
+            "{}",
+            boulot.phase
+        );
         let perso = views.iter().find(|v| v.profile.name == "Perso").unwrap();
         assert_eq!(perso.profile.path, manual, "raw saved path kept");
         assert!(
             perso.tracked && perso.phase != "blocked",
-            "3.2.0 manual entry"
+            "saved entry kept, read by credential"
         );
         assert!(
             found
@@ -2100,6 +2298,290 @@ done
         // Nothing changed: environment, aip files, aip's selected profile.
         assert_eq!(std::env::var_os("CODEX_HOME"), env_before);
         assert_eq!(tree(&profiles), aip_before);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn spawn_credential(
+        store: &Arc<Mutex<AccountStore>>,
+        id: &str,
+        home: &std::path::Path,
+        base: &str,
+        exe: &std::path::Path,
+    ) -> (
+        Arc<Shared>,
+        Sender<ExtraAction>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let generation = store.lock().unwrap().register(id);
+        let shared = Arc::new(Shared::default());
+        let (tx, rx) = mpsc::channel();
+        let exe = exe.to_path_buf();
+        let worker = ExtraWorker {
+            id: id.into(),
+            generation,
+            transport: Transport::Credential {
+                home: home.to_path_buf(),
+            },
+            usage_base: base.into(),
+            shared: shared.clone(),
+            store: store.clone(),
+            executable: Box::new(move || Some(exe.clone())),
+            interval: Box::new(|_| 3600),
+            changed: Box::new(|| {}),
+            first_poll: Instant::now(),
+        };
+        (
+            shared,
+            tx,
+            std::thread::spawn(move || run_extra(worker, rx)),
+        )
+    }
+
+    /// End to end on the new path: two aip Codex homes with synthetic
+    /// ChatGPT tokens are read by their own worker over a loopback usage API,
+    /// each with its own bearer and account header, into the same store the
+    /// UI reads from; the fake CLI is never launched; a copy of the primary's
+    /// account is flagged as the same account; session errors are specific;
+    /// a reset is refused on this read-only transport.
+    #[cfg(unix)]
+    #[test]
+    fn aip_homes_are_read_over_the_usage_api_with_their_own_tokens_without_any_child() {
+        use crate::oauth_usage::test_support::{jwt, Reply, Server};
+        let root = scratch("aip-http");
+        let (exe, log) = fake_codex(&root);
+        let home = root.join("home");
+        let profiles = home.join(".codex").join(crate::aip::PROFILES_DIR);
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let auth = |name: &str, email: &str, account: &str, exp: i64| {
+            let dir = profiles.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            let claims = json!({"email": email, "https://api.openai.com/auth": {"chatgpt_account_id": account, "chatgpt_plan_type": "plus"}});
+            let access = jwt(
+                &json!({"exp": exp, "https://api.openai.com/auth": {"chatgpt_account_id": account}}),
+            );
+            fs::write(
+                dir.join(crate::aip::CODEX_PAYLOAD),
+                json!({"OPENAI_API_KEY": null, "tokens": {"id_token": jwt(&claims), "access_token": access,
+                    "refresh_token": format!("SYNTHETIC-REFRESH-{name}"), "account_id": account},
+                    "last_refresh": "2026-01-01T00:00:00Z"})
+                .to_string(),
+            )
+            .unwrap();
+            dir
+        };
+        let perso = auth("perso", "perso@example.invalid", "acct-perso", now + 600);
+        let copy = auth("copy", "same@example.invalid", "acct-same", now + 600);
+        let stale = auth("stale", "old@example.invalid", "acct-old", now - 5);
+        fs::write(profiles.join(crate::aip::CURRENT_MARKER), "perso\n").unwrap();
+        let tree_before: Vec<_> = ["perso", "copy", "stale"]
+            .iter()
+            .map(|n| fs::read(profiles.join(n).join(crate::aip::CODEX_PAYLOAD)).unwrap())
+            .collect();
+        let prefs = crate::claude_accounts::AccountPrefs {
+            mode: "multi".into(),
+            ..Default::default()
+        };
+        let found = crate::codex_accounts::discover(&home, None, &prefs);
+        assert!(
+            collection_plan(found.clone()).is_empty(),
+            "no child for aip homes"
+        );
+        let plan = credential_plan(found.clone());
+        assert_eq!(
+            plan.iter()
+                .map(|a| a.credential.clone().unwrap())
+                .collect::<Vec<_>>(),
+            [copy.clone(), perso.clone(), stale.clone()]
+        );
+        let body = |used: u32| {
+            format!(
+                r#"{{"plan_type":"pro","rate_limit":{{"allowed":true,"limit_reached":false,
+                  "primary_window":{{"used_percent":{used},"limit_window_seconds":18000,"reset_after_seconds":60,"reset_at":{}}},
+                  "secondary_window":{{"used_percent":9,"limit_window_seconds":604800,"reset_after_seconds":60,"reset_at":{}}}}},
+                  "rate_limit_reset_credits":{{"available_count":1,"credits":[]}}}}"#,
+                now + 3600,
+                now + 86400
+            )
+        };
+        // Two answers in start order (copy, perso); stale never asks.
+        let server = Server::start(vec![
+            Reply::json(200, &body(40)),
+            Reply::json(200, &body(70)),
+        ]);
+        let store = Arc::new(Mutex::new(AccountStore::default()));
+        let mut workers = vec![];
+        for a in &plan {
+            workers.push(spawn_credential(
+                &store,
+                &a.profile.id,
+                a.credential.as_deref().unwrap(),
+                &server.base,
+                &exe,
+            ));
+            std::thread::sleep(Duration::from_millis(150)); // deterministic request order
+        }
+        let ids: Vec<&str> = plan.iter().map(|a| a.profile.id.as_str()).collect();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for(&store, &ids);
+            let requests = server.requests();
+            assert_eq!(requests.len(), 2, "{requests:?}");
+            let auths: Vec<_> = requests
+                .iter()
+                .map(|r| {
+                    (
+                        Server::header(r, "chatgpt-account-id").unwrap(),
+                        Server::header(r, "authorization")
+                            .unwrap()
+                            .starts_with("Bearer eyJ"),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                auths,
+                [
+                    ("acct-same".to_string(), true),
+                    ("acct-perso".to_string(), true)
+                ]
+            );
+            assert!(requests.iter().all(|r| r.starts_with("GET /wham/usage ")));
+            let reading = |id: &str| store.lock().unwrap().get(id).unwrap().0;
+            let c = reading(ids[0]);
+            assert_eq!(
+                (c.phase.as_str(), c.plan_type.as_deref()),
+                ("ready", Some("pro"))
+            );
+            let rows = c.rows.clone().unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_eq!((rows[0].remaining, rows[0].window_minutes), (60, Some(300)));
+            assert_eq!(
+                (rows[1].remaining, rows[1].window_minutes),
+                (91, Some(10080))
+            );
+            assert_eq!(c.available_resets, Some(1));
+            assert!(c.identity.is_some());
+            let p = reading(ids[1]);
+            assert_eq!(p.rows.as_ref().unwrap()[0].remaining, 30);
+            assert_ne!(
+                p.identity, c.identity,
+                "distinct accounts, distinct identities"
+            );
+            let s = reading(ids[2]);
+            assert_eq!(s.phase, "expired", "{}", s.message);
+            assert!(
+                s.rows.is_none() && s.plan_type.is_none(),
+                "no invented quota"
+            );
+            assert!(s.message.contains("aip codex"), "{}", s.message);
+            assert!(!s.message.contains("eyJ") && !s.message.contains("SYNTHETIC"));
+            // A reset is refused on the read-only transport, nothing sent.
+            let (reply_tx, reply_rx) = mpsc::channel();
+            workers[0]
+                .1
+                .send(ExtraAction::Redeem("key".into(), reply_tx))
+                .unwrap();
+            let refused = reply_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(refused.is_err(), "{refused:?}");
+            assert_eq!(server.requests().len(), 2);
+            // The copy of the primary's account is flagged, never added up.
+            let primary_identity =
+                account_fingerprint(&json!({"account": {"email": "Same@Example.invalid"}}));
+            let mut views: Vec<CodexAccount> = found
+                .iter()
+                .cloned()
+                .map(|d| {
+                    let slot = store.lock().unwrap().get(&d.profile.id);
+                    account_view(
+                        d,
+                        true,
+                        Some(&PrimaryView {
+                            status: Status {
+                                phase: "ready".into(),
+                                ..Status::default()
+                            },
+                            rows: vec![],
+                            identity: primary_identity,
+                        }),
+                        slot,
+                    )
+                })
+                .collect();
+            mark_duplicates(&mut views);
+            let copy_view = views.iter().find(|v| v.profile.name == "copy").unwrap();
+            assert_eq!(copy_view.duplicate_of.as_deref(), Some("Principal"));
+            assert_eq!(crate::account_menu::codex_state(copy_view).0, "Même compte");
+            let perso_view = views.iter().find(|v| v.profile.name == "perso").unwrap();
+            assert!(perso_view.duplicate_of.is_none() && perso_view.phase == "ready");
+            assert_eq!(perso_view.rows.len(), 2, "pair of windows displayed");
+            let stale_view = views.iter().find(|v| v.profile.name == "stale").unwrap();
+            assert_eq!(
+                crate::account_menu::codex_state(stale_view).0,
+                "Session expirée"
+            );
+            assert!(stale_view.rows.is_empty() && stale_view.available_resets.is_none());
+            assert!(redeem_route(&views, &stale_view.profile.id).is_err());
+        }));
+        for (shared, _, _) in &workers {
+            shared.stop.store(true, Ordering::Release);
+        }
+        for (_, tx, handle) in workers {
+            drop(tx);
+            handle.join().unwrap();
+        }
+        result.unwrap();
+        // Nothing launched, nothing written, selection untouched.
+        assert!(!log.exists() || fs::read_to_string(&log).unwrap().is_empty());
+        let tree_after: Vec<_> = ["perso", "copy", "stale"]
+            .iter()
+            .map(|n| fs::read(profiles.join(n).join(crate::aip::CODEX_PAYLOAD)).unwrap())
+            .collect();
+        assert_eq!(tree_after, tree_before);
+        assert_eq!(
+            fs::read_to_string(profiles.join(crate::aip::CURRENT_MARKER)).unwrap(),
+            "perso\n"
+        );
+        // Error classification of later reads, on one worker: 401 → expired,
+        // 429 → error with the provider's pause, 5xx → error with backoff.
+        let server = Server::start(vec![
+            Reply::json(401, "{}"),
+            Reply::json(429, "{}").with_header("retry-after", "120"),
+            Reply::json(503, "oops"),
+            Reply::json(200, "not json"),
+        ]);
+        let worker = ExtraWorker {
+            id: "x".into(),
+            generation: 0,
+            transport: Transport::Credential {
+                home: perso.clone(),
+            },
+            usage_base: server.base.clone(),
+            shared: Arc::new(Shared::default()),
+            store: Arc::new(Mutex::new(AccountStore::default())),
+            executable: Box::new(|| None),
+            interval: Box::new(|_| 60),
+            changed: Box::new(|| {}),
+            first_poll: Instant::now(),
+        };
+        let mut failures = 0;
+        let (r, _) = poll_credential(&worker, &perso, &mut failures);
+        assert_eq!(r.phase, "expired");
+        let (r, delay) = poll_credential(&worker, &perso, &mut failures);
+        assert_eq!(
+            (r.phase.as_str(), delay),
+            ("error", Duration::from_secs(120))
+        );
+        let (r, delay) = poll_credential(&worker, &perso, &mut failures);
+        assert!(
+            r.phase == "error" && r.message.contains("503") && delay >= Duration::from_secs(120)
+        );
+        let (r, _) = poll_credential(&worker, &perso, &mut failures);
+        assert!(
+            r.phase == "error" && r.message.contains("illisible"),
+            "{}",
+            r.message
+        );
+        assert!(r.rows.is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2190,6 +2672,7 @@ done
             available,
             visible,
             blocker: None,
+            credential: None,
         }
     }
     fn ready(identity: u64, used: f64) -> Reading {

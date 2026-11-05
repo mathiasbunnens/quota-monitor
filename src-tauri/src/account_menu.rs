@@ -14,8 +14,11 @@ pub fn claude_state(account: &claude::AccountSnapshot) -> (String, Tone) {
         ("Désactivé", Tone::Neutral)
     } else if s.error_kind == Some("not_signed_in") {
         ("Non connecté", Tone::Warning)
+    } else if s.error_kind == Some("session_expired") {
+        // aip snapshot whose saved token no longer works: actionable, no quota.
+        ("Session expirée", Tone::Warning)
     } else if s.error_kind == Some("profile_blocked") {
-        // Detected (aip snapshot) but never read by design: not an error.
+        // Detected (incomplete aip profile) but never read by design: not an error.
         ("Non collectable", Tone::Neutral)
     } else {
         match s.state {
@@ -44,7 +47,9 @@ pub fn codex_state(account: &codex::CodexAccount) -> (String, Tone) {
             "disabled" => ("Désactivé", Tone::Neutral),
             "missing" => ("Non installé", Tone::Neutral),
             "error" => ("Erreur", Tone::Error),
-            // Detected aip home, never read by design: not an error.
+            // aip home whose saved token no longer works: actionable, no quota.
+            "expired" => ("Session expirée", Tone::Warning),
+            // Incomplete aip home, never read by design: not an error.
             "blocked" => ("Non collectable", Tone::Neutral),
             _ => ("Connexion…", Tone::Warning),
         }
@@ -121,8 +126,9 @@ mod tests {
             available,
             visible: true,
             blocker: Some(blocker),
+            credential: None,
         };
-        for blocker in [Blocker::GrantUnverified, Blocker::Incomplete] {
+        for blocker in [Blocker::Incomplete] {
             let view = codex::account_view(found(blocker, true), true, None, None);
             assert_eq!(view.phase, "blocked");
             assert!(view.rows.is_empty() && view.plan_type.is_none());
@@ -132,9 +138,9 @@ mod tests {
             );
         }
         // A deleted folder still reads « Indisponible »; Codex disabled wins.
-        let gone = codex::account_view(found(Blocker::GrantUnverified, false), true, None, None);
+        let gone = codex::account_view(found(Blocker::Incomplete, false), true, None, None);
         assert_eq!(codex_state(&gone).0, "Indisponible");
-        let off = codex::account_view(found(Blocker::GrantUnverified, true), false, None, None);
+        let off = codex::account_view(found(Blocker::Incomplete, true), false, None, None);
         assert_eq!(codex_state(&off).0, "Désactivé");
     }
 }

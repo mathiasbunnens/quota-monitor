@@ -15,6 +15,7 @@ mod menu_fixture;
 #[cfg(target_os = "macos")]
 pub use menu_fixture::menu_tracking_fixture;
 mod ntfy;
+pub mod oauth_usage;
 mod prefs;
 mod settings_focus;
 #[cfg(target_os = "macos")]
@@ -2930,6 +2931,7 @@ pub fn quota_ui_smoke(directory: &str) {
             available: true,
             visible: true,
             blocker: None,
+            credential: None,
         };
         let reading = codex::Reading {
             phase: phase.into(),
@@ -4239,6 +4241,7 @@ mod tests {
             available: true,
             visible,
             blocker: None,
+            credential: None,
         };
         let status = codex::Status {
             phase: "ready".into(),
