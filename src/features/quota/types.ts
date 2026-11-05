@@ -54,7 +54,7 @@ export type CodexAccount = ClaudeProfile & {
   tracked: boolean;
   available: boolean;
   refreshing: boolean;
-  phase: CodexStatus["phase"] | "unavailable";
+  phase: CodexStatus["phase"] | "unavailable" | "blocked";
   message: string;
   planType: string | null;
   lastChecked: string | null;

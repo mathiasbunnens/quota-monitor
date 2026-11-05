@@ -602,3 +602,15 @@ test('compact Fable has no visible caption and keeps accessible details; Classiq
     assert.doesNotMatch(classic, /window--fable|fable-caption/);
   }
 });
+
+// ---- aip : profil détecté mais non collectable (instantané du trousseau) ----
+test('a blocked aip snapshot reads « Non collectable » with its reason, not as an error', () => {
+  const { claudeSnapshotState } = require('./accountState.ts');
+  const message = 'Profil aip : sauvegarde des identifiants du trousseau, pas un dossier Claude Code.';
+  const blocked = { ...snapshot, state: 'error', errorKind: 'profile_blocked', planType: null, metrics: [], message };
+  assert.deepEqual(claudeSnapshotState(blocked), ['Non collectable', 'neutral', message]);
+  assert.equal(claudeSnapshotState({ ...blocked, message: '' })[0], 'Non collectable');
+  // An unavailable folder still wins; other errors are unchanged.
+  assert.equal(claudeSnapshotState(blocked, false)[0], 'Indisponible');
+  assert.equal(claudeSnapshotState({ ...blocked, errorKind: 'timeout' })[1], 'error');
+});

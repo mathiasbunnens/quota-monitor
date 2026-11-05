@@ -186,6 +186,25 @@ test('Codex settings: two followed homes are needed for Unique/Multi; states are
   assert.equal(codexAccountState({ ...principal, phase: 'disabled' })[0], 'Désactivé');
 });
 
+// ---- aip : home Codex détecté mais non collectable (connexion invérifiable) ----
+test('a blocked aip Codex home reads « Non collectable » with its reason, never as an error', () => {
+  const { codexAccountState } = require('../settings/ClaudeAccountsSettings.tsx');
+  const message = 'Profil aip non collectable : Quota Monitor ne peut pas vérifier sans lire ses identifiants qu’il a sa propre connexion (aip codex login).';
+  const blocked = { ...perso, name: 'boulot', path: '/fixtures/.codex/profiles/boulot', tracked: false, phase: 'blocked', message, planType: null, rows: [] };
+  assert.deepEqual(codexAccountState(blocked), ['Non collectable', 'neutral', message]);
+  assert.equal(codexAccountState({ ...blocked, message: '' })[0], 'Non collectable');
+  assert.equal(codexAccountState({ ...blocked, available: false })[0], 'Indisponible');
+  const html = renderToStaticMarkup(codexUx({ accounts: [principal, blocked] }));
+  assert.match(html, />Non collectable</);
+  assert.doesNotMatch(html, />Erreur</);
+  // Nothing to display or select: no visibility switch / Unique pick for it.
+  assert.doesNotMatch(html, /aria-label="Afficher Codex boulot"/);
+  const multiHtml = renderToStaticMarkup(codexUx({ prefs: { ...basePrefs, codexAccounts: { mode: 'multi', selectedId: null, profiles: [] } }, accounts: [principal, travail, blocked] }));
+  assert.match(multiHtml, /aria-label="Afficher Codex Travail"/);
+  assert.doesNotMatch(multiHtml, /aria-label="Afficher Codex boulot"/);
+  assert.match(multiHtml, />Non collectable</);
+});
+
 test('Codex settings edits only codexAccounts (visibility, selection, rename); no removal or detail on a row', async () => {
   let patch;
   const tree = codexUx({ onUpdate: async value => { patch = value; return true; } }, ['', null, true]);

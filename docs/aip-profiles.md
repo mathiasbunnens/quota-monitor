@@ -1,0 +1,128 @@
+# Profils `aip` — format confirmé et socle commun de découverte
+
+Branche `feature/auto-detect-aip`, base `3258db791af61088dcdc210b083f53b74d5d6773` (= 3.2.0). Carte t_95e04459 (socle) ; les cartes t_0d0fab7c (Claude) et t_80e3e779 (Codex) branchent ce socle dans `claude_accounts.rs` / `codex_accounts.rs`.
+
+## 1. Quel outil, quel format (sources officielles)
+
+- **Produit** : `aip` — « AI Profile Manager for Claude Code and Codex CLI », dépôt <https://github.com/dqn/aip>, crate <https://crates.io/crates/aip-cli> (`cargo install aip-cli`). Version la plus récente au 2026-11-05 : **0.11.0**, tag `v0.11.0`, révision `3961fa05f7e040edb2ab5cf5866fd57b0b6bab78` (commit « chore: release 0.11.0 », 2026-10-13 ; crates.io `max_version` 0.11.0). Les attachments de la carte racine t_bac59a7f (`aip-3961fa0-README.md`, `aip-3961fa0-codex-profile.rs`) sont à cette révision ; `src/tool.rs`, `src/config.rs`, `src/claude/profile.rs` ont été relus à la même révision.
+- **Autre produit homonyme écarté** : `bartekczyz/ai-profiles` (révision `1650f8197dbf5d75aadca6e9787dd227c3d3a738`) range ses profils sous `~/Library/Application Support/ai-profiles/profiles/<id>/cli-config`. L'utilisateur a précisé « c'est dans le home pour les 2 » : seul `aip` range Claude et Codex dans `~/.claude` et `~/.codex`. L'intégration vise donc `aip` ; `ai-profiles` n'est pas détecté.
+- **Emplacements** (`src/tool.rs` : `Tool::home_dir` = `dirs::home_dir()/.claude` ou `/.codex`, **sans tenir compte de `CLAUDE_CONFIG_DIR` / `CODEX_HOME`**) :
+  - profils : `~/.claude/profiles/<nom>/`, `~/.codex/profiles/<nom>/` ;
+  - `<nom>` : ASCII alphanumérique, `-`, `_` ; `_current` et `_order` réservés ;
+  - `profiles/_current` : nom du profil sélectionné (texte) ; `profiles/_order` : ordre du tableau de bord (une ligne par nom, le reste alphabétique) ;
+  - configuration d'affichage : `~/Library/Application Support/aip/config.json` (sans profil).
+- **Claude** (`src/claude/profile.rs`) : `credentials.json` = **instantané du trousseau macOS** (service `Claude Code-credentials`). `aip switch` écrit ce fichier dans le trousseau et met `_current` à jour. Un profil n'est **pas** un home Claude Code : aucun `CLAUDE_CONFIG_DIR` ne peut le lire, et `_current` désigne le compte que le trousseau (donc le compte principal, variable absente) utilise déjà.
+- **Codex** (`src/codex/profile.rs`) : `auth.json` = home `CODEX_HOME` complet. `aip save codex` copie `~/.codex/auth.json` dans le profil et consigne l'empreinte SHA-256 du refresh token dans `aip-imported-refresh.sha256`. `aip codex …` lance `codex` avec `CODEX_HOME`/`CODEX_SQLITE_HOME` = profil et **refuse de démarrer tant que le refresh token est encore celui importé** : il faut `aip codex login` une fois pour un grant OAuth indépendant (sinon le refresh du profil pourrait révoquer le token de la session d'origine). `_current` ne sélectionne que le prochain lancement `aip codex` ; `codex` nu et l'app Codex ne le suivent pas.
+- **Fournisseurs pris en charge** : Claude Code et Codex CLI, macOS uniquement (trousseau via `security`).
+
+## 2. État local (métadonnées seulement, 2026-11-05)
+
+`test -e` uniquement : `~/.claude` et `~/.codex` présents ; `~/.claude/profiles`, `~/.codex/profiles`, `~/Library/Application Support/aip`, `~/.cargo/bin/aip` absents ; `aip` absent du PATH ; `CLAUDE_CONFIG_DIR` et `CODEX_HOME` non définis dans l'environnement de travail. **Aucune installation aip n'est prouvée** ; aucun fichier d'identifiants n'a été ouvert ; rien n'a été écrit. Les tests utilisent exclusivement des dossiers synthétiques sous le répertoire temporaire avec des sentinelles `SYNTHETIC-SENTINEL`.
+
+## 3. Conclusions d'isolation
+
+| | Détectable | Chemin brut d'isolation | Collectable par l'app |
+| --- | --- | --- | --- |
+| Claude `_current` | oui | — | **c'est le compte principal** : replié dans le principal (alias), jamais collecté deux fois |
+| Claude autre profil | oui | — (instantané, pas un home) | **non** : lecture impossible sans `aip switch` (interdit) ni copie d'identifiants (interdite) → `Blocked(SnapshotOnly)` |
+| Codex profil | oui | `~/.codex/profiles/<nom>` (valeur `CODEX_HOME` brute, conservée) | **non par défaut** : grant indépendant invérifiable sans lire `auth.json` → `Blocked(GrantUnverified)` ; voir §5 |
+| Profil sans payload | oui | — | non → `Blocked(Incomplete)` |
+
+Heuristique étudiée puis rejetée pour Codex : comparer les mtime de `aip-imported-refresh.sha256`, des liens symboliques créés par `share_settings` et d'`auth.json`. Une réimportation (`aip save`) réécrit marqueur puis `auth.json` dans le même ordre qu'un login, un `aip codex login` abandonné laisse les liens sans nouveau token : ce n'est pas une preuve. Un fichier marqueur vide (profil par clé API) n'est pas non plus exploitable sans connaître le type d'auth.
+
+## 4. Socle commun (`src-tauri/src/aip.rs`, `src-tauri/src/account_sources.rs`)
+
+- `aip::profiles(base, payload)` : liste `<base>/profiles/<nom>` dans l'ordre d'aip (`_order` puis alphabétique), `active` (= `_current`, nom valide et existant), `complete` (présence du payload, jamais ouvert). Gestionnaire absent, dossier vide, fichier à la place du dossier, marqueur binaire/trop grand/traversée, noms invalides → ignorés sans erreur. Bornes : marqueurs ≤ 4 096 octets.
+- `account_sources` — **contrat** pour les deux workers :
+  - `Candidate { id, name, raw, origin, collect, available, same_account_as }` ; `id` = `claude_accounts::identity(chemin canonique)` (même schéma `profile:<hex>` que les préférences actuelles, donc exclusions/noms existants s'appliquent) ; `raw` = chaîne brute (valeur de lancement, jamais canonicalisée, sauf principal) ;
+  - `Origin::{Primary, Sibling, Manual, Aip { active }}` ;
+  - `Collect::{Inherit, Isolated, Blocked(Blocker)}` avec `Blocker::{SnapshotOnly, GrantUnverified, Incomplete}` ; `Candidate::isolation()` ne renvoie un chemin que pour `Isolated` — **toujours matcher `collect` avant de lancer** (`None` vaut aussi pour `Blocked`, qui ne doit jamais être poll-é comme le principal) ;
+  - producteurs : `primary(home, provider, env)`, `siblings(home, provider)`, `aip_profiles(home, provider, &primary)`, `saved(prefs)`, `all(...)` (ordre de priorité : principal, frères `~/.x-*`, aip, enregistrés) ;
+  - `reconcile(candidates, prefs) -> Vec<Resolved>` : une entrée par identité (première source gagnante), exclusions conservées (jamais le principal), entrée enregistrée = nom + visibilité + chemin brut, repli `same_account_as` en `aliases`, visibilité par défaut d'un compte non enregistré = principal ou (Multi **et** collectable), Unique = compte sélectionné s'il est listé sinon principal. **Le mode n'est jamais modifié.** `Resolved::profile()` rend la forme `Profile` que les Réglages éditent.
+  - `Provider` : `CLAUDE` (`.claude`, `.claude-`, payload `credentials.json`, `SnapshotOnly`, `_current` = principal si et seulement si le principal est `~/.claude`) et `CODEX` (`.codex`, `.codex-`, `~/.codex` listé comme frère quand `CODEX_HOME` est ailleurs, payload `auth.json`, `GrantUnverified`, `_current` sans repli).
+- **Parité prouvée** : `parity_with_the_existing_claude_and_codex_discovery` compare `reconcile(all(...))` à `claude_accounts::discover` et `codex_accounts::discover` (ids, noms, chemins, disponibilité, visibilité, valeur de lancement) en Unique et Multi, avec entrées enregistrées et `CODEX_HOME` personnalisé. Les workers peuvent remplacer le corps de `discover` par le socle ou n'ajouter que `aip_profiles` ; `MAX_EXTRA` Codex reste à leur charge.
+
+### Ce que les workers doivent faire (hors de ce socle)
+
+- Claude (`claude_accounts.rs`, `claude.rs`) : étendre `Discovered` avec l'état `collect`/motif ; **ne jamais passer un `Blocked` à `poll_profile`** (son `launch: None` serait interprété comme principal) ; afficher l'alias aip du principal si utile ; message utilisateur pour `SnapshotOnly` (« profil aip : instantané, quotas lisibles seulement pour le compte actif »).
+- Codex (`codex_accounts.rs`, `codex.rs`) : les candidats `Aip` restent hors du `reconcile` des enfants tant que `collect` vaut `Blocked` ; message pour `GrantUnverified` ; toute politique qui ferait passer un profil aip en `Isolated` doit être décidée (voir §5), testée avec un faux CLI et documentée — jamais via `aip codex`, ni en lisant `auth.json`.
+- Les deux : conserver `excluded`, noms, visibilité et ajouts manuels ; un profil aip supprimé disparaît (non enregistré) ou reste « Indisponible » (enregistré), comme un dossier frère ; renommage aip = suppression + sauvegarde = nouvelle identité.
+
+## 5. Question bloquante pour la suite (décision produit)
+
+Pour Codex, trois options honnêtes, aucune ne peut être tranchée par le code :
+
+1. **Rester `Blocked(GrantUnverified)`** : profils aip Codex listés, jamais lus (sûr, non fonctionnel).
+2. **Opt-in explicite par profil** (interrupteur « Lire ce profil » dans la ligne existante) après que l'utilisateur confirme avoir fait `aip codex login` : contredit « sans bouton d'import/suivre » mais c'est le seul moyen d'obtenir la garantie sans lire de secret.
+3. **Traiter les homes aip comme `~/.codex-*`** (collecte isolée automatique) : risque documenté par aip lui-même de rotation du token de la session principale si le profil est une copie non relogguée.
+
+Le socle expose le chemin brut pour que l'option retenue soit un changement local au worker Codex.
+
+## 6. Vérifications exécutées (synthétiques)
+
+- `cargo test --offline --locked --lib -- account_sources:: aip:: accounts::` : 32 réussis (11 nouveaux + 21 existants).
+- `cargo test --offline --locked --lib` : **166 réussis, 0 échec, 5 ignorés** (155 avant la carte).
+- `rustfmt` appliqué aux deux nouveaux fichiers seulement ; `cargo build --offline --locked` sans avertissement issu de ces fichiers.
+- Aucune UI, aucun `npm`, aucun lancement d'app, aucun commit.
+
+## 7. Intégration Claude (carte t_0d0fab7c)
+
+Fichiers : `src-tauri/src/claude_accounts.rs`, `src-tauri/src/claude.rs`, `src-tauri/src/account_menu.rs` (libellé natif), `src/features/quota/accountState.ts` (libellé React, une ligne) et `claudeProfiles.test.cjs`. Ni `account_sources.rs`, ni `aip.rs`, ni Codex, ni `prefs.rs` modifiés.
+
+- **Découverte** : `claude_accounts::discover` = `reconcile(all(home, &CLAUDE, CLAUDE_CONFIG_DIR, prefs))`. Elle est appelée par `accounts()` et `refresh_live()` : démarrage (premier tick du watcher), chaque rafraîchissement périodique/manuel et chaque lecture des comptes. Aucun bouton, aucun « Suivre ». Sans aip, résultat identique à 3.2.0 (`legacy_discover` conservé en test, comparaison en Unique/Multi, sélection, exclusions, alias, `CLAUDE_CONFIG_DIR` personnalisé).
+- **Affichage** : chaque profil aip apparaît sous son nom aip, identité `profile:<hex du chemin canonique>` (stable entre redémarrages, mêmes règles que tout dossier), chemin brut conservé ; nom/visibilité enregistrés et exclusions respectés ; masqué par défaut en Multi, jamais de passage automatique en Multi.
+- **Compte actif** : le profil `_current` est replié dans le Principal (`Discovered::aliases`), jamais une seconde entrée ni une seconde collecte, y compris quand il est aussi enregistré ou atteint via un lien `~/.claude-*` (`route_through_aip`). Avec `CLAUDE_CONFIG_DIR` personnalisé, il n'est pas replié (le trousseau n'est pas le principal) et reste un profil bloqué.
+- **Collecte** : `Collect::Blocked` n'est jamais lancé : filtré par `collection_plan` (boucle de `refresh_live`), refusé par `poll_profile` et par `collect` (défense en profondeur, `Err("profile_blocked")`). Toute autre orthographe du même dossier (lien symbolique, chemin enregistré) hérite du blocage. Le Principal hérite de l'environnement inchangé ; les dossiers `~/.claude-*`/manuels reçoivent `CLAUDE_CONFIG_DIR` = chemin brut sur l'enfant seulement (inchangé).
+- **État honnête** : `stored_view` → `state = "error"`, `errorKind = "profile_blocked"`, aucun quota ni plan, message (« Profil aip : sauvegarde des identifiants du trousseau, pas un dossier Claude Code… » ou « Profil aip incomplet… »). Le libellé de ligne existant devient « Non collectable » (ton neutre) dans le menu natif et dans React ; le message apparaît par le détail existant.
+- **Ajout explicite** : `follow` (chemin ou id détecté) refuse un profil aip bloqué avec la raison ; un profil bloqué ne compte pas comme « second compte utilisable » (pas de Multi pour lui) et n'est pas enregistré masqué en quittant Unique. `remove` le retire de la liste (préférence seule) ; Unique revient quand il ne reste aucun compte lisible ou affiché.
+- **Renommage/suppression aip** : nouveau dossier = nouvelle identité ; une entrée enregistrée de l'ancien reste « Indisponible » (jamais lancée : `read_usage_for` refuse un dossier absent), une entrée non enregistrée disparaît.
+
+Limites : aucune installation aip réelle testée (absente de cette machine) ; le repli `_current` → Principal suppose que le trousseau n'a pas été changé hors aip (`claude /login` sans `aip switch` rend `_current` obsolète : seul l'alias est alors faux, aucune collecte supplémentaire) ; l'alias n'est pas affiché (aucun champ ajouté à `AccountSnapshot` pour ne pas toucher les fixtures communes) ; quotas d'un profil aip non actif illisibles par conception.
+
+Vérifications (synthétiques, faux homes temporaires, faux CLI) :
+- RED 1 — test de découverte écrit avant le code : `cargo test --offline --locked --lib -- claude_accounts::tests::aip_` → échec `left: ["Principal", "work"]`, `right: ["Principal", "work", "boulot", "vide"]`.
+- RED 2 — branchement naïf (découverte seule, sans garde) : `cargo test … -- aip_` → le faux CLI est lancé 8 fois au lieu de 4 (`<unset>` ×3 par passe : les profils aip relus avec l'environnement du Principal).
+- GREEN — `cargo test --offline --locked --lib` : **174 réussis, 0 échec, 5 ignorés** ; `node --test src/features/quota/claudeProfiles.test.cjs` : 45/45 ; `tsc -p tsconfig.json --noEmit` : 0 erreur ; `rustfmt --check` propre sur les trois fichiers Rust touchés (bases propres).
+
+## 8. Intégration Codex (carte t_80e3e779)
+
+Décision appliquée (commentaire orchestrateur, question produit §5 toujours sans réponse) : **option 1 seulement** — détection automatique + état « Non collectable », jamais de collecte, ni opt-in actif, ni auto-collecte. Le code est prêt pour un opt-in par profil sans refonte : il suffirait de transformer `Discovered::blocker` en `None` avec `launch` = chemin brut (`Candidate.raw`, déjà conservé).
+
+Fichiers : `src-tauri/src/codex_accounts.rs` (découverte, `follow`/`untrack`, tests), `src-tauri/src/codex.rs` (`collection_plan`, `account_view`, test faux CLI), `src-tauri/src/account_menu.rs` (bras `"blocked"` de `codex_state` + test), `src-tauri/src/lib.rs` (bras `"blocked"` de `codex_panel` ; `blocker: None` dans 2 fixtures de test), `src-tauri/src/ntfy.rs` (`blocker: None` dans 1 fixture de test), `src/features/quota/types.ts` (phase `"blocked"`), `src/features/quota/accountState.ts` (libellé), `src/features/settings/ClaudeAccountsSettings.tsx` (pas d'interrupteur/choix Unique pour une ligne `blocked`), `src/features/quota/codexAccounts.test.cjs`. Ni `account_sources.rs`, ni `aip.rs`, ni `prefs.rs`, ni les fichiers Claude modifiés.
+
+- **Découverte** : `codex_accounts::discover` = `reconcile(all(home, &CODEX, CODEX_HOME, prefs))` + borne `MAX_EXTRA` historique (comptée sur les seuls comptes lançables : les profils aip n'en consomment pas). Appelée par `accounts()` (chaque construction du panneau natif et publication des quotas, dès le démarrage) et par `discovered()` → `Provider::reconcile` (chaque `get_codex_accounts` des Réglages/Dashboard et chaque modification de préférences, points d'appel inchangés) : aucun import ni « Suivre ». Sans aip, résultat **identique** à 3.2.0 (`legacy_discover` conservé en test ; comparaison exhaustive Unique/Multi × sélection × `CODEX_HOME` personnalisé, avec exclusions, alias symbolique, chemin enregistré avec séparateur final, dossier disparu et 10 frères > `MAX_EXTRA`).
+- **Profils aip** : listés sous leur nom aip, identité `profile:<hex du chemin canonique>`, chemin brut conservé ; `tracked = false`, `launch = None`, `blocker = Some(GrantUnverified | Incomplete)`. `_current` n'est **pas** replié dans le Principal (il ne sélectionne que le prochain `aip codex`). aip ignorant `CODEX_HOME`, les profils restent ceux de `~/.codex/profiles` même quand le principal est ailleurs.
+- **Doublons** : un frère `~/.codex-*` qui est un lien vers un profil aip devient ce profil (nom aip, bloqué, chemin brut et place du lien, `route_through_aip`) ; un chemin enregistré (autre orthographe, séparateur final) d'un profil aip est ce profil (nom/visibilité enregistrés gardés). **Corrigé par t_e09acc7f** : une entrée enregistrée (home sous `~/.codex/profiles` ajouté à la main en 3.2.0, ou lien `~/.codex-*` renommé/masqué en 3.2.0) garde son comportement 3.2.0 — suivie, enfant `app-server` propre avec `CODEX_HOME` = chemin brut enregistré (voir §9).
+- **Collecte** : `codex::collection_plan` (seule source de `Provider::reconcile`) exige `tracked && available && blocker.is_none() && launch.is_some()` ; un bloqué n'a jamais d'enfant `app-server`. Le Principal hérite de l'environnement inchangé ; les autres homes reçoivent `CODEX_HOME` = chemin brut sur l'enfant seulement (inchangé).
+- **État honnête** : `account_view` → `phase = "blocked"`, message (« Profil aip non collectable : Quota Monitor ne peut pas vérifier sans lire ses identifiants qu’il a sa propre connexion (aip codex login) ; le lire pourrait déconnecter le compte principal. » / « Profil aip incomplet (aucun auth.json) : rien à lire. »), aucun quota, plan, réinitialisation ni notification ; jamais de carte de quotas (visibilité effective `false`, la préférence enregistrée est conservée). Libellé « Non collectable » (ton neutre) natif et React ; « Indisponible » reste prioritaire pour un dossier supprimé ; « Désactivé » quand Codex est coupé. Dans les Réglages, la ligne apparaît avec son état et sa raison (infobulle), sans interrupteur ni choix Unique ; elle ne compte pas pour afficher Unique/Multi.
+- **Actions** : `follow` (chemin choisi/tapé ou id détecté) refuse un profil aip avec la raison, préférences inchangées ; il ne compte pas comme « autre compte utilisable » (pas de bascule Multi). `untrack` peut retirer un profil aip de la liste (préférence seule, dossier intact) ; le Principal reste non retirable. Une sélection Unique pointant un bloqué retombe sur le Principal.
+- **Renommage/suppression aip** : nouveau dossier = nouvelle identité ; entrée enregistrée de l'ancien = « Indisponible », jamais lancée (`collection_plan` exige `available`) ; entrée non enregistrée = disparaît.
+
+Limites : aucune installation aip réelle testée (absente de cette machine) ; quotas des profils aip Codex illisibles par conception tant que la décision §5 n'est pas prise ; `validate` borne toujours `profiles` à `MAX_EXTRA + 1` entrées enregistrées (aucun profil aip bloqué n'y est jamais écrit, voir §9) ; renommer un profil aip bloqué depuis les Réglages reste désactivé (comportement existant des lignes `tracked = false`) ; le chemin d'appel `Provider::reconcile` lui-même (AppHandle) n'est couvert que via `collection_plan`.
+
+Vérifications (synthétiques, faux homes temporaires, faux CLI `FAKE_CODEX` existant) :
+- RED 1 — test faux CLI écrit sur l'ancienne découverte (après extraction pure de `collection_plan`) : `cargo test --offline --locked --lib -- codex::tests::aip_` → échec « only the ordinary home gets a child » : `[.codex-boulot-link, .codex-work, .codex/profiles/perso/]` au lieu de `[.codex-work]` (un lien vers un home aip et un home aip ajouté à la main auraient reçu un `app-server`).
+- RED 2 — nouveaux tests de découverte exécutés contre `legacy_discover` (sonde temporaire, retirée) : 5 échecs, p. ex. `left: ["Principal", "work"]`, `right: ["Principal", "work", "boulot", "perso", "vide"]`.
+- RED 3 — test React sans le cas `"blocked"` : `actual: ['Connexion…', 'warning', '']`.
+- GREEN — `cargo test --offline --locked --lib` : **181 réussis, 0 échec, 5 ignorés** (174 avant) ; `cargo fmt --check` propre (crate entier) ; `node --test src/features/quota/*.test.cjs` : 87/87 (dont `codexAccounts`, `claudeProfiles`) ; `tsc -p tsconfig.json --noEmit` : 0 erreur ; `cargo build --offline --locked` : aucun avertissement issu de ces changements.
+
+## 9. Validation d'intégration (carte t_e09acc7f)
+
+Correctifs :
+- **Home Codex ajouté à la main en 3.2.0 sous `~/.codex/profiles`** : `codex_accounts::discover` traite une entrée **enregistrée** non principale que le socle marque `Blocked` comme un suivi explicite antérieur → `Collect::Isolated`, `CODEX_HOME` = chemin brut enregistré, `tracked = true`, exactement l'entrée de `legacy_discover` (3.2.0). C'est sûr de déduire « antérieur » d'une entrée enregistrée parce que cette version n'en écrit jamais pour un home bloqué : `follow` le refuse, les Réglages n'offrent ni renommage (`tracked = false`) ni interrupteur (`phase = "blocked"`), `follow` en Multi n'enregistre que les comptes suivis, `untrack` n'ajoute qu'une exclusion. Seule la découverte automatique aip reste bloquée. Une fois retiré, ce home est exclu ; le réajouter explicitement est refusé (il redevient un profil aip détecté).
+- **Borne `MAX_EXTRA + 1` de `validate`** : elle ne compte que les entrées enregistrées ; aucun profil aip bloqué n'y entre (ni par `follow`, ni par `untrack`, qui n'écrit que dans `excluded`, borné à 64). Test : 4 profils aip détectés et retirés n'ajoutent aucune entrée, le dernier emplacement va encore à un vrai home, `validate` passe à `MAX_EXTRA + 1` entrées, le plan reste à `MAX_EXTRA` enfants sans profil bloqué.
+- **Claude : pas d'équivalent**. Un dossier `~/.claude/profiles/<nom>` enregistré à la main reste « Non collectable » : c'est un instantané du trousseau (`credentials.json`), pas un home Claude Code. En 3.2.0, le lancer avec `CLAUDE_CONFIG_DIR` ne lisait pas ce compte (l'instantané n'est pas l'emplacement où Claude Code cherche ses identifiants pour ce dossier) et laissait Claude Code écrire sa configuration dans le dossier d'aip. Le blocage est donc volontaire et documenté, pas une régression silencieuse (non vérifié sur une vraie installation).
+
+Audit (lecture du diff complet + `aip.rs`/`account_sources.rs`) : en production, seuls les marqueurs `_current`/`_order` (≤ 4 096 octets) et des noms de dossiers sont lus ; `credentials.json`/`auth.json` sont testés par présence seulement, jamais ouverts ; aucun `Command::new`, aucune commande `security`/trousseau, `aip`, `switch`, `login`, `logout` ; aucune variable d'environnement du processus modifiée ; aucun chemin ni secret journalisé ou stocké en préférences en dehors du chemin brut déjà stocké en 3.2.0. Fixtures : dossiers temporaires, noms fictifs, `SYNTHETIC-SENTINEL-NOT-A-CREDENTIAL`, adresses `@example.invalid` ; aucun motif de jeton (`sk-`, `eyJ`, `refresh_token`, `Bearer`) dans le diff.
+
+Vérifications exécutées (2026-11-05, macOS, Node 25.6.1) :
+- RED — garde désactivée temporairement (`if false && r.saved …`), `cargo test --offline --locked --lib -- a_home_inside_aip blocked_aip_homes_never aip_homes_are_never_launched` : 2 échecs (`a_home_inside_aip_added_by_hand_before_this_version_keeps_its_3_2_0_behaviour`, test faux CLI `aip_homes_are_never_launched…`), 1 réussi (la borne était déjà correcte : test de garde). Garde restaurée : 3/3.
+- `cargo test --offline --locked --lib -- codex_accounts:: codex:: account_sources:: aip` : 55 réussis, 2 ignorés (live opt-in).
+- `cargo test --offline --locked --lib` : **183 réussis, 0 échec, 5 ignorés** (porte du commit, ~10 s).
+- `rustfmt --edition 2021` sur `codex.rs`/`codex_accounts.rs` (mes lignes seulement), puis `cargo fmt --check` : propre (crate entier).
+- `npm run typecheck` : 0 erreur ; `npm run build` (`tsc && vite build`) : réussi, 48 modules, `dist/` ignoré par git.
+- Non relancés (aucun fichier JS/TS modifié par cette carte) : `node --test src/features/quota/*.test.cjs` 87/87 de t_80e3e779. Jamais lancés : `scripts/*.test.mjs` ensemble (réécrit `src-tauri/icons/mascot-menu.png`), app, DMG.
+
+Preuves locales réelles : `test -e` seulement — `~/.claude/profiles`, `~/.codex/profiles`, `~/Library/Application Support/aip`, `~/.cargo/bin/aip` absents, `aip` hors PATH. **Aucun test sur une vraie installation aip** : tout le comportement aip est prouvé par fixtures synthétiques et faux CLI. Source du format vérifiée en ligne le 2026-11-05 : <https://github.com/dqn/aip/commit/3961fa05f7e040edb2ab5cf5866fd57b0b6bab78> (« chore: release 0.11.0 ») et <https://crates.io/api/v1/crates/aip-cli> (`max_version` 0.11.0, publié par `dqn`).
+
+Reprise : voir `docs/handoff-auto-detect-aip.md`.

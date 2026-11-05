@@ -7,6 +7,15 @@
 //! Additional environments are *followed* explicitly (detected `~/.codex-*`
 //! folder or a chosen absolute folder); only followed ones get their own
 //! app-server child, with `CODEX_HOME` set on that child only.
+//!
+//! Sources (see `account_sources` and docs/aip-profiles.md §8): the primary,
+//! `~/.codex-*` folders (and `~/.codex` when `CODEX_HOME` is elsewhere),
+//! `aip` profiles (`~/.codex/profiles/<name>`, dqn/aip v0.11.0) and saved
+//! entries. aip homes are listed under their aip name but never launched
+//! (`Collect::Blocked`): whether a home holds its own OAuth grant or an
+//! imported copy of the primary's cannot be told without reading `auth.json`,
+//! and launching a copy could rotate the primary's token (aip's own guard).
+use crate::account_sources::{self, Blocker, Collect, Origin};
 use crate::claude_accounts::{identity, normalized, profile_path, AccountPrefs, Profile};
 use std::path::{Path, PathBuf};
 
@@ -28,6 +37,20 @@ pub struct Discovered {
     pub launch: Option<PathBuf>,
     pub available: bool,
     pub visible: bool,
+    /// Why this account is listed but never collected (aip home whose grant
+    /// cannot be verified, or incomplete aip profile). `Some` implies
+    /// `tracked == false` and `launch == None`. A future per-profile opt-in
+    /// only has to turn it into `None` with `launch` = the raw path.
+    pub blocker: Option<Blocker>,
+}
+
+/// User-facing reason of a blocked account (no path, no secret).
+pub fn blocked_message(blocker: Blocker) -> &'static str {
+    match blocker {
+        Blocker::GrantUnverified => "Profil aip non collectable : Quota Monitor ne peut pas vérifier sans lire ses identifiants qu’il a sa propre connexion (aip codex login) ; le lire pourrait déconnecter le compte principal.",
+        Blocker::Incomplete => "Profil aip incomplet (aucun auth.json) : rien à lire.",
+        Blocker::SnapshotOnly => "Profil aip non collectable.",
+    }
 }
 
 /// Same rules as the Claude profiles, Codex wording, bounded child count.
@@ -63,6 +86,8 @@ pub fn validate(prefs: &AccountPrefs) -> Result<(), String> {
 
 /// Primary home as the CLI resolves it: a non-empty absolute `CODEX_HOME`,
 /// else `~/.codex`. Used for identity/deduplication only, never injected.
+/// (Production uses `account_sources::primary`, same rule.)
+#[cfg(test)]
 fn primary_home(home: &Path, env: Option<&Path>) -> PathBuf {
     env.filter(|p| p.is_absolute())
         .map(Path::to_path_buf)
@@ -78,9 +103,95 @@ fn default_name(path: &Path) -> String {
         .collect()
 }
 
-/// Order: primary, followed homes (saved order), then detected `~/.codex-*`
-/// folders not followed yet. Only names/paths are read (`read_dir` + `is_dir`).
+/// Order: primary, detected `~/.codex-*` folders (sorted), aip profiles (aip's
+/// order), then saved homes outside detection. Only names/paths and file
+/// presence are read. Startup and every refresh/`get_codex_accounts` call this,
+/// so aip profiles appear without any import or « Suivre » step; the mode is
+/// never changed by discovery.
 pub fn discover(home: &Path, env: Option<&Path>, prefs: &AccountPrefs) -> Vec<Discovered> {
+    let mut candidates = account_sources::all(home, &account_sources::CODEX, env, prefs);
+    route_through_aip(&mut candidates);
+    let mut runnable = 0usize;
+    let mut out: Vec<Discovered> = vec![];
+    for mut r in account_sources::reconcile(candidates, prefs) {
+        let blocker = match r.candidate.collect {
+            // A saved home inside an aip folder can only be an explicit add
+            // made before aip detection existed (this version never saves a
+            // blocked home: `follow` refuses it, Settings offers neither
+            // rename nor switch for it). It keeps its 3.2.0 behaviour: its own
+            // child with the raw saved path. Only automatic aip discovery is
+            // blocked.
+            Collect::Blocked(_) if r.saved && !r.primary() => {
+                r.candidate.collect = Collect::Isolated;
+                None
+            }
+            Collect::Blocked(b) => Some(b),
+            _ => None,
+        };
+        if blocker.is_none() {
+            // Never more unsaved homes than the collector can run (3.2.0
+            // rule); blocked aip entries are never run, so they do not count.
+            if !r.saved && !r.primary() && runnable > MAX_EXTRA {
+                continue;
+            }
+            runnable += 1;
+        }
+        out.push(Discovered {
+            profile: r.profile(),
+            primary: r.primary(),
+            tracked: blocker.is_none(),
+            launch: r.candidate.isolation().map(Path::to_path_buf),
+            available: r.candidate.available,
+            visible: false,
+            blocker,
+        });
+    }
+    // Same display rules as 3.2.0, applied to the bounded list: only followed
+    // (collected) homes are displayed; a blocked home keeps its saved
+    // preference (`profile.visible`) but has nothing to draw.
+    let selected = prefs.selected_id.as_deref().unwrap_or("");
+    let selected_exists = out.iter().any(|a| a.tracked && a.profile.id == selected);
+    for a in &mut out {
+        a.visible = a.tracked
+            && if prefs.mode == "multi" {
+                a.profile.visible
+            } else if selected_exists {
+                a.profile.id == selected
+            } else {
+                a.primary
+            };
+    }
+    out
+}
+
+/// A `~/.codex-*` folder that resolves into an aip profile (symlink) is that
+/// aip home: it inherits its name and blocker, so no spelling of an aip home is
+/// ever launched. The first spelling keeps its raw path and position.
+fn route_through_aip(candidates: &mut [account_sources::Candidate]) {
+    let aip: Vec<_> = candidates
+        .iter()
+        .filter(|c| matches!(c.origin, Origin::Aip { .. }))
+        .map(|c| (c.id.clone(), c.name.clone(), c.origin, c.collect))
+        .collect();
+    for c in candidates.iter_mut() {
+        if matches!(c.origin, Origin::Primary | Origin::Aip { .. }) {
+            continue;
+        }
+        if let Some((_, name, origin, collect)) = aip.iter().find(|(id, ..)| *id == c.id) {
+            c.name = name.clone(); // a saved name still wins in `reconcile`
+            c.origin = *origin;
+            c.collect = *collect;
+        }
+    }
+}
+
+/// Pre-aip discovery (3.2.0), kept verbatim as the non-regression reference.
+#[cfg(test)]
+pub(crate) fn legacy_discover(
+    home: &Path,
+    env: Option<&Path>,
+    prefs: &AccountPrefs,
+) -> Vec<Discovered> {
     let primary_raw = primary_home(home, env);
     let primary = normalized(&primary_raw);
     let mut seen = std::collections::HashSet::new();
@@ -104,6 +215,7 @@ pub fn discover(home: &Path, env: Option<&Path>, prefs: &AccountPrefs) -> Vec<Di
         tracked: true,
         visible: false,
         profile: primary_profile,
+        blocker: None,
     }];
     // Detected homes first (sorted, so the order is stable whether or not the
     // user renamed one), then saved homes outside `~/` detection.
@@ -138,6 +250,7 @@ pub fn discover(home: &Path, env: Option<&Path>, prefs: &AccountPrefs) -> Vec<Di
             primary: false,
             tracked: true,
             visible: false,
+            blocker: None,
         });
     };
     if let Ok(entries) = std::fs::read_dir(home) {
@@ -215,6 +328,11 @@ pub fn follow(
     };
     let existing = found.iter().find(|a| a.profile.id == id);
     if let Some(a) = existing {
+        if let Some(blocker) = a.blocker {
+            // Never turned into a followed home: no opt-in yet (product
+            // decision pending), no switch, no copy of credentials.
+            return Err(blocked_message(blocker).into());
+        }
         if !a.available {
             return Err(format!(
                 "Le dossier de « {} » est indisponible : vérifiez qu’il existe encore.",
@@ -313,7 +431,8 @@ pub fn untrack(
         Some(a) if a.primary => {
             return Err("Le compte Codex principal ne peut pas être retiré.".into())
         }
-        Some(a) if a.tracked => {}
+        // A blocked aip profile can be removed from the list (preference only).
+        Some(a) if a.tracked || a.blocker.is_some() => {}
         _ => return Err("Ce compte Codex n’est pas suivi.".into()),
     }
     let mut next = prefs.clone();
@@ -751,6 +870,453 @@ mod tests {
             });
         }
         assert!(validate(&prefs).is_err(), "bounded number of children");
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    // ------------------------------------------------------------ aip (dqn/aip v0.11.0)
+    // Synthetic fixtures only: fake homes under the temp dir, fake profile
+    // names, sentinel payloads that are never credentials and must stay intact.
+    const SENTINEL: &str = "SYNTHETIC-SENTINEL-NOT-A-CREDENTIAL";
+    fn aip_dir(home: &Path) -> PathBuf {
+        home.join(".codex").join(crate::aip::PROFILES_DIR)
+    }
+    fn aip_profile(home: &Path, name: &str, complete: bool) -> PathBuf {
+        let dir = aip_dir(home).join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        if complete {
+            std::fs::write(dir.join(crate::aip::CODEX_PAYLOAD), SENTINEL).unwrap();
+        }
+        dir
+    }
+    fn set_current(home: &Path, name: &str) {
+        std::fs::write(
+            aip_dir(home).join(crate::aip::CURRENT_MARKER),
+            format!("{name}\n"),
+        )
+        .unwrap();
+    }
+    fn names(found: &[Discovered]) -> Vec<String> {
+        found.iter().map(|a| a.profile.name.clone()).collect()
+    }
+    fn multi() -> AccountPrefs {
+        AccountPrefs {
+            mode: "multi".into(),
+            ..AccountPrefs::default()
+        }
+    }
+    /// Launch values the real collector would use (`codex::collection_plan`).
+    fn launched(found: &[Discovered]) -> Vec<PathBuf> {
+        crate::codex::collection_plan(found.to_vec())
+            .into_iter()
+            .map(|a| a.launch.unwrap())
+            .collect()
+    }
+    /// Every file under the aip folder with its bytes (proves nothing changed).
+    fn aip_state(home: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut out = vec![];
+        let mut stack = vec![aip_dir(home)];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push((p.clone(), std::fs::read(&p).unwrap_or_default()));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn aip_homes_are_listed_by_name_blocked_and_never_change_the_mode() {
+        let home = root("aip-discover");
+        std::fs::create_dir_all(home.join(".codex-work")).unwrap();
+        aip_profile(&home, "boulot", true);
+        let perso = aip_profile(&home, "perso", true);
+        aip_profile(&home, "vide", false);
+        set_current(&home, "perso");
+        let before = aip_state(&home);
+        let prefs = AccountPrefs::default();
+        let found = discover(&home, None, &prefs);
+        // Primary, ~/.codex-* siblings, then aip in aip order (alphabetical
+        // without `_order`). Codex's `_current` only selects the next
+        // `aip codex` launch: not folded into the primary.
+        assert_eq!(
+            names(&found),
+            ["Principal", "work", "boulot", "perso", "vide"]
+        );
+        assert_eq!(found.iter().filter(|a| a.primary).count(), 1);
+        assert!(found[0].tracked && found[0].launch.is_none() && found[0].blocker.is_none());
+        assert!(found[1].tracked && found[1].blocker.is_none());
+        let p = &found[3];
+        assert_eq!(p.blocker, Some(Blocker::GrantUnverified));
+        assert_eq!(
+            p.profile.id,
+            identity(&perso),
+            "path identity, like any home"
+        );
+        assert_eq!(p.profile.path, perso.to_str().unwrap(), "raw path kept");
+        assert!(p.available && !p.tracked && p.launch.is_none());
+        assert_eq!(found[4].blocker, Some(Blocker::Incomplete));
+        assert!(found[2..].iter().all(|a| !a.tracked && a.launch.is_none()));
+        // Unique untouched: the primary alone is displayed, prefs unchanged.
+        assert_eq!(visible(&home, &prefs), ["Principal"]);
+        assert_eq!(prefs, AccountPrefs::default());
+        // Multi: blocked homes listed but not displayed by default.
+        assert_eq!(visible(&home, &multi()), ["Principal", "work"]);
+        // Only the ordinary sibling is collected; stable across rescans
+        // (startup and every refresh rescan the same way).
+        assert_eq!(launched(&found), [home.join(".codex-work")]);
+        assert_eq!(discover(&home, None, &prefs), found);
+        // aip ignores CODEX_HOME: with a custom primary, the aip homes are
+        // still those of ~/.codex, still blocked; ~/.codex is a sibling.
+        let custom = home.join("custom");
+        std::fs::create_dir_all(&custom).unwrap();
+        let other = discover(&home, Some(&custom), &multi());
+        assert_eq!(
+            names(&other),
+            ["Principal", ".codex", "work", "boulot", "perso", "vide"]
+        );
+        assert_eq!(
+            launched(&other),
+            [home.join(".codex"), home.join(".codex-work")]
+        );
+        assert_eq!(aip_state(&home), before, "nothing read into or written");
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn discovery_without_aip_is_identical_to_the_3_2_0_discovery() {
+        let home = root("aip-legacy");
+        for d in [".codex", ".codex-a", ".codex-b", "Elsewhere", "custom"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        // More siblings than the collector can run (MAX_EXTRA bound).
+        for i in 0..MAX_EXTRA + 2 {
+            std::fs::create_dir_all(home.join(format!(".codex-x{i:02}"))).unwrap();
+        }
+        std::fs::write(home.join(".codex-file"), "not a dir").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(home.join(".codex-a"), home.join(".codex-alias")).unwrap();
+        let entry = |raw: String, name: &str, visible: bool| Profile {
+            id: identity(&normalized(Path::new(&raw))),
+            path: raw,
+            name: name.into(),
+            visible,
+        };
+        let sep = std::path::MAIN_SEPARATOR;
+        let elsewhere = format!("{}{sep}", home.join("Elsewhere").display());
+        let gone = home.join("gone").to_string_lossy().into_owned();
+        let b = home.join(".codex-b");
+        let custom = home.join("custom");
+        for mode in ["single", "multi"] {
+            for selected in [None, Some(identity(&b)), Some("profile:00".to_string())] {
+                for env in [None, Some(custom.as_path())] {
+                    let prefs = AccountPrefs {
+                        mode: mode.into(),
+                        selected_id: selected.clone(),
+                        profiles: vec![
+                            entry(elsewhere.clone(), "Ailleurs", true),
+                            entry(b.to_string_lossy().into_owned(), "B", false),
+                            entry(gone.clone(), "Parti", true),
+                        ],
+                        excluded: vec![identity(&home.join(".codex-a"))],
+                    };
+                    let old = legacy_discover(&home, env, &prefs);
+                    let new = discover(&home, env, &prefs);
+                    assert_eq!(old, new, "{mode} {selected:?} {env:?}");
+                    assert!(new.iter().all(|a| a.blocker.is_none()));
+                }
+            }
+        }
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn absent_or_corrupted_aip_data_never_fails_discovery() {
+        let home = root("aip-corrupt");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        assert_eq!(names(&discover(&home, None, &multi())), ["Principal"]);
+        // `profiles` is a file, then an empty folder.
+        std::fs::write(aip_dir(&home), "not a folder").unwrap();
+        assert_eq!(names(&discover(&home, None, &multi())), ["Principal"]);
+        std::fs::remove_file(aip_dir(&home)).unwrap();
+        std::fs::create_dir_all(aip_dir(&home)).unwrap();
+        assert_eq!(names(&discover(&home, None, &multi())), ["Principal"]);
+        // Garbage around one valid profile.
+        aip_profile(&home, "ok", true);
+        aip_profile(&home, "bad name", true);
+        std::fs::write(aip_dir(&home).join("stray"), SENTINEL).unwrap();
+        std::fs::write(
+            aip_dir(&home).join(crate::aip::CURRENT_MARKER),
+            [0xff, 0x00],
+        )
+        .unwrap();
+        std::fs::write(
+            aip_dir(&home).join(crate::aip::ORDER_FILE),
+            vec![b'x'; 9000],
+        )
+        .unwrap();
+        // An auth.json that is a folder is not a payload: incomplete.
+        std::fs::create_dir_all(aip_dir(&home).join("odd").join(crate::aip::CODEX_PAYLOAD))
+            .unwrap();
+        let found = discover(&home, None, &multi());
+        assert_eq!(names(&found), ["Principal", "odd", "ok"]);
+        assert_eq!(found[1].blocker, Some(Blocker::Incomplete));
+        assert_eq!(found[2].blocker, Some(Blocker::GrantUnverified));
+        assert!(found[1..].iter().all(|a| a.launch.is_none() && !a.visible));
+        assert!(launched(&found).is_empty());
+        set_current(&home, "ghost");
+        assert_eq!(discover(&home, None, &multi()).len(), 3);
+        // No ~/.codex at all: the primary stays explainable, no aip error.
+        let empty = root("aip-corrupt-none");
+        let found = discover(&empty, None, &multi());
+        assert_eq!(names(&found), ["Principal"]);
+        assert!(!found[0].available);
+        std::fs::remove_dir_all(home).unwrap();
+        std::fs::remove_dir_all(empty).unwrap();
+    }
+
+    #[test]
+    fn renamed_or_deleted_aip_homes_keep_user_choices_and_can_be_removed() {
+        let home = root("aip-rename");
+        std::fs::create_dir_all(home.join(".codex-work")).unwrap();
+        let boulot = aip_profile(&home, "boulot", true);
+        aip_profile(&home, "temp", true);
+        let id = identity(&boulot);
+        // Detected only (this version never saves a blocked home).
+        let prefs = multi();
+        let found = discover(&home, None, &prefs);
+        assert_eq!(names(&found), ["Principal", "work", "boulot", "temp"]);
+        assert!(!found[2].visible, "no card");
+        assert_eq!(found[2].blocker, Some(Blocker::GrantUnverified));
+        // Unique with a blocked home selected: falls back to the primary.
+        let mut single = prefs.clone();
+        single.mode = "single".into();
+        single.selected_id = Some(id.clone());
+        assert_eq!(visible(&home, &single), ["Principal"]);
+        assert_eq!(launched(&found), [home.join(".codex-work")]);
+        // aip rename = new folder = new identity; aip delete of an unsaved
+        // profile: simply gone. Nothing is launched either way.
+        std::fs::rename(&boulot, aip_dir(&home).join("pro")).unwrap();
+        std::fs::remove_dir_all(aip_dir(&home).join("temp")).unwrap();
+        let after = discover(&home, None, &prefs);
+        assert_eq!(names(&after), ["Principal", "work", "pro"]);
+        assert!(after.iter().all(|a| a.profile.id != id));
+        let pro = after[2].clone();
+        assert_eq!(pro.blocker, Some(Blocker::GrantUnverified));
+        assert_eq!(launched(&after), [home.join(".codex-work")]);
+        // Removing the blocked home is remembered (a preference only: the
+        // folder stays untouched) and never adds a saved entry.
+        let next = untrack(&home, None, &prefs, &pro.profile.id).unwrap();
+        assert!(next.profiles.is_empty() && next.excluded == [pro.profile.id.clone()]);
+        assert_eq!(names(&discover(&home, None, &next)), ["Principal", "work"]);
+        assert_eq!(next.mode, "multi", "work is still a followed extra");
+        assert!(aip_dir(&home)
+            .join("pro")
+            .join(crate::aip::CODEX_PAYLOAD)
+            .is_file());
+        // The primary still cannot be removed.
+        let primary = after[0].profile.id.clone();
+        assert!(untrack(&home, None, &next, &primary).is_err());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn duplicates_of_aip_homes_are_one_blocked_entry_and_explicit_adds_are_refused() {
+        let home = root("aip-dupes");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        let perso = aip_profile(&home, "perso", true);
+        let boulot = aip_profile(&home, "boulot", true);
+        let vide = aip_profile(&home, "vide", false);
+        set_current(&home, "perso");
+        let sep = std::path::MAIN_SEPARATOR;
+        let saved_perso = format!("{}{sep}", perso.display());
+        let prefs = multi();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&boulot, home.join(".codex-boulot")).unwrap();
+        let found = discover(&home, None, &prefs);
+        #[cfg(unix)]
+        {
+            // One entry per home: the sibling link is aip's « boulot »
+            // (first spelling keeps its place/raw path).
+            assert_eq!(names(&found), ["Principal", "boulot", "perso", "vide"]);
+            assert_eq!(
+                found[1].profile.path,
+                home.join(".codex-boulot").to_str().unwrap()
+            );
+            assert_eq!(found[1].blocker, Some(Blocker::GrantUnverified));
+        }
+        let p = found.iter().find(|a| a.profile.name == "perso").unwrap();
+        assert_eq!(p.blocker, Some(Blocker::GrantUnverified));
+        // Exactly one collected account: the primary (never a second child).
+        assert_eq!(found.iter().filter(|a| a.tracked).count(), 1);
+        assert!(launched(&found).is_empty());
+        // Explicit add of an aip home (folder picker, typed path with another
+        // spelling, detected id): refused with the reason, nothing saved.
+        let id_boulot = identity(&boulot);
+        for target in [
+            FollowTarget::Path(boulot.to_str().unwrap()),
+            FollowTarget::Path(&saved_perso),
+            FollowTarget::Detected(&id_boulot),
+        ] {
+            let err = follow(&home, None, &prefs, target).unwrap_err();
+            assert!(
+                err.contains("aip") && err.contains("non collectable"),
+                "{err}"
+            );
+        }
+        let err = follow(
+            &home,
+            None,
+            &prefs,
+            FollowTarget::Path(vide.to_str().unwrap()),
+        )
+        .unwrap_err();
+        assert!(err.contains("incomplet"), "{err}");
+        // Blocked homes never consume the MAX_EXTRA bound of real children.
+        for i in 0..MAX_EXTRA {
+            std::fs::create_dir_all(home.join(format!(".codex-h{i}"))).unwrap();
+        }
+        let many = discover(&home, None, &multi());
+        assert_eq!(launched(&many).len(), MAX_EXTRA);
+        assert_eq!(many.iter().filter(|a| a.blocker.is_some()).count(), 3);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    /// A home under `~/.codex/profiles` that the user had added by hand in
+    /// 3.2.0 (saved entry) keeps exactly its 3.2.0 behaviour: same entry as
+    /// the pre-aip discovery, own child with the raw saved path. Unsaved aip
+    /// homes next to it stay blocked.
+    #[test]
+    fn a_home_inside_aip_added_by_hand_before_this_version_keeps_its_3_2_0_behaviour() {
+        let home = root("aip-legacy-manual");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        let perso = aip_profile(&home, "perso", true);
+        let vide = aip_profile(&home, "vide", false);
+        aip_profile(&home, "boulot", true);
+        set_current(&home, "perso");
+        let before = aip_state(&home);
+        let sep = std::path::MAIN_SEPARATOR;
+        let raw = format!("{}{sep}", perso.display());
+        for mode in ["multi", "single"] {
+            let mut prefs = AccountPrefs {
+                mode: mode.into(),
+                selected_id: Some(identity(&perso)),
+                ..AccountPrefs::default()
+            };
+            for (path, name) in [
+                (raw.clone(), "Perso"),
+                (vide.to_string_lossy().into(), "Vide"),
+            ] {
+                prefs.profiles.push(Profile {
+                    id: identity(&normalized(Path::new(&path))),
+                    path,
+                    name: name.into(),
+                    visible: true,
+                });
+            }
+            validate(&prefs).unwrap();
+            let old = legacy_discover(&home, None, &prefs);
+            let new = discover(&home, None, &prefs);
+            for saved in &prefs.profiles {
+                let o = old.iter().find(|a| a.profile.id == saved.id).unwrap();
+                let n = new.iter().find(|a| a.profile.id == saved.id).unwrap();
+                assert_eq!(n, o, "{mode}: 3.2.0 entry kept for {}", saved.name);
+            }
+            assert_eq!(
+                launched(&new),
+                [PathBuf::from(&raw), vide.clone()],
+                "{mode}: raw saved launch values"
+            );
+            let boulot = new.iter().find(|a| a.profile.name == "boulot").unwrap();
+            assert_eq!(boulot.blocker, Some(Blocker::GrantUnverified));
+            assert!(boulot.launch.is_none() && !boulot.tracked);
+            // Still manageable like any followed home: an explicit add says it
+            // is already displayed (no aip refusal), removal works.
+            if mode == "multi" {
+                let err = follow(&home, None, &prefs, FollowTarget::Path(&raw)).unwrap_err();
+                assert!(err.contains("déjà affiché"), "{err}");
+            }
+            let next = untrack(&home, None, &prefs, &identity(&perso)).unwrap();
+            assert!(next.profiles.iter().all(|p| p.id != identity(&perso)));
+            // Once removed, the home is excluded; it is never re-added silently.
+            assert!(discover(&home, None, &next)
+                .iter()
+                .all(|a| a.profile.id != identity(&perso)));
+            // Adding it back now goes through the aip rule: refused.
+            let err = follow(&home, None, &next, FollowTarget::Path(&raw)).unwrap_err();
+            assert!(err.contains("aip"), "{err}");
+        }
+        assert_eq!(aip_state(&home), before, "discovery reads nothing");
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    /// The `MAX_EXTRA + 1` bound of `validate` counts saved entries only.
+    /// Unsaved aip homes are never written to the preferences (follow refuses
+    /// them, untrack only excludes them), so they cannot crowd out followable
+    /// homes nor make a full but valid list invalid.
+    #[test]
+    fn blocked_aip_homes_never_take_a_slot_of_the_followed_homes_bound() {
+        let home = root("aip-cap");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        for name in ["a", "b", "c", "d"] {
+            aip_profile(&home, name, name != "d");
+        }
+        // MAX_EXTRA - 1 followed (saved) homes, plus the primary's entry.
+        let mut prefs = multi();
+        let entry = |p: &Path| Profile {
+            id: identity(&normalized(p)),
+            path: p.to_string_lossy().into_owned(),
+            name: p.file_name().unwrap().to_string_lossy().into_owned(),
+            visible: true,
+        };
+        prefs.profiles.push(entry(&home.join(".codex")));
+        for i in 0..MAX_EXTRA - 1 {
+            let p = home.join(format!("Elsewhere{i}"));
+            std::fs::create_dir_all(&p).unwrap();
+            prefs.profiles.push(entry(&p));
+        }
+        validate(&prefs).unwrap();
+        // Removing every blocked aip home: preferences grow by exclusions only.
+        let mut removed = prefs.clone();
+        for a in discover(&home, None, &prefs)
+            .into_iter()
+            .filter(|a| a.blocker.is_some())
+        {
+            removed = untrack(&home, None, &removed, &a.profile.id).unwrap();
+        }
+        assert_eq!(removed.profiles, prefs.profiles);
+        assert_eq!(removed.excluded.len(), 4);
+        // The last slot still goes to a real home, with 4 aip homes listed.
+        let last = home.join("Last");
+        std::fs::create_dir_all(&last).unwrap();
+        let full = follow(
+            &home,
+            None,
+            &prefs,
+            FollowTarget::Path(last.to_str().unwrap()),
+        )
+        .unwrap();
+        validate(&full).unwrap();
+        assert_eq!(full.profiles.len(), MAX_EXTRA + 1);
+        let found = discover(&home, None, &full);
+        assert_eq!(found.iter().filter(|a| a.blocker.is_some()).count(), 4);
+        assert_eq!(launched(&found).len(), MAX_EXTRA);
+        assert!(launched(&found).contains(&last));
+        // An unsaved ~/.codex-* home beyond the bound is still cut, not an aip
+        // one counted in its place (blocked homes are never in the plan).
+        std::fs::create_dir_all(home.join(".codex-extra")).unwrap();
+        let found = discover(&home, None, &full);
+        assert_eq!(launched(&found).len(), MAX_EXTRA);
+        assert!(found
+            .iter()
+            .all(|a| a.blocker.is_none() || a.launch.is_none()));
         std::fs::remove_dir_all(home).unwrap();
     }
 }

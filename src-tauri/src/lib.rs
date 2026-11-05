@@ -1,6 +1,8 @@
 #[cfg(target_os = "macos")]
 mod account_menu;
+pub mod account_sources;
 mod activity;
+pub mod aip;
 mod claude;
 mod claude_accounts;
 mod claude_cli;
@@ -1117,6 +1119,8 @@ fn codex_panel(
             non_empty(message, "Lecture de Codex impossible."),
             Tone::Error,
         )),
+        // aip home listed but never read (codex_accounts::blocked_message).
+        "blocked" => Some((non_empty(message, "Profil non collectable."), Tone::Neutral)),
         _ => Some((non_empty(message, "Connexion à Codex…"), Tone::Warning)),
     };
     PanelProvider {
@@ -2925,6 +2929,7 @@ pub fn quota_ui_smoke(directory: &str) {
             launch: (!primary).then(|| format!("/fixture/.codex-{name}").into()),
             available: true,
             visible: true,
+            blocker: None,
         };
         let reading = codex::Reading {
             phase: phase.into(),
@@ -4233,6 +4238,7 @@ mod tests {
             launch: (!primary).then(|| format!("/fixture/{name}").into()),
             available: true,
             visible,
+            blocker: None,
         };
         let status = codex::Status {
             phase: "ready".into(),

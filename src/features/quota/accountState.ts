@@ -10,6 +10,7 @@ export function claudeSnapshotState(s: ClaudeSnapshot, available = true, refresh
   if (refreshing) return ["Actualisation…", "warning", ""];
   if (s.state === "disabled") return ["Désactivé", "neutral", ""];
   if (s.errorKind === "not_signed_in") return ["Non connecté", "warning", s.message || "Profil non connecté dans Claude Code."];
+  if (s.errorKind === "profile_blocked") return ["Non collectable", "neutral", s.message || "Profil détecté, non lisible sans changer de compte actif."];
   switch (s.state) {
     case "ready": return ["Connecté", "good", ""];
     case "stale": return ["Connecté", "warning", "Dernières valeurs conservées, nouvelle lecture en attente."];
@@ -24,13 +25,14 @@ export function accountState(account: ClaudeAccount): AccountState {
 }
 
 /** State of the primary Codex collector (no account list: older backend). */
-export function codexPhaseState(phase: CodexStatus["phase"] | "unavailable" | undefined, message = ""): AccountState {
+export function codexPhaseState(phase: CodexStatus["phase"] | "unavailable" | "blocked" | undefined, message = ""): AccountState {
   switch (phase) {
     case "ready": return ["Connecté", "good", ""];
     case "signed_out": return ["Non connecté", "warning", message || "Dossier non connecté à Codex."];
     case "disabled": return ["Désactivé", "neutral", ""];
     case "missing": return ["Non installé", "neutral", message];
     case "error": return ["Erreur", "error", message || "Lecture impossible : vérifiez Codex CLI."];
+    case "blocked": return ["Non collectable", "neutral", message || "Profil aip détecté, non lu par Quota Monitor."];
     default: return ["Connexion…", "warning", ""];
   }
 }

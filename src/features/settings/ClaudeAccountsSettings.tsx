@@ -154,7 +154,7 @@ export default function ClaudeAccountsSettings<A extends ListedAccount = ClaudeA
           </div>
           {accessory?.(account)}
           <span className={"prefs-pill prefs-pill--" + tone} title={detail || undefined}>{pill}</span>
-          {multi
+          {(account as { phase?: string }).phase === "blocked" ? null : multi
             ? <label className="prefs-switch"><input type="checkbox" role="switch" aria-label={show(account)}
               checked={storedVisible(account)}
               onChange={(event) => void saveProfile(account, { visible: event.target.checked })} /><span aria-hidden="true" /></label>

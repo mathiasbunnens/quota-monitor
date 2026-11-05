@@ -227,11 +227,7 @@ impl Provider {
     pub fn reconcile(&self, app: &tauri::AppHandle) {
         let prefs = crate::prefs::current(app);
         let wanted: Vec<_> = if prefs.codex_enabled {
-            discovered(app, &prefs)
-                .into_iter()
-                .filter(|a| !a.primary && a.tracked && a.available)
-                .take(crate::codex_accounts::MAX_EXTRA)
-                .collect()
+            collection_plan(discovered(app, &prefs))
         } else {
             vec![]
         };
@@ -1328,6 +1324,23 @@ fn run_extra(w: ExtraWorker, rx: Receiver<ExtraAction>) {
     w.shared.kill_child();
 }
 
+/// Additional homes that get their own app-server child, in discovery order:
+/// followed, available, bounded by `MAX_EXTRA`. The primary is collected by
+/// the historical session. Blocked accounts (aip homes) are never launched:
+/// they are filtered on `blocker` AND on the launch value (defence in depth,
+/// a blocked entry has no `launch`).
+pub(crate) fn collection_plan(
+    found: Vec<crate::codex_accounts::Discovered>,
+) -> Vec<crate::codex_accounts::Discovered> {
+    found
+        .into_iter()
+        .filter(|a| {
+            !a.primary && a.tracked && a.available && a.blocker.is_none() && a.launch.is_some()
+        })
+        .take(crate::codex_accounts::MAX_EXTRA)
+        .collect()
+}
+
 /// Discovered environments for this app (names/paths only).
 pub(crate) fn discovered(
     app: &tauri::AppHandle,
@@ -1400,6 +1413,9 @@ pub(crate) fn account_view(
             "unavailable",
             "Dossier CODEX_HOME indisponible : vérifiez qu’il existe encore.",
         )
+    } else if let Some(blocker) = d.blocker {
+        // Listed and explained, never read: no plan, no quota, no reset.
+        Reading::new("blocked", crate::codex_accounts::blocked_message(blocker))
     } else {
         slot.as_ref()
             .map(|(r, _)| r.clone())
@@ -1412,7 +1428,9 @@ pub(crate) fn account_view(
         vec![]
     };
     let mut profile = d.profile;
-    profile.visible = d.visible && enabled;
+    // A blocked home has nothing to draw: listed in the settings with its
+    // reason, never a quota card (same rule as React's `tracked` filter).
+    profile.visible = d.visible && enabled && d.blocker.is_none();
     let available_resets = (enabled && reading.phase == "ready")
         .then_some(reading.available_resets)
         .flatten();
@@ -1897,6 +1915,194 @@ done
         result.unwrap();
     }
 
+    /// aip (dqn/aip v0.11.0) Codex homes next to ordinary homes. Synthetic
+    /// fixtures only: each aip home carries a fake `auth.json` sentinel and a
+    /// `fixture-identity` so that a wrongful launch would answer « ready » and
+    /// show up in the fake CLI's log.
+    #[cfg(unix)]
+    #[test]
+    fn aip_homes_are_never_launched_and_each_followed_home_is_read_once_with_its_raw_codex_home() {
+        let root = scratch("aip-routing");
+        let (exe, log) = fake_codex(&root);
+        let home = root.join("home");
+        let work = home.join(".codex-work");
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        fs::write(work.join("fixture-identity"), "work@example.invalid").unwrap();
+        fs::write(work.join("fixture-used"), "40").unwrap();
+        let profiles = home.join(".codex").join(crate::aip::PROFILES_DIR);
+        for (name, payload) in [("perso", true), ("boulot", true), ("vide", false)] {
+            let dir = profiles.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("fixture-identity"),
+                format!("aip-{name}@example.invalid"),
+            )
+            .unwrap();
+            if payload {
+                fs::write(
+                    dir.join(crate::aip::CODEX_PAYLOAD),
+                    "SYNTHETIC-SENTINEL-NOT-A-CREDENTIAL",
+                )
+                .unwrap();
+            }
+        }
+        fs::write(profiles.join(crate::aip::CURRENT_MARKER), "perso\n").unwrap();
+        // Other spellings of aip homes: a symlinked `~/.codex-*` sibling, and
+        // a folder the user had added by hand in 3.2.0 (saved entry, trailing
+        // separator kept) which keeps its 3.2.0 collection.
+        std::os::unix::fs::symlink(profiles.join("boulot"), home.join(".codex-boulot-link"))
+            .unwrap();
+        let manual = format!(
+            "{}{}",
+            profiles.join("perso").display(),
+            std::path::MAIN_SEPARATOR
+        );
+        let mut prefs = crate::claude_accounts::AccountPrefs {
+            mode: "multi".into(),
+            ..Default::default()
+        };
+        prefs.profiles.push(crate::claude_accounts::Profile {
+            id: crate::claude_accounts::identity(&crate::claude_accounts::normalized(
+                std::path::Path::new(&manual),
+            )),
+            path: manual.clone(),
+            name: "Perso".into(),
+            visible: true,
+        });
+        let tree = |dir: &std::path::Path| {
+            let mut out = vec![];
+            let mut stack = vec![dir.to_path_buf()];
+            while let Some(d) = stack.pop() {
+                for e in fs::read_dir(&d).unwrap().flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else {
+                        out.push((p.clone(), fs::read(&p).unwrap()));
+                    }
+                }
+            }
+            out.sort();
+            out
+        };
+        let aip_before = tree(&profiles);
+        let env_before = std::env::var_os("CODEX_HOME");
+        let found = crate::codex_accounts::discover(&home, None, &prefs);
+        let plan = collection_plan(found.clone());
+        assert_eq!(
+            plan.iter().map(|a| a.launch.clone()).collect::<Vec<_>>(),
+            [Some(work.clone()), Some(PathBuf::from(&manual))],
+            "only the ordinary home and the 3.2.0 manual entry get a child"
+        );
+        let store = Arc::new(Mutex::new(AccountStore::default()));
+        // Startup then one refresh: same plan, re-read.
+        let mut workers = vec![];
+        for a in &plan {
+            workers.push(spawn_extra(
+                &store,
+                &a.profile.id,
+                a.launch.as_deref().unwrap(),
+                &exe,
+            ));
+        }
+        let ids: Vec<&str> = plan.iter().map(|a| a.profile.id.as_str()).collect();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for(&store, &ids);
+            for (_, tx, _) in &workers {
+                tx.send(ExtraAction::Refresh).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            wait_for(&store, &ids);
+            let calls = fs::read_to_string(&log).unwrap();
+            let homes: std::collections::BTreeSet<&str> = calls
+                .lines()
+                .map(|l| l.split('|').nth(1).unwrap())
+                .collect();
+            let mut expected = vec![work.to_str().unwrap(), manual.as_str()];
+            expected.sort();
+            assert_eq!(homes.into_iter().collect::<Vec<_>>(), expected, "{calls}");
+            // Auto-discovered aip homes (and their symlinked spelling): never.
+            for name in ["boulot", "vide"] {
+                assert!(!calls.contains(&format!("profiles/{name}")), "{calls}");
+            }
+            assert!(!calls.contains(".codex-boulot-link"), "{calls}");
+            for line in calls.lines() {
+                let method = line.split('|').next().unwrap();
+                assert!(
+                    [
+                        "initialize",
+                        "initialized",
+                        "account/read",
+                        "account/rateLimits/read"
+                    ]
+                    .contains(&method),
+                    "unexpected call {method}"
+                );
+            }
+            assert!(!calls.contains("login") && !calls.contains("logout"));
+            let w = store.lock().unwrap().get(ids[0]).unwrap().0;
+            assert_eq!(w.phase, "ready");
+            assert_eq!(w.rows.as_ref().unwrap()[0].remaining, 60);
+        }));
+        for (shared, _, _) in &workers {
+            shared.stop.store(true, Ordering::Release);
+        }
+        for (_, tx, handle) in workers {
+            drop(tx);
+            handle.join().unwrap();
+        }
+        result.unwrap();
+        // Listed with their aip name (saved name wins), explained, never read.
+        let views: Vec<CodexAccount> = found
+            .iter()
+            .cloned()
+            .map(|d| account_view(d, true, None, None))
+            .collect();
+        let names: Vec<&str> = views.iter().map(|v| v.profile.name.as_str()).collect();
+        // The symlinked sibling is aip's « boulot » (first spelling keeps its
+        // place and raw path); `_current` is not folded into the primary.
+        assert_eq!(names, ["Principal", "boulot", "work", "Perso", "vide"]);
+        assert_eq!(
+            views[1].profile.path,
+            home.join(".codex-boulot-link").to_str().unwrap()
+        );
+        for v in views
+            .iter()
+            .filter(|v| ["boulot", "vide"].contains(&v.profile.name.as_str()))
+        {
+            assert_eq!(v.phase, "blocked", "{}", v.profile.name);
+            assert!(!v.tracked && v.rows.is_empty() && v.plan_type.is_none());
+            assert!(v.message.contains("aip"), "{}", v.message);
+            assert!(redeem_route(&views, &v.profile.id).is_err());
+        }
+        let perso = views.iter().find(|v| v.profile.name == "Perso").unwrap();
+        assert_eq!(perso.profile.path, manual, "raw saved path kept");
+        assert!(
+            perso.tracked && perso.phase != "blocked",
+            "3.2.0 manual entry"
+        );
+        assert!(
+            found
+                .iter()
+                .find(|d| d.profile.name == "Perso")
+                .unwrap()
+                .profile
+                .visible,
+            "saved visibility kept in the preferences"
+        );
+        assert!(
+            views
+                .iter()
+                .all(|v| v.profile.visible == (v.phase != "blocked")),
+            "a blocked home never gets a quota card"
+        );
+        // Nothing changed: environment, aip files, aip's selected profile.
+        assert_eq!(std::env::var_os("CODEX_HOME"), env_before);
+        assert_eq!(tree(&profiles), aip_before);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn primary_session_inherits_the_app_environment_without_codex_home() {
@@ -1983,6 +2189,7 @@ done
             launch: (!primary).then(|| PathBuf::from(format!("/fixture/{name}"))),
             available,
             visible,
+            blocker: None,
         }
     }
     fn ready(identity: u64, used: f64) -> Reading {

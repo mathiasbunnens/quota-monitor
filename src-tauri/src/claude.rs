@@ -520,9 +520,12 @@ fn collect_accounts(app: &tauri::AppHandle, fable: Option<bool>) -> Vec<AccountS
         .into_iter()
         .map(|a| {
             let store = LIVE.lock().unwrap();
-            let snap = store.snapshot(&a.profile.id).unwrap_or_else(|| {
-                compute(p.claude_enabled, executable, FileState::Missing, unix_now())
-            });
+            let snap = stored_view(
+                &a,
+                store.snapshot(&a.profile.id),
+                p.claude_enabled,
+                executable,
+            );
             let refreshing = store.refreshing(&a.profile.id);
             drop(store);
             let mut profile = a.profile;
@@ -536,6 +539,24 @@ fn collect_accounts(app: &tauri::AppHandle, fable: Option<bool>) -> Vec<AccountS
             }
         })
         .collect()
+}
+/// Last collected snapshot of an account, else its initial state. A blocked
+/// account (aip snapshot) is shown through the existing error channel with
+/// the reason, no metrics and no plan: nothing was read.
+pub(crate) fn stored_view(
+    account: &crate::claude_accounts::Discovered,
+    stored: Option<ClaudeSnapshot>,
+    enabled: bool,
+    executable: bool,
+) -> ClaudeSnapshot {
+    if let Some(blocker) = account.blocker() {
+        let mut snap = compute(enabled, executable, FileState::Missing, unix_now());
+        snap.state = "error";
+        snap.error_kind = Some("profile_blocked");
+        snap.message = crate::claude_accounts::blocked_message(blocker).into();
+        return snap;
+    }
+    stored.unwrap_or_else(|| compute(enabled, executable, FileState::Missing, unix_now()))
 }
 /// Per-account projection. `fable: Some(enabled)` is the display view (v3.1.0
 /// Fable visibility + "Limite Fable" label); `None` keeps raw metrics.
@@ -704,7 +725,7 @@ fn refresh_live(app: &tauri::AppHandle) {
         return;
     };
     // Refresh is serial and each call uses a distinct canonical profile path.
-    for a in profiles(app, &p) {
+    for a in collection_plan(profiles(app, &p)) {
         if GENERATION.load(Ordering::Acquire) != generation || !prefs::current(app).claude_enabled {
             break;
         }
@@ -713,6 +734,17 @@ fn refresh_live(app: &tauri::AppHandle) {
         });
     }
 }
+/// Accounts the serial collector launches, in discovery order. Blocked
+/// accounts (aip credential snapshots) are never launched: their `launch` is
+/// `None` like the primary's, so polling one would read the primary again.
+pub(crate) fn collection_plan(
+    found: Vec<crate::claude_accounts::Discovered>,
+) -> Vec<crate::claude_accounts::Discovered> {
+    found
+        .into_iter()
+        .filter(|a| a.blocker().is_none())
+        .collect()
+}
 fn poll_profile(
     store: &std::sync::Mutex<crate::claude_accounts::RefreshStore>,
     account: &crate::claude_accounts::Discovered,
@@ -720,6 +752,9 @@ fn poll_profile(
     dir: &Path,
     mut changed: impl FnMut(),
 ) -> bool {
+    if account.blocker().is_some() {
+        return false; // listed and explained by `stored_view`, never launched
+    }
     let profile = &account.profile;
     let Some(ticket) = store.lock().unwrap().begin(&profile.id) else {
         return false;
@@ -742,15 +777,18 @@ fn poll_profile(
 /// Primary: exactly as 3.1.0 — inherit the app environment untouched (Claude
 /// Code derives its credential slot from CLAUDE_CONFIG_DIR's presence/value, so
 /// forcing it, even to ~/.claude, signs the child out). Extra profiles: the
-/// path string as discovered/entered, never canonicalized.
+/// path string as discovered/entered, never canonicalized. Blocked accounts
+/// are refused here too (defence in depth behind `collection_plan`).
 fn collect(
     account: &crate::claude_accounts::Discovered,
     exe: &Path,
     cwd: &Path,
 ) -> Result<Value, &'static str> {
-    match account.launch.as_deref() {
-        None => crate::claude_cli::read_usage(exe, cwd),
-        Some(config) => crate::claude_cli::read_usage_for(exe, cwd, config),
+    use crate::account_sources::Collect;
+    match (account.collect, account.launch.as_deref()) {
+        (Collect::Inherit, _) => crate::claude_cli::read_usage(exe, cwd),
+        (Collect::Isolated, Some(config)) => crate::claude_cli::read_usage_for(exe, cwd, config),
+        _ => Err("profile_blocked"),
     }
 }
 fn profile_workspace(dir: &Path, id: &str) -> PathBuf {
@@ -1111,6 +1149,9 @@ cat >/dev/null
                 launch: Some(path.clone()),
                 available: true,
                 visible: true,
+                collect: crate::account_sources::Collect::Isolated,
+                origin: crate::account_sources::Origin::Manual,
+                aliases: vec![],
             };
             assert!(poll_profile(&store, &account, Some(&exe), &root, || {}));
             let profile = account.profile.clone();
@@ -1345,6 +1386,160 @@ cat >/dev/null
             .unwrap();
         assert_eq!(work.state, "ready");
         assert_eq!(work.metrics[0].used_percent, Some(10.0));
+        fs::remove_dir_all(root).unwrap();
+    }
+    /// Synthetic Claude Code: records every launch (argv, the CLAUDE_CONFIG_DIR
+    /// it received, the control requests it was sent) in `log`, answers
+    /// initialize + get_usage with a per-account percentage. Never reads files.
+    #[cfg(unix)]
+    fn routing_cli(root: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let exe = root.join("routing-claude");
+        let script = r#"#!/bin/sh
+LOG='@LOG@'
+seen="${CLAUDE_CONFIG_DIR-<unset>}"
+read init
+printf '%s\n' '{"type":"control_response","response":{"request_id":"init","subtype":"success","response":{}}}'
+read usage
+case "$seen" in
+  *claude-work) used=22 ;;
+  *) used=11 ;;
+esac
+printf 'argv=%s|config=%s|requests=%s,%s\n' "$*" "$seen" \
+  "$(printf '%s' "$init" | sed 's/.*"subtype":"\([a-z_]*\)".*/\1/')" \
+  "$(printf '%s' "$usage" | sed 's/.*"subtype":"\([a-z_]*\)".*/\1/')" >> "$LOG"
+printf '{"type":"control_response","response":{"request_id":"usage","subtype":"success","response":{"rate_limits_available":true,"subscription_type":"pro","rate_limits":{"five_hour":{"utilization":%s,"resets_at":"2030-01-01T00:00:00Z"}}}}}\n' "$used"
+cat >/dev/null
+"#
+        .replace("@LOG@", log.to_str().unwrap());
+        fs::write(&exe, script).unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
+        exe
+    }
+    #[cfg(unix)]
+    #[test]
+    fn aip_snapshots_are_never_launched_and_each_collectable_account_is_read_once_with_its_own_env()
+    {
+        let root = std::env::temp_dir().join(format!("qm-aip-routing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".claude-work")).unwrap();
+        let home = root.canonicalize().unwrap();
+        let profiles = home.join(".claude").join(crate::aip::PROFILES_DIR);
+        for (name, payload) in [("perso", true), ("boulot", true), ("vide", false)] {
+            fs::create_dir_all(profiles.join(name)).unwrap();
+            if payload {
+                fs::write(
+                    profiles.join(name).join(crate::aip::CLAUDE_PAYLOAD),
+                    "SYNTHETIC-SENTINEL-NOT-A-CREDENTIAL",
+                )
+                .unwrap();
+            }
+        }
+        fs::write(profiles.join(crate::aip::CURRENT_MARKER), "perso\n").unwrap();
+        // A second spelling of an aip snapshot (symlinked sibling) must not
+        // become a launchable home either.
+        std::os::unix::fs::symlink(profiles.join("boulot"), home.join(".claude-boulot-link"))
+            .unwrap();
+        let log = home.join("launches.log");
+        let exe = routing_cli(&home, &log);
+        let files_before: Vec<_> = ["perso", "boulot"]
+            .iter()
+            .map(|n| fs::read(profiles.join(n).join(crate::aip::CLAUDE_PAYLOAD)).unwrap())
+            .collect();
+        let current_before = fs::read(profiles.join(crate::aip::CURRENT_MARKER)).unwrap();
+        let env_before = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let prefs = crate::claude_accounts::AccountPrefs {
+            mode: "multi".into(),
+            ..Default::default()
+        };
+        let found = crate::claude_accounts::discover(&home, None, &prefs);
+        let store = std::sync::Mutex::new(crate::claude_accounts::RefreshStore::new());
+        // Same loop as refresh_live, twice (startup + one refresh).
+        for _ in 0..2 {
+            for a in collection_plan(found.clone()) {
+                assert!(poll_profile(&store, &a, Some(&exe), &home, || {}));
+            }
+        }
+        let launches: Vec<String> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect();
+        let inherited = env_before
+            .as_ref()
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<unset>".into());
+        let work = format!("{}/.claude-work", home.display());
+        // Exactly primary + ~/.claude-work per pass: the primary (also aip's
+        // `perso`) is read once, the snapshots never.
+        let configs: Vec<String> = launches
+            .iter()
+            .map(|l| {
+                l.split("|config=")
+                    .nth(1)
+                    .unwrap()
+                    .split('|')
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            configs,
+            [inherited.clone(), work.clone(), inherited, work],
+            "{launches:#?}"
+        );
+        for l in &launches {
+            assert!(l.contains("|requests=initialize,get_usage"), "{l}");
+            assert!(!l.contains(crate::aip::PROFILES_DIR), "{l}");
+            for verb in ["switch", "login", "logout", "auth", "setup-token"] {
+                assert!(!l.split('|').next().unwrap().contains(verb), "{verb}: {l}");
+            }
+        }
+        // Blocked accounts: a direct poll refuses without launching.
+        for a in found.iter().filter(|a| a.blocker().is_some()) {
+            assert!(!poll_profile(&store, a, Some(&exe), &home, || panic!(
+                "launched"
+            )));
+            assert!(store.lock().unwrap().snapshot(&a.profile.id).is_none());
+        }
+        assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 4);
+        // Per-account values went to the right account.
+        let by_name = |n: &str| found.iter().find(|a| a.profile.name == n).unwrap();
+        let used = |n: &str| {
+            store
+                .lock()
+                .unwrap()
+                .snapshot(&by_name(n).profile.id)
+                .unwrap()
+                .metrics[0]
+                .used_percent
+        };
+        assert_eq!((used("Principal"), used("work")), (Some(11.0), Some(22.0)));
+        // Explained, not collected: listed with their aip name, honest state.
+        for name in ["boulot", "vide"] {
+            let a = found.iter().find(|a| a.profile.name == name).unwrap();
+            let view = stored_view(a, None, true, true);
+            assert_eq!(
+                (view.state, view.error_kind),
+                ("error", Some("profile_blocked"))
+            );
+            assert!(view.metrics.is_empty() && view.plan_type.is_none());
+            assert!(view.message.contains("aip"), "{}", view.message);
+            let shown = account_view(view, true, a.available, Some(true));
+            assert_eq!(shown.error_kind, Some("profile_blocked"));
+        }
+        // Nothing changed: environment, aip payloads, aip's active profile.
+        assert_eq!(std::env::var_os("CLAUDE_CONFIG_DIR"), env_before);
+        let files_after: Vec<_> = ["perso", "boulot"]
+            .iter()
+            .map(|n| fs::read(profiles.join(n).join(crate::aip::CLAUDE_PAYLOAD)).unwrap())
+            .collect();
+        assert_eq!(files_after, files_before);
+        assert_eq!(
+            fs::read(profiles.join(crate::aip::CURRENT_MARKER)).unwrap(),
+            current_before
+        );
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

@@ -1139,6 +1139,7 @@ mod tests {
             launch: (!primary).then(|| format!("/fixture/{name}").into()),
             available: true,
             visible: true,
+            blocker: None,
         };
         let checked = chrono::DateTime::from_timestamp(1000, 0)
             .unwrap()
