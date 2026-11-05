@@ -1,7 +1,8 @@
-//! Read-only HTTPS quota reads for `aip` profiles, authenticated with the
-//! credential the profile already holds. The access token is loaded in memory
-//! for one request and dropped; nothing here refreshes, rotates, writes back,
-//! logs or returns a secret, and no CLI is launched.
+//! HTTPS quota reads for `aip` profiles, authenticated with the credential the
+//! profile already holds. The access token is loaded in memory for one request
+//! and dropped; nothing here logs or returns a secret, and no CLI is launched.
+//! Token renewal (authorised by the user, see `oauth_refresh`) lives in its
+//! own module: this one never writes a profile file.
 //!
 //! Sources (primary, checked against the installed CLI versions):
 //! - Claude Code 2.1.299 (bundled gateway contract and OAuth constants in the
@@ -23,15 +24,13 @@
 //!   secondary}_window.{used_percent, limit_window_seconds, reset_at}`,
 //!   `additional_rate_limits[]`, `rate_limit_reset_credits.available_count`).
 //!   Token refresh is a separate `POST …/oauth/token` the CLI's AuthManager
-//!   performs with the refresh token; a bearer read never triggers it, so the
-//!   grant shared with the primary session cannot be rotated from here.
+//!   performs with the refresh token; a bearer read never triggers it.
 //! - aip itself (3961fa0, `src/claude/usage.rs`, `src/codex/usage.rs`) reads
 //!   both endpoints the same way for its dashboard: Codex tokens as they are
 //!   (« Codex owns refresh »), the current Claude profile's token as it is,
 //!   and it notes that an expired Claude token may answer 429 with
-//!   `retry-after: 0`. Unlike aip, this app never refreshes a dormant Claude
-//!   snapshot: a refresh spends the single-use refresh token and must be
-//!   written back under aip's `credentials.json.lock`; see docs/aip-profiles.md.
+//!   `retry-after: 0`. Renewal of dormant snapshots follows aip's own protocol
+//!   in `oauth_refresh` (same `credentials.json.lock`); see docs/aip-profiles.md.
 use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Duration;
@@ -83,6 +82,40 @@ pub enum ReadError {
     Malformed,
     /// Refused base URL (only HTTPS or loopback HTTP may carry a bearer).
     InsecureBase,
+    /// Renewal needed but the credential carries no refresh token.
+    NoRefreshToken,
+    /// Renewal needed but the refresh grant is shared with another profile
+    /// file (aip's imported-grant marker, a sibling snapshot or the primary
+    /// home): rotating it would break the other session, so it is never done.
+    SharedGrant,
+    /// Renewal needed but another process holds the profile's lock (aip or
+    /// another Quota Monitor is rotating it); transient.
+    RefreshLocked,
+    /// Renewal needed but the profile file/lock cannot be used safely
+    /// (symlink, not a regular file, lock file not creatable, non-unix host).
+    RefreshUnavailable,
+    /// The provider rejected the refresh token (`invalid_grant`, 400/401/403):
+    /// consumed by another refresh, revoked or expired.
+    RefreshRejected,
+    /// Rotation succeeded server-side but the profile file could not be
+    /// replaced; the new tokens are kept in memory and the save is retried on
+    /// the next cycle (the consumed refresh token is never sent again).
+    RefreshUnsaved,
+}
+
+impl ReadError {
+    /// Errors that keep the last values (marked as error, retried later).
+    pub fn transient(self) -> bool {
+        matches!(
+            self,
+            ReadError::RateLimited(_)
+                | ReadError::Timeout
+                | ReadError::Transport
+                | ReadError::Http(_)
+                | ReadError::RefreshLocked
+                | ReadError::RefreshUnsaved
+        )
+    }
 }
 
 /// One Claude OAuth credential snapshot, as saved by aip (keychain item).
@@ -108,6 +141,18 @@ impl ClaudeCredential {
     pub fn expired(&self, now: i64) -> bool {
         self.expires_at
             .is_some_and(|e| e.saturating_sub(EXPIRY_SKEW_SECS) <= now)
+    }
+    /// Unix seconds of the recorded expiry (`None` when the snapshot has none).
+    pub fn expires_at(&self) -> Option<i64> {
+        self.expires_at
+    }
+    /// True when `token` is the access token this credential carries
+    /// (used to tell « another process already rotated it » apart).
+    pub(crate) fn carries(&self, token: &str) -> bool {
+        self.token == token
+    }
+    pub(crate) fn token(&self) -> &str {
+        &self.token
     }
 }
 
@@ -136,11 +181,20 @@ impl CodexCredential {
         self.expires_at
             .is_some_and(|e| e.saturating_sub(EXPIRY_SKEW_SECS) <= now)
     }
+    pub fn expires_at(&self) -> Option<i64> {
+        self.expires_at
+    }
+    pub(crate) fn carries(&self, token: &str) -> bool {
+        self.token == token
+    }
+    pub(crate) fn token(&self) -> &str {
+        &self.token
+    }
 }
 
 // ------------------------------------------------------------ credentials
 
-fn read_bounded(path: &Path) -> Result<Vec<u8>, ReadError> {
+pub(crate) fn read_bounded(path: &Path) -> Result<Vec<u8>, ReadError> {
     let meta = std::fs::metadata(path).map_err(|_| ReadError::CredentialUnreadable)?;
     if !meta.is_file() || meta.len() > MAX_CREDENTIAL_BYTES {
         return Err(ReadError::CredentialUnreadable);
@@ -165,7 +219,7 @@ fn decode_hex_json(raw: &[u8]) -> Option<Vec<u8>> {
     bytes.first().is_some_and(|b| *b == b'{').then_some(bytes)
 }
 
-fn non_empty(value: &Value) -> Option<String> {
+pub(crate) fn non_empty(value: &Value) -> Option<String> {
     value
         .as_str()
         .map(str::trim)
@@ -174,7 +228,7 @@ fn non_empty(value: &Value) -> Option<String> {
 }
 
 /// Seconds from a JSON timestamp given in seconds or milliseconds.
-fn unix_seconds(value: &Value) -> Option<i64> {
+pub(crate) fn unix_seconds(value: &Value) -> Option<i64> {
     let n = value.as_f64()?;
     if !n.is_finite() || n <= 0.0 {
         return None;
@@ -189,9 +243,23 @@ fn unix_seconds(value: &Value) -> Option<i64> {
 /// Loads `<profile>/credentials.json` (aip Claude snapshot) in memory.
 pub fn load_claude(profile_dir: &Path) -> Result<ClaudeCredential, ReadError> {
     let raw = read_bounded(&profile_dir.join(crate::aip::CLAUDE_PAYLOAD))?;
-    let json = decode_hex_json(&raw).ok_or(ReadError::CredentialUnreadable)?;
+    claude_credential(&parse_claude_json(&raw)?)
+}
+
+/// The snapshot's JSON document (hex-decoded when needed), unchanged.
+pub(crate) fn parse_claude_json(raw: &[u8]) -> Result<Value, ReadError> {
+    let json = decode_hex_json(raw).ok_or(ReadError::CredentialUnreadable)?;
     let value: Value =
         serde_json::from_slice(&json).map_err(|_| ReadError::CredentialUnreadable)?;
+    value
+        .get("claudeAiOauth")
+        .filter(|v| v.is_object())
+        .ok_or(ReadError::CredentialUnreadable)?;
+    Ok(value)
+}
+
+/// The credential carried by a parsed snapshot document.
+pub(crate) fn claude_credential(value: &Value) -> Result<ClaudeCredential, ReadError> {
     let oauth = value
         .get("claudeAiOauth")
         .filter(|v| v.is_object())
@@ -239,10 +307,20 @@ fn jwt_claims(token: &str) -> Option<Value> {
 /// no ChatGPT quotas (`NoToken`).
 pub fn load_codex(home: &Path) -> Result<CodexCredential, ReadError> {
     let raw = read_bounded(&home.join(crate::aip::CODEX_PAYLOAD))?;
-    let value: Value = serde_json::from_slice(&raw).map_err(|_| ReadError::CredentialUnreadable)?;
+    codex_credential(&parse_codex_json(&raw)?)
+}
+
+/// The `auth.json` document, unchanged.
+pub(crate) fn parse_codex_json(raw: &[u8]) -> Result<Value, ReadError> {
+    let value: Value = serde_json::from_slice(raw).map_err(|_| ReadError::CredentialUnreadable)?;
     if !value.is_object() {
         return Err(ReadError::CredentialUnreadable);
     }
+    Ok(value)
+}
+
+/// The credential carried by a parsed `auth.json` document.
+pub(crate) fn codex_credential(value: &Value) -> Result<CodexCredential, ReadError> {
     let tokens = &value["tokens"];
     let token = non_empty(&tokens["access_token"]).ok_or(ReadError::NoToken)?;
     let access = jwt_claims(&token).unwrap_or(Value::Null);
@@ -267,7 +345,7 @@ pub fn load_codex(home: &Path) -> Result<CodexCredential, ReadError> {
 
 /// A bearer may only travel over HTTPS, or over plain HTTP to the loopback
 /// interface (local test servers). Profiles never choose the base.
-fn checked_base(base: &str) -> Result<&str, ReadError> {
+pub(crate) fn checked_base(base: &str) -> Result<&str, ReadError> {
     let base = base.trim_end_matches('/');
     if base.starts_with("https://")
         || base.starts_with("http://127.0.0.1:")
@@ -279,7 +357,7 @@ fn checked_base(base: &str) -> Result<&str, ReadError> {
     }
 }
 
-fn client(timeout: Duration) -> Result<reqwest::blocking::Client, ReadError> {
+pub(crate) fn client(timeout: Duration) -> Result<reqwest::blocking::Client, ReadError> {
     reqwest::blocking::Client::builder()
         .connect_timeout(timeout.min(Duration::from_secs(5)))
         .timeout(timeout)
@@ -487,12 +565,17 @@ pub fn read_codex_home(
 ) -> Result<CodexUsage, ReadError> {
     let credential = load_codex(home)?;
     let raw = fetch_codex(base, &credential, timeout, now)?;
-    Ok(CodexUsage {
-        rate_limits: codex_rate_limits_value(&raw),
+    Ok(codex_usage(credential, &raw))
+}
+
+/// The usage read of one credential, projected for `codex::normalize`.
+pub fn codex_usage(credential: CodexCredential, raw: &Value) -> CodexUsage {
+    CodexUsage {
+        rate_limits: codex_rate_limits_value(raw),
         plan_type: crate::claude::plan_token(&raw["plan_type"]).or(credential.plan_type),
         email: credential.email,
         account_id: non_empty(&raw["account_id"]).or(credential.account_id),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -568,9 +651,20 @@ pub(crate) mod test_support {
                             break;
                         }
                     }
+                    // Body (POST refresh): `content-length` bytes, appended
+                    // after the head so tests can assert the form/JSON sent.
+                    let text = String::from_utf8_lossy(&head).into_owned();
+                    let length = Self::header(&text, "content-length")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0)
+                        .min(64 * 1024);
+                    let mut body = vec![0u8; length];
+                    if length > 0 {
+                        let _ = stream.read_exact(&mut body);
+                    }
                     log.lock()
                         .unwrap()
-                        .push(String::from_utf8_lossy(&head).into_owned());
+                        .push(text + &String::from_utf8_lossy(&body));
                     if reply.hang {
                         std::thread::sleep(Duration::from_secs(3));
                         continue;

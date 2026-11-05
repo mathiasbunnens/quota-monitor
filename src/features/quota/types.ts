@@ -54,7 +54,8 @@ export type CodexAccount = ClaudeProfile & {
   tracked: boolean;
   available: boolean;
   refreshing: boolean;
-  /** `expired`: aip home whose saved token no longer works (read-only transport, never refreshed);
+  /** `expired`: aip home whose saved token no longer works and could not be renewed
+   *  (refused by the provider, or a grant still shared with the source session);
    *  `blocked`: incomplete aip home (no auth.json), never read. */
   phase: CodexStatus["phase"] | "unavailable" | "blocked" | "expired";
   message: string;

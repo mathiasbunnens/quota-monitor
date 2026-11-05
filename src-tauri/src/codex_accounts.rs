@@ -15,7 +15,8 @@
 //! launched as an app-server child (a launched copy of the primary's grant
 //! could rotate its token, aip's own guard): the collector reads their quotas
 //! over HTTPS with the access token saved in the home (`Collect::Credential`,
-//! `oauth_usage`), which never refreshes anything.
+//! `oauth_usage`), renewed with the CLI's protocol only when the home owns
+//! its grant (`oauth_refresh`: aip's imported-grant marker is honoured).
 use crate::account_sources::{self, Blocker, Collect, Origin};
 use crate::claude_accounts::{identity, normalized, profile_path, AccountPrefs, Profile};
 use std::path::{Path, PathBuf};

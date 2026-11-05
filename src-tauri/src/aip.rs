@@ -14,7 +14,8 @@
 //! opens `credentials.json`, `auth.json` or `aip-imported-refresh.sha256`,
 //! never writes anything and never calls the `aip` executable. Loading a
 //! profile's credential in memory for one usage read is the collector's job
-//! (`oauth_usage`), which never writes it back either.
+//! (`oauth_usage`); renewing it with the provider's own protocol, under aip's
+//! lock, is `oauth_refresh`'s (the only module writing a profile file).
 use std::path::{Path, PathBuf};
 
 pub const PROFILES_DIR: &str = "profiles";

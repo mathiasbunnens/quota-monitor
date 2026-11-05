@@ -226,8 +226,13 @@ impl Provider {
     /// generation: an answer still in flight from the old child is rejected.
     pub fn reconcile(&self, app: &tauri::AppHandle) {
         let prefs = crate::prefs::current(app);
+        let mut primary_home: Option<PathBuf> = None;
         let wanted: Vec<_> = if prefs.codex_enabled {
             let found = discovered(app, &prefs);
+            primary_home = found
+                .iter()
+                .find(|a| a.primary)
+                .map(|a| PathBuf::from(&a.profile.path));
             let mut plan = collection_plan(found.clone());
             plan.extend(credential_plan(found));
             plan
@@ -264,6 +269,7 @@ impl Provider {
                     generation,
                     transport: transport.clone(),
                     usage_base: crate::oauth_usage::CODEX_USAGE_BASE.into(),
+                    primary_home: primary_home.clone(),
                     shared: shared.clone(),
                     store: self.store.clone(),
                     executable: {
@@ -1153,7 +1159,8 @@ pub(crate) enum Transport {
     /// Own `codex app-server` child with `CODEX_HOME` = the raw followed value.
     AppServer { launch: PathBuf },
     /// aip home: `auth.json` loaded in memory, one HTTPS usage read, no child
-    /// process, no refresh (`oauth_usage`).
+    /// process; renewed before expiry when the home owns its grant
+    /// (`oauth_usage`, `oauth_refresh`).
     Credential { home: PathBuf },
 }
 impl Transport {
@@ -1179,6 +1186,9 @@ pub(crate) struct ExtraWorker {
     /// Usage-API base for `Transport::Credential` (`CODEX_USAGE_BASE` in
     /// production, a loopback server in tests).
     usage_base: String,
+    /// Primary home (raw `CODEX_HOME` or `~/.codex`): its grant is never
+    /// rotated from a profile that still shares it.
+    primary_home: Option<PathBuf>,
     shared: Arc<Shared>,
     store: Arc<Mutex<AccountStore>>,
     executable: Box<dyn Fn() -> Option<PathBuf> + Send>,
@@ -1199,8 +1209,9 @@ const CREDENTIAL_MIN_SECS: u64 = 120;
 /// Pause after an HTTP 429 without `retry-after`.
 const CREDENTIAL_RATE_LIMITED_SECS: u64 = 900;
 
-/// Read-only polling of one aip home over the usage API with the token saved
-/// in its `auth.json`: no child process, no login, no refresh, no reset. The
+/// Polling of one aip home over the usage API with the token saved in its
+/// `auth.json`: no child process, no login, no reset; the token is renewed
+/// before expiry (CLI protocol, own grant only — `oauth_refresh`). The
 /// answer goes through the same `normalize` as app-server's rate limits and
 /// the same identity fingerprint as `account/read`.
 fn poll_credential(w: &ExtraWorker, home: &Path, failures: &mut u32) -> (Reading, Duration) {
@@ -1217,11 +1228,16 @@ fn poll_credential(w: &ExtraWorker, home: &Path, failures: &mut u32) -> (Reading
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "profil".into());
-    let read = crate::oauth_usage::read_codex_home(
+    let read = crate::oauth_refresh::read_codex_home(
         home,
         &w.usage_base,
         crate::oauth_usage::DEFAULT_TIMEOUT,
         chrono::Utc::now().timestamp(),
+        // Renew before the CLI's own 5 min window and before the next poll
+        // could miss it: a CLI running on this home then adopts the fresh
+        // tokens on its guarded reload instead of racing for the grant.
+        2 * floor(None).as_secs() as i64,
+        w.primary_home.as_deref(),
     );
     match read {
         Ok(usage) => match normalize(&usage.rate_limits) {
@@ -1266,10 +1282,35 @@ fn poll_credential(w: &ExtraWorker, home: &Path, failures: &mut u32) -> (Reading
                     format!("Profil aip « {aip_name} » sans jeton ChatGPT (clé API ou déconnecté) : sélectionnez-le dans aip puis « aip codex login »."),
                     floor(None).max(Duration::from_secs(120)),
                 ),
-                ReadError::Expired | ReadError::Unauthorized => (
+                ReadError::Expired | ReadError::Unauthorized | ReadError::RefreshRejected => (
                     "expired",
-                    format!("Session du profil aip « {aip_name} » expirée ou révoquée : sélectionnez-le dans aip puis lancez « aip codex » (ou « aip codex login ») pour la renouveler. Quota Monitor ne rafraîchit jamais un jeton."),
+                    format!("Session du profil aip « {aip_name} » expirée ou révoquée et renouvellement automatique refusé par OpenAI : sélectionnez-le dans aip puis lancez « aip codex login » pour la renouveler."),
                     floor(None).max(Duration::from_secs(300)),
+                ),
+                ReadError::NoRefreshToken => (
+                    "expired",
+                    format!("Session du profil aip « {aip_name} » expirée et sans jeton de renouvellement : sélectionnez-le dans aip puis « aip codex login »."),
+                    floor(None).max(Duration::from_secs(300)),
+                ),
+                ReadError::SharedGrant => (
+                    "expired",
+                    format!("Session du profil aip « {aip_name} » expirée. Sa connexion est encore celle importée du compte principal (ou partagée avec un autre profil) : Quota Monitor ne la renouvelle pas, cela déconnecterait la session d’origine. Faites « aip codex login » une fois pour ce profil."),
+                    floor(None).max(Duration::from_secs(300)),
+                ),
+                ReadError::RefreshUnavailable => (
+                    "expired",
+                    format!("Session du profil aip « {aip_name} » expirée et renouvellement impossible ici (auth.json non ordinaire ou verrou indisponible) : « aip codex » pour ce profil."),
+                    floor(None).max(Duration::from_secs(300)),
+                ),
+                ReadError::RefreshLocked => (
+                    "error",
+                    format!("Renouvellement de « {aip_name} » reporté : un autre Quota Monitor tient son verrou."),
+                    floor(None),
+                ),
+                ReadError::RefreshUnsaved => (
+                    "error",
+                    format!("Jetons de « {aip_name} » renouvelés par OpenAI mais impossibles à enregistrer dans auth.json (permissions, disque). Nouvelle tentative au prochain cycle ; vérifiez le dossier du profil aip."),
+                    floor(None),
                 ),
                 ReadError::Forbidden => (
                     "error",
@@ -1963,6 +2004,7 @@ done
                 launch: launch.to_path_buf(),
             },
             usage_base: crate::oauth_usage::CODEX_USAGE_BASE.into(),
+            primary_home: None,
             shared: shared.clone(),
             store: store.clone(),
             executable: Box::new(move || Some(exe.clone())),
@@ -2324,6 +2366,7 @@ done
                 home: home.to_path_buf(),
             },
             usage_base: base.into(),
+            primary_home: None,
             shared: shared.clone(),
             store: store.clone(),
             executable: Box::new(move || Some(exe.clone())),
@@ -2556,6 +2599,7 @@ done
                 home: perso.clone(),
             },
             usage_base: server.base.clone(),
+            primary_home: None,
             shared: Arc::new(Shared::default()),
             store: Arc::new(Mutex::new(AccountStore::default())),
             executable: Box::new(|| None),
@@ -2582,6 +2626,150 @@ done
             r.message
         );
         assert!(r.rows.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Autonomous upkeep of aip Codex homes through the worker's own poll:
+    /// a home with its own grant (`aip codex login` done: the marker lists
+    /// only the old import) about to expire is renewed with the CLI's
+    /// protocol, written back and read; a home whose grant is still the
+    /// imported one (marker lists it) is read while valid and reported as
+    /// shared once dead, never rotated; `_current` and markers untouched.
+    #[cfg(unix)]
+    #[test]
+    fn aip_codex_homes_with_their_own_grant_are_renewed_imported_ones_never() {
+        use crate::oauth_usage::test_support::{jwt, Reply, Server};
+        let root = scratch("aip-renew");
+        let profiles = root.join(".codex").join(crate::aip::PROFILES_DIR);
+        let now = chrono::Utc::now().timestamp();
+        let auth = |name: &str, exp: i64, refresh: &str, marker: &str| {
+            let dir = profiles.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            let access = jwt(
+                &json!({"exp": exp, "https://api.openai.com/auth": {"chatgpt_account_id": "acct-1"}}),
+            );
+            fs::write(
+                dir.join(crate::aip::CODEX_PAYLOAD),
+                json!({"OPENAI_API_KEY": null, "tokens": {"id_token": jwt(&json!({"email": "a@example.invalid"})),
+                    "access_token": access, "refresh_token": refresh, "account_id": "acct-1"},
+                    "last_refresh": "2026-01-01T00:00:00Z"})
+                .to_string(),
+            )
+            .unwrap();
+            fs::write(dir.join(crate::oauth_refresh::CODEX_IMPORT_MARKER), marker).unwrap();
+            dir
+        };
+        let own = auth(
+            "own",
+            now + 400,
+            "SYNTHETIC-CODEX-REFRESH-own",
+            &format!(
+                "{}\n",
+                crate::oauth_refresh::fingerprint("SYNTHETIC-CODEX-REFRESH-import")
+            ),
+        );
+        let imported = auth(
+            "imported",
+            now + 400,
+            "SYNTHETIC-CODEX-REFRESH-shared",
+            &format!(
+                "{}\n",
+                crate::oauth_refresh::fingerprint("SYNTHETIC-CODEX-REFRESH-shared")
+            ),
+        );
+        fs::write(profiles.join(crate::aip::CURRENT_MARKER), "own\n").unwrap();
+        let imported_before = fs::read(imported.join(crate::aip::CODEX_PAYLOAD)).unwrap();
+        let usage = r#"{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":25,"limit_window_seconds":18000,"reset_at":1900000000},"secondary_window":null}}"#;
+        let new_access = jwt(
+            &json!({"exp": now + 7200, "https://api.openai.com/auth": {"chatgpt_account_id": "acct-1"}}),
+        );
+        let server = Server::start(vec![
+            Reply::json(200, &json!({"access_token": new_access, "refresh_token": "SYNTHETIC-CODEX-REFRESH-own2"}).to_string()),
+            Reply::json(200, usage),
+            Reply::json(200, usage),
+            Reply::json(200, usage),
+        ]);
+        let worker = |home: &PathBuf| ExtraWorker {
+            id: "x".into(),
+            generation: 0,
+            transport: Transport::Credential { home: home.clone() },
+            usage_base: server.base.clone(),
+            primary_home: Some(root.join(".codex")),
+            shared: Arc::new(Shared::default()),
+            store: Arc::new(Mutex::new(AccountStore::default())),
+            executable: Box::new(|| None),
+            interval: Box::new(|_| 60),
+            changed: Box::new(|| {}),
+            first_poll: Instant::now(),
+        };
+        let mut failures = 0;
+        let (r, _) = poll_credential(&worker(&own), &own, &mut failures);
+        assert_eq!(
+            (r.phase.as_str(), r.plan_type.as_deref()),
+            ("ready", Some("plus")),
+            "{}",
+            r.message
+        );
+        assert_eq!(r.rows.as_ref().unwrap()[0].remaining, 75);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(
+            requests[0].starts_with("POST /oauth/token ")
+                && requests[0].contains("SYNTHETIC-CODEX-REFRESH-own")
+        );
+        assert_eq!(
+            Server::header(&requests[1], "authorization").as_deref(),
+            Some(&*format!("Bearer {new_access}"))
+        );
+        let saved: Value =
+            serde_json::from_slice(&fs::read(own.join(crate::aip::CODEX_PAYLOAD)).unwrap())
+                .unwrap();
+        assert_eq!(
+            saved["tokens"]["refresh_token"],
+            "SYNTHETIC-CODEX-REFRESH-own2"
+        );
+        assert_eq!(saved["tokens"]["account_id"], "acct-1");
+        // Next poll: fresh, read only.
+        let (r, _) = poll_credential(&worker(&own), &own, &mut failures);
+        assert_eq!(r.phase, "ready");
+        assert_eq!(server.requests().len(), 3);
+        // Imported grant: read while valid, never rotated, explicit once dead.
+        let (r, _) = poll_credential(&worker(&imported), &imported, &mut failures);
+        assert_eq!(r.phase, "ready", "{}", r.message);
+        assert_eq!(server.requests().len(), 4);
+        let dead = auth(
+            "imported",
+            now - 5,
+            "SYNTHETIC-CODEX-REFRESH-shared",
+            &format!(
+                "{}\n",
+                crate::oauth_refresh::fingerprint("SYNTHETIC-CODEX-REFRESH-shared")
+            ),
+        );
+        let dead_before = fs::read(dead.join(crate::aip::CODEX_PAYLOAD)).unwrap();
+        let (r, delay) = poll_credential(&worker(&dead), &dead, &mut failures);
+        assert_eq!(r.phase, "expired");
+        assert!(
+            r.message.contains("aip codex login") && r.message.contains("importée"),
+            "{}",
+            r.message
+        );
+        assert!(r.rows.is_none() && delay >= Duration::from_secs(300));
+        assert_eq!(
+            server.requests().len(),
+            4,
+            "nothing sent for a shared grant"
+        );
+        assert_eq!(
+            fs::read(dead.join(crate::aip::CODEX_PAYLOAD)).unwrap(),
+            dead_before
+        );
+        assert_ne!(imported_before, dead_before);
+        assert_eq!(
+            fs::read_to_string(profiles.join(crate::aip::CURRENT_MARKER)).unwrap(),
+            "own\n"
+        );
+        assert!(!r.message.contains("SYNTHETIC") && !r.message.contains("eyJ"));
         fs::remove_dir_all(root).unwrap();
     }
 
