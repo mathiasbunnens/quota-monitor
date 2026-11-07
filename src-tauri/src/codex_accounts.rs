@@ -47,11 +47,15 @@ pub struct Discovered {
     /// memory by `oauth_usage`, raw folder path): `Some` implies `tracked`,
     /// `launch == None` (never an app-server child) and `blocker == None`.
     pub credential: Option<PathBuf>,
+    pub managed: bool,
 }
 
 /// User-facing reason of a blocked account (no path, no secret).
 pub fn blocked_message(blocker: Blocker) -> &'static str {
     match blocker {
+        Blocker::ManagedIncomplete => {
+            "Profil ai-profiles limité au bureau ou dossier CLI absent : aucun quota CLI à lire."
+        }
         Blocker::Incomplete => "Profil aip incomplet (aucun auth.json) : rien à lire.",
     }
 }
@@ -123,7 +127,9 @@ pub fn discover(home: &Path, env: Option<&Path>, prefs: &AccountPrefs) -> Vec<Di
             Collect::Blocked(b) => (Some(b), None),
             // Every spelling of an aip home (detected, symlinked sibling,
             // saved by hand) is read with its own credential, never launched.
-            Collect::Credential => (None, Some(PathBuf::from(&r.candidate.raw))),
+            Collect::Credential | Collect::ManagedCredential => {
+                (None, Some(PathBuf::from(&r.candidate.raw)))
+            }
             _ => (None, None),
         };
         if blocker.is_none() {
@@ -152,6 +158,7 @@ pub fn discover(home: &Path, env: Option<&Path>, prefs: &AccountPrefs) -> Vec<Di
             visible: false,
             blocker,
             credential,
+            managed: r.candidate.collect == Collect::ManagedCredential,
         });
     }
     // Same display rules as 3.2.0, applied to the bounded list: only followed
@@ -226,6 +233,7 @@ pub(crate) fn legacy_discover(
         profile: primary_profile,
         blocker: None,
         credential: None,
+        managed: false,
     }];
     // Detected homes first (sorted, so the order is stable whether or not the
     // user renamed one), then saved homes outside `~/` detection.
@@ -262,6 +270,7 @@ pub(crate) fn legacy_discover(
             visible: false,
             blocker: None,
             credential: None,
+            managed: false,
         });
     };
     if let Ok(entries) = std::fs::read_dir(home) {

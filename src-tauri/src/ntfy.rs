@@ -1141,6 +1141,7 @@ mod tests {
             visible: true,
             blocker: None,
             credential: None,
+            managed: false,
         };
         let checked = chrono::DateTime::from_timestamp(1000, 0)
             .unwrap()

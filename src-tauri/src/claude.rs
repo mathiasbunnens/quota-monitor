@@ -550,7 +550,11 @@ pub(crate) fn stored_view(
     enabled: bool,
     executable: bool,
 ) -> ClaudeSnapshot {
-    let credential = account.collect == crate::account_sources::Collect::Credential;
+    let credential = matches!(
+        account.collect,
+        crate::account_sources::Collect::Credential
+            | crate::account_sources::Collect::ManagedCredential
+    );
     let configured = executable || credential;
     if let Some(blocker) = account.blocker() {
         let mut snap = compute(enabled, configured, FileState::Missing, unix_now());
@@ -564,7 +568,13 @@ pub(crate) fn stored_view(
         if credential {
             snap.source = Some(Source {
                 kind: USAGE_API_SOURCE,
-                documentation_url: USAGE_API_DOC_URL,
+                documentation_url: if account.collect
+                    == crate::account_sources::Collect::ManagedCredential
+                {
+                    "https://github.com/bartekczyz/ai-profiles"
+                } else {
+                    USAGE_API_DOC_URL
+                },
             });
         }
         snap
@@ -661,7 +671,7 @@ pub(crate) fn display_metrics(metrics: &[Metric]) -> Vec<Metric> {
 
 fn prepare_snapshot(mut snap: ClaudeSnapshot, enabled: bool, available: bool) -> ClaudeSnapshot {
     snap.enabled = enabled;
-    snap.source = Some(Source {
+    snap.source.get_or_insert(Source {
         kind: "official_cli_control",
         documentation_url: "https://code.claude.com/docs/en/cli-reference",
     });
@@ -750,7 +760,11 @@ fn refresh_live(app: &tauri::AppHandle) {
         if GENERATION.load(Ordering::Acquire) != generation || !prefs::current(app).claude_enabled {
             break;
         }
-        let credential = a.collect == crate::account_sources::Collect::Credential;
+        let credential = matches!(
+            a.collect,
+            crate::account_sources::Collect::Credential
+                | crate::account_sources::Collect::ManagedCredential
+        );
         if credential && !credential_due(&CREDENTIAL_NEXT, &a.profile.id, now) {
             continue; // the usage API is polled at most every CREDENTIAL_MIN_SECS
         }
@@ -836,7 +850,18 @@ fn poll_profile(
     };
     changed();
     let previous = store.lock().unwrap().snapshot(&profile.id);
-    let snap = if account.collect == crate::account_sources::Collect::Credential {
+    let snap = if account.collect == crate::account_sources::Collect::ManagedCredential {
+        managed_snapshot(
+            crate::ai_profiles::read_claude(
+                Path::new(&profile.path),
+                base,
+                crate::oauth_usage::DEFAULT_TIMEOUT,
+                unix_now(),
+            ),
+            previous,
+            unix_now(),
+        )
+    } else if account.collect == crate::account_sources::Collect::Credential {
         // aip snapshot: its own saved token, over HTTPS, no child process;
         // renewed first under aip's own lock when it is about to expire.
         let now = unix_now();
@@ -935,6 +960,46 @@ pub(crate) fn credential_snapshot(
     snap.capability = Capability {
         refresh: "on_demand",
     };
+    snap
+}
+fn managed_snapshot(
+    result: Result<Value, crate::ai_profiles::ClaudeError>,
+    previous: Option<ClaudeSnapshot>,
+    now: i64,
+) -> ClaudeSnapshot {
+    use crate::ai_profiles::ClaudeError;
+    let err = result.as_ref().err().copied();
+    let mapped = result.map_err(|e| match e {
+        ClaudeError::Read(r) => r,
+        _ => crate::oauth_usage::ReadError::Malformed,
+    });
+    let mut snap = credential_snapshot(mapped, "ai-profiles", Path::new(""), previous, now);
+    snap.source = Some(Source {
+        kind: USAGE_API_SOURCE,
+        documentation_url: "https://github.com/bartekczyz/ai-profiles",
+    });
+    snap.message = match err {
+        None => "Quotas ai-profiles lus en lecture seule ; renouvellement assuré par le CLI/manager.".into(),
+        Some(ClaudeError::Read(e)) => crate::ai_profiles::codex_error(e),
+        Some(ClaudeError::IdentityUnavailable) => "ai-profiles : identité de connexion non vérifiable (.claude.json ou API de profil indisponible) ; quotas masqués par sécurité.".into(),
+        Some(ClaudeError::AccountMismatch) => "ai-profiles : la connexion appartient à un autre compte (collision Keychain ou import). Quotas masqués ; aucun compte modifié.".into(),
+        Some(ClaudeError::Changed) => "ai-profiles : connexion modifiée pendant la lecture ; nouvelle tentative au prochain cycle.".into(),
+    };
+    if err.is_some() {
+        // Identity is checked anew each cycle. A failed probe cannot prove that
+        // the previous metrics still belong to the current manager connection.
+        snap.metrics.clear();
+        snap.plan_type = None;
+        snap.extra_usage = None;
+    }
+    if matches!(
+        err,
+        Some(
+            ClaudeError::IdentityUnavailable | ClaudeError::AccountMismatch | ClaudeError::Changed
+        )
+    ) {
+        snap.error_kind = Some("identity_unverified");
+    }
     snap
 }
 fn error_snapshot(mut snap: ClaudeSnapshot, kind: &'static str, message: String) -> ClaudeSnapshot {
@@ -2046,6 +2111,141 @@ cat >/dev/null
             t0 + Duration::from_secs(CREDENTIAL_RATE_LIMITED_SECS)
         ));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ai_profiles_identity_failure_never_retains_previous_account_metrics() {
+        for error in [
+            crate::ai_profiles::ClaudeError::AccountMismatch,
+            crate::ai_profiles::ClaudeError::Changed,
+            crate::ai_profiles::ClaudeError::IdentityUnavailable,
+            crate::ai_profiles::ClaudeError::Read(crate::oauth_usage::ReadError::Timeout),
+            crate::ai_profiles::ClaudeError::Read(crate::oauth_usage::ReadError::RateLimited(Some(60))),
+        ] {
+            let previous = managed_snapshot(
+                Ok(
+                    json!({"rate_limits_available":true,"subscription_type":"max","rate_limits":{"five_hour":{"utilization":10,"resets_at":"2099-01-01T00:00:00Z"}}}),
+                ),
+                None,
+                unix_now(),
+            );
+            let projected = account_view(previous.clone(), true, true, None);
+            assert_eq!(
+                projected.source.unwrap().documentation_url,
+                "https://github.com/bartekczyz/ai-profiles"
+            );
+            let next = managed_snapshot(Err(error), Some(previous), unix_now());
+            assert!(next.error_kind.is_some());
+            assert!(next.metrics.is_empty());
+            assert!(next.plan_type.is_none());
+            assert_eq!(
+                next.source.unwrap().documentation_url,
+                "https://github.com/bartekczyz/ai-profiles"
+            );
+        }
+    }
+
+    #[test]
+    fn ai_profiles_collector_reads_repeated_cycles_without_cli_or_refresh() {
+        use crate::oauth_usage::test_support::{Reply, Server};
+        let root = std::env::temp_dir().join(format!("qm-managed-claude-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let home = root.canonicalize().unwrap();
+        let cli = home.join("Library/Application Support/ai-profiles/profiles/work/cli-config");
+        fs::create_dir_all(&cli).unwrap();
+        let metadata = home.join("Library/Application Support/ai-profiles/profiles.json");
+        let meta =
+            r#"{"profiles":[{"id":"work","name":"Travail","surfaces":{"cli":true,"gui":false}}]}"#;
+        fs::write(&metadata, meta).unwrap();
+        fs::write(
+            cli.join(".claude.json"),
+            r#"{"oauthAccount":{"accountUuid":"account-work"}}"#,
+        )
+        .unwrap();
+        let credential = |expires: i64, token: &str| {
+            json!({"claudeAiOauth":{"accessToken":token,"refreshToken":"SYNTHETIC-SHARED","expiresAt":expires*1000,"subscriptionType":"max"}}).to_string()
+        };
+        let initial = credential(unix_now() + 600, "SYNTHETIC-OLD");
+        fs::write(cli.join(".credentials.json"), &initial).unwrap();
+        let prefs = crate::claude_accounts::AccountPrefs {
+            mode: "multi".into(),
+            ..Default::default()
+        };
+        let found = collection_plan(crate::claude_accounts::discover(&home, None, &prefs));
+        let a = found
+            .iter()
+            .find(|a| a.profile.name == "Travail · ai-profiles")
+            .unwrap();
+        assert!(a.launch.is_none());
+        let log = home.join("cli.log");
+        let exe = routing_cli(&home, &log);
+        let server = Server::start(vec![
+            Reply::json(200, r#"{"account":{"uuid":"account-work"}}"#),
+            Reply::json(
+                200,
+                r#"{"five_hour":{"utilization":18,"resets_at":"2099-01-01T00:00:00Z"}}"#,
+            ),
+            Reply::json(200, r#"{"account":{"uuid":"account-work"}}"#),
+            Reply::json(
+                200,
+                r#"{"five_hour":{"utilization":29,"resets_at":"2099-01-01T00:00:00Z"}}"#,
+            ),
+        ]);
+        let store = std::sync::Mutex::new(crate::claude_accounts::RefreshStore::new());
+        assert!(poll_profile(
+            &store,
+            a,
+            Some(&exe),
+            &home,
+            &server.base,
+            || {}
+        ));
+        let snap = store.lock().unwrap().snapshot(&a.profile.id).unwrap();
+        assert_eq!(snap.state, "ready");
+        assert_eq!(snap.metrics[0].used_percent, Some(18.0));
+        assert_eq!(snap.plan_type.as_deref(), Some("max"));
+        assert_eq!(
+            fs::read_to_string(cli.join(".credentials.json")).unwrap(),
+            initial
+        );
+        fs::write(
+            cli.join(".credentials.json"),
+            credential(unix_now() - 1, "SYNTHETIC-OLD"),
+        )
+        .unwrap();
+        assert!(poll_profile(
+            &store,
+            a,
+            Some(&exe),
+            &home,
+            &server.base,
+            || {}
+        ));
+        let snap = store.lock().unwrap().snapshot(&a.profile.id).unwrap();
+        assert_eq!(snap.error_kind, Some("session_expired"));
+        assert!(snap.metrics.is_empty());
+        assert_eq!(server.requests().len(), 2);
+        let fresh = credential(unix_now() + 7200, "SYNTHETIC-NEW");
+        fs::write(cli.join(".credentials.json"), &fresh).unwrap();
+        assert!(poll_profile(
+            &store,
+            a,
+            Some(&exe),
+            &home,
+            &server.base,
+            || {}
+        ));
+        let snap = store.lock().unwrap().snapshot(&a.profile.id).unwrap();
+        assert_eq!(snap.state, "ready");
+        assert_eq!(snap.metrics[0].used_percent, Some(29.0));
+        assert!(!log.exists(), "managed home never launches a CLI");
+        assert_eq!(fs::read_to_string(&metadata).unwrap(), meta);
+        assert_eq!(
+            fs::read_to_string(cli.join(".credentials.json")).unwrap(),
+            fresh
+        );
+        assert!(server.requests().iter().all(|r| r.starts_with("GET ")));
+        fs::remove_dir_all(home).unwrap();
     }
 
     /// Autonomous upkeep through the production path (`collection_plan` →

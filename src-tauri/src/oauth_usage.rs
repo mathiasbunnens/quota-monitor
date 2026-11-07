@@ -177,6 +177,10 @@ impl std::fmt::Debug for CodexCredential {
     }
 }
 impl CodexCredential {
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+        self.token == other.token && self.account_id == other.account_id
+    }
+
     pub fn expired(&self, now: i64) -> bool {
         self.expires_at
             .is_some_and(|e| e.saturating_sub(EXPIRY_SKEW_SECS) <= now)

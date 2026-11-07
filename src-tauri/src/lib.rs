@@ -2,6 +2,7 @@
 mod account_menu;
 pub mod account_sources;
 mod activity;
+mod ai_profiles;
 pub mod aip;
 mod claude;
 mod claude_accounts;
@@ -2933,6 +2934,7 @@ pub fn quota_ui_smoke(directory: &str) {
             visible: true,
             blocker: None,
             credential: None,
+            managed: false,
         };
         let reading = codex::Reading {
             phase: phase.into(),
@@ -4243,6 +4245,7 @@ mod tests {
             visible,
             blocker: None,
             credential: None,
+            managed: false,
         };
         let status = codex::Status {
             phase: "ready".into(),

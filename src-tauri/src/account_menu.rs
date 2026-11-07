@@ -127,6 +127,7 @@ mod tests {
             visible: true,
             blocker: Some(blocker),
             credential: None,
+            managed: false,
         };
         for blocker in [Blocker::Incomplete] {
             let view = codex::account_view(found(blocker, true), true, None, None);

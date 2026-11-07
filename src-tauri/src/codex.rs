@@ -1161,11 +1161,17 @@ pub(crate) enum Transport {
     /// aip home: `auth.json` loaded in memory, one HTTPS usage read, no child
     /// process; renewed before expiry when the home owns its grant
     /// (`oauth_usage`, `oauth_refresh`).
-    Credential { home: PathBuf },
+    Credential {
+        home: PathBuf,
+    },
+    ManagedCredential {
+        home: PathBuf,
+    },
 }
 impl Transport {
     fn of(a: &crate::codex_accounts::Discovered) -> Option<Self> {
         match (&a.credential, &a.launch) {
+            (Some(home), _) if a.managed => Some(Self::ManagedCredential { home: home.clone() }),
             (Some(home), _) => Some(Self::Credential { home: home.clone() }),
             (None, Some(launch)) => Some(Self::AppServer {
                 launch: launch.clone(),
@@ -1228,17 +1234,27 @@ fn poll_credential(w: &ExtraWorker, home: &Path, failures: &mut u32) -> (Reading
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "profil".into());
-    let read = crate::oauth_refresh::read_codex_home(
-        home,
-        &w.usage_base,
-        crate::oauth_usage::DEFAULT_TIMEOUT,
-        chrono::Utc::now().timestamp(),
-        // Renew before the CLI's own 5 min window and before the next poll
-        // could miss it: a CLI running on this home then adopts the fresh
-        // tokens on its guarded reload instead of racing for the grant.
-        2 * floor(None).as_secs() as i64,
-        w.primary_home.as_deref(),
-    );
+    let managed = matches!(w.transport, Transport::ManagedCredential { .. });
+    let read = if managed {
+        crate::ai_profiles::read_codex(
+            home,
+            &w.usage_base,
+            crate::oauth_usage::DEFAULT_TIMEOUT,
+            chrono::Utc::now().timestamp(),
+        )
+    } else {
+        crate::oauth_refresh::read_codex_home(
+            home,
+            &w.usage_base,
+            crate::oauth_usage::DEFAULT_TIMEOUT,
+            chrono::Utc::now().timestamp(),
+            // Renew before the CLI's own 5 min window and before the next poll
+            // could miss it: a CLI running on this home then adopts the fresh
+            // tokens on its guarded reload instead of racing for the grant.
+            2 * floor(None).as_secs() as i64,
+            w.primary_home.as_deref(),
+        )
+    };
     match read {
         Ok(usage) => match normalize(&usage.rate_limits) {
             Ok(rows) => {
@@ -1249,7 +1265,11 @@ fn poll_credential(w: &ExtraWorker, home: &Path, failures: &mut u32) -> (Reading
                     if rows.is_empty() {
                         "Connecté à ChatGPT. Aucune fenêtre de quota n’est disponible pour ce compte."
                     } else {
-                        "Quotas lus via l’API d’usage ChatGPT avec la sauvegarde du profil aip."
+                        if managed {
+                            "Quotas ai-profiles lus en lecture seule ; session renouvelée par Codex/ai-profiles."
+                        } else {
+                            "Quotas lus via l’API d’usage ChatGPT avec la sauvegarde du profil aip."
+                        }
                     },
                 );
                 reading.plan_type = usage.plan_type;
@@ -1349,6 +1369,11 @@ fn poll_credential(w: &ExtraWorker, home: &Path, failures: &mut u32) -> (Reading
                     floor(None),
                 ),
             };
+            let message = if managed {
+                crate::ai_profiles::codex_error(err)
+            } else {
+                message
+            };
             let mut reading = Reading::new(phase, &message);
             reading.last_checked = now();
             (reading, delay)
@@ -1367,7 +1392,9 @@ fn poll_extra(
     failures: &mut u32,
 ) -> (Reading, Duration) {
     let launch = match &w.transport {
-        Transport::Credential { home } => return poll_credential(w, home, failures),
+        Transport::Credential { home } | Transport::ManagedCredential { home } => {
+            return poll_credential(w, home, failures)
+        }
         Transport::AppServer { launch } => launch,
     };
     let now = || Some(chrono::Utc::now().to_rfc3339());
@@ -1458,10 +1485,14 @@ fn run_extra(w: ExtraWorker, rx: Receiver<ExtraAction>) {
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(ExtraAction::Refresh) => next_poll = Instant::now(),
             Ok(ExtraAction::Redeem(key, reply)) => {
-                if matches!(w.transport, Transport::Credential { .. }) {
+                if matches!(
+                    w.transport,
+                    Transport::Credential { .. } | Transport::ManagedCredential { .. }
+                ) {
                     // Read-only transport: no reset is ever spent for an aip home.
                     let _ = reply.send(Err(
-                        "Réinitialisation indisponible pour un profil aip (lecture seule).".into(),
+                        "Réinitialisation indisponible pour un profil externe (lecture seule)."
+                            .into(),
                     ));
                     continue;
                 }
@@ -2343,6 +2374,97 @@ done
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn ai_profiles_codex_collector_reloads_owner_credentials_without_any_refresh_or_cli() {
+        use crate::oauth_usage::test_support::{jwt, Reply, Server};
+        let root = scratch("managed-http");
+        let home = root.join("home");
+        let cli = home.join("Library/Application Support/ai-profiles/profiles/code/cli-config");
+        fs::create_dir_all(&cli).unwrap();
+        let meta = r#"{"profiles":[{"id":"code","app":"codex","name":"Code","surfaces":{"cli":true,"gui":true}}]}"#;
+        let metadata = home.join("Library/Application Support/ai-profiles/profiles.json");
+        fs::write(&metadata, meta).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let auth = |exp: i64| {
+            json!({"tokens":{"access_token":jwt(&json!({"exp":exp})),"refresh_token":"SYNTHETIC-SHARED","account_id":"acct-managed","id_token":jwt(&json!({"email":"test@example.invalid","https://api.openai.com/auth":{"chatgpt_account_id":"acct-managed"}}))}}).to_string()
+        };
+        let path = cli.join("auth.json");
+        let initial = auth(now + 600);
+        fs::write(&path, &initial).unwrap();
+        let prefs = crate::claude_accounts::AccountPrefs {
+            mode: "multi".into(),
+            ..Default::default()
+        };
+        let found = crate::codex_accounts::discover(&home, None, &prefs);
+        assert!(collection_plan(found.clone()).is_empty());
+        let plan = credential_plan(found);
+        assert_eq!(plan.len(), 1);
+        assert!(plan[0].managed);
+        let server = Server::start(vec![
+            Reply::json(
+                200,
+                r#"{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":23,"limit_window_seconds":18000,"reset_at":4102444800}}}"#,
+            ),
+            Reply::json(
+                200,
+                r#"{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":39,"limit_window_seconds":18000,"reset_at":4102444800}}}"#,
+            ),
+            Reply::json(401, "{}"),
+            Reply::json(429, "{}").with_header("retry-after", "60"),
+        ]);
+        let store = Arc::new(Mutex::new(AccountStore::default()));
+        let worker = ExtraWorker {
+            id: plan[0].profile.id.clone(),
+            generation: 0,
+            transport: Transport::of(&plan[0]).unwrap(),
+            usage_base: server.base.clone(),
+            primary_home: None,
+            shared: Arc::new(Shared::default()),
+            store,
+            executable: Box::new(|| panic!("managed home must never launch Codex")),
+            interval: Box::new(|_| 30),
+            changed: Box::new(|| {}),
+            first_poll: Instant::now(),
+        };
+        let mut failures = 0;
+        let (first, delay) = poll_extra(&worker, &mut None, &mut failures);
+        assert_eq!(first.phase, "ready");
+        assert_eq!(first.plan_type.as_deref(), Some("plus"));
+        assert_eq!(first.rows.as_ref().unwrap()[0].used_percent, Some(23.0));
+        assert!(delay.as_secs() >= 120);
+        assert_eq!(fs::read_to_string(&path).unwrap(), initial);
+        fs::write(&path, auth(now - 1)).unwrap();
+        let (expired, _) = poll_extra(&worker, &mut None, &mut failures);
+        assert_eq!(expired.phase, "expired");
+        assert!(expired.rows.is_none());
+        assert_eq!(server.requests().len(), 1);
+        let fresh = auth(now + 7200);
+        fs::write(&path, &fresh).unwrap();
+        let (second, _) = poll_extra(&worker, &mut None, &mut failures);
+        assert_eq!(second.phase, "ready");
+        assert_eq!(second.plan_type.as_deref(), Some("pro"));
+        assert_eq!(second.rows.as_ref().unwrap()[0].used_percent, Some(39.0));
+        assert_eq!(first.identity, second.identity);
+        let (revoked, _) = poll_extra(&worker, &mut None, &mut failures);
+        assert_eq!(revoked.phase, "expired");
+        assert!(revoked.rows.is_none());
+        assert!(revoked.message.contains("ai-profiles"));
+        assert!(!revoked.message.contains("aip "));
+        let (limited, pause) = poll_extra(&worker, &mut None, &mut failures);
+        assert_eq!(limited.phase, "error");
+        assert!(pause.as_secs() >= 60);
+        assert_eq!(fs::read_to_string(&path).unwrap(), fresh);
+        assert_eq!(fs::read_to_string(&metadata).unwrap(), meta);
+        assert!(!cli.join("auth.json.lock").exists());
+        let requests = server.requests();
+        assert_eq!(requests.len(), 4);
+        assert!(requests.iter().all(|r| r.starts_with("GET /wham/usage ")));
+        assert!(requests
+            .iter()
+            .all(|r| Server::header(r, "chatgpt-account-id").as_deref() == Some("acct-managed")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     fn spawn_credential(
         store: &Arc<Mutex<AccountStore>>,
@@ -2861,6 +2983,7 @@ done
             visible,
             blocker: None,
             credential: None,
+            managed: false,
         }
     }
     fn ready(identity: u64, used: f64) -> Reading {

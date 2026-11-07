@@ -199,6 +199,9 @@ pub fn manual_profile(
 /// User-facing reason of a blocked account (no path, no secret).
 pub fn blocked_message(blocker: Blocker) -> &'static str {
     match blocker {
+        Blocker::ManagedIncomplete => {
+            "Profil ai-profiles limité au bureau ou dossier CLI absent : aucun quota CLI à lire."
+        }
         Blocker::Incomplete => {
             "Profil aip incomplet (aucune sauvegarde credentials.json) : rien à lire."
         }

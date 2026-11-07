@@ -5,13 +5,14 @@
 //!
 //! Contract for the provider modules (`claude_accounts`, `codex_accounts`):
 //! build an ordered list of [`Candidate`]s from the sources (primary first,
-//! then `~/.<tool>-*` siblings, `aip` profiles, saved entries), then call
+//! then `~/.<tool>-*` siblings, manager profiles, saved entries), then call
 //! [`reconcile`] with the provider's [`AccountPrefs`]. The result keeps the
 //! user's Unique/Multi mode, custom names, visibility, exclusions and manual
 //! additions; discovery itself never changes the mode. Collection must follow
 //! [`Collect`]: `Inherit` (primary, environment untouched), `Isolated` (child
 //! only, variable set to the raw path), `Credential` (aip profile read over
-//! HTTPS with its own saved credential, see `oauth_usage`) or `Blocked`
+//! HTTPS with its own saved credential, see `oauth_usage`), `ManagedCredential`
+//! (ai-profiles live connection, read-only) or `Blocked`
 //! (listed, never read).
 use crate::aip;
 use crate::claude_accounts::{identity, normalized, AccountPrefs, Profile};
@@ -60,7 +61,10 @@ pub enum Origin {
     /// Saved in the preferences only (chosen folder or typed path).
     Manual,
     /// `aip` profile folder; `active` = named by `profiles/_current`.
-    Aip { active: bool },
+    Aip {
+        active: bool,
+    },
+    AiProfiles,
 }
 
 /// Why a detected account cannot be read. User-facing wording belongs to the
@@ -69,6 +73,7 @@ pub enum Origin {
 pub enum Blocker {
     /// aip profile folder without its documented payload file (empty/corrupted).
     Incomplete,
+    ManagedIncomplete,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +87,8 @@ pub enum Collect {
     /// never a child process, never a refresh, never a switch of the active
     /// account (`oauth_usage`).
     Credential,
+    /// Live manager-owned credential. Read again each cycle, never rotate it.
+    ManagedCredential,
     /// Listed and explainable, never read.
     Blocked(Blocker),
 }
@@ -241,7 +248,8 @@ pub fn aip_profiles(home: &Path, provider: &Provider, primary: &Candidate) -> Ve
         .collect()
 }
 
-/// Every source in priority order: primary, siblings, aip, saved.
+/// Source priority: primary, siblings, aip, saved, ai-profiles. Manager aliases
+/// retain their guarded transport regardless of which source wins deduplication.
 pub fn all(
     home: &Path,
     provider: &Provider,
@@ -252,7 +260,46 @@ pub fn all(
     let mut out = vec![first.clone()];
     out.extend(siblings(home, provider));
     out.extend(aip_profiles(home, provider, &first));
+    let app = if provider.base == ".codex" {
+        "codex"
+    } else {
+        "claude"
+    };
+    let managed: Vec<_> = crate::ai_profiles::profiles(home, app)
+        .into_iter()
+        .map(|p| {
+            Candidate::new(
+                p.raw,
+                Origin::AiProfiles,
+                if p.complete {
+                    Collect::ManagedCredential
+                } else {
+                    Collect::Blocked(Blocker::ManagedIncomplete)
+                },
+                Some(p.name),
+            )
+        })
+        .collect();
     out.extend(saved(prefs));
+    // Classify aliases before reconciliation: a symlink/manual home must not
+    // bypass the manager's no-refresh policy by winning source precedence.
+    for c in &mut out {
+        if c.origin != Origin::Primary {
+            if let Some(m) = managed.iter().find(|m| m.id == c.id) {
+                c.collect = m.collect;
+                c.name = m.name.clone();
+                c.raw = m.raw.clone();
+            }
+        }
+    }
+    out.extend(managed);
+    for c in &mut out {
+        if c.collect == Collect::Isolated
+            && crate::ai_profiles::is_managed_home(home, Path::new(&c.raw))
+        {
+            c.collect = Collect::ManagedCredential;
+        }
+    }
     out
 }
 
@@ -310,7 +357,12 @@ pub fn reconcile(candidates: Vec<Candidate>, prefs: &AccountPrefs) -> Vec<Resolv
             .find(|s| identity(&normalized(Path::new(&s.path))) == c.id);
         if let Some(s) = saved {
             c.name = s.name.clone();
-            if !primary {
+            if !primary
+                && !matches!(
+                    c.collect,
+                    Collect::ManagedCredential | Collect::Blocked(Blocker::ManagedIncomplete)
+                )
+            {
                 c.raw = s.path.clone();
             }
         }
@@ -663,6 +715,49 @@ mod tests {
         let x = aip_profile(&h, &CLAUDE, "x", true);
         let y = h.join(".claude").join(aip::PROFILES_DIR).join("y");
         assert_ne!(identity(&x), identity(&y));
+        std::fs::remove_dir_all(h).unwrap();
+    }
+
+    #[test]
+    fn ai_profiles_metadata_discovers_both_providers_without_changing_preferences() {
+        let h = home("ai-profiles");
+        let root = h.join("Library/Application Support/ai-profiles");
+        let cli = root.join("profiles/work/cli-config");
+        std::fs::create_dir_all(&cli).unwrap();
+        std::fs::create_dir_all(root.join("profiles/code/cli-config")).unwrap();
+        std::fs::create_dir_all(root.join("profiles/desktop")).unwrap();
+        std::fs::write(
+            root.join("profiles.json"),
+            r#"{"profiles":[
+            {"id":"work","name":"Travail","surfaces":{"cli":true,"gui":false}},
+            {"id":"code","app":"codex","name":"Code","surfaces":{"cli":true,"gui":true}},
+            {"id":"desktop","name":"Desktop","surfaces":{"cli":false,"gui":true}},
+            {"id":"../escape","name":"Bad","surfaces":{"cli":true,"gui":false}}
+        ]}"#,
+        )
+        .unwrap();
+        let prefs = multi();
+        let claude = reconcile(all(&h, &CLAUDE, None, &prefs), &prefs);
+        assert_eq!(
+            names(&claude),
+            [
+                "Principal",
+                "Travail · ai-profiles",
+                "Desktop · ai-profiles"
+            ]
+        );
+        assert_eq!(claude[1].candidate.raw, cli.to_str().unwrap());
+        assert!(claude[1].candidate.collectable());
+        assert!(
+            claude[1].candidate.isolation().is_none(),
+            "no refresh-capable child"
+        );
+        assert!(!claude[2].candidate.collectable(), "no invented CLI home");
+        assert_eq!(
+            names(&reconcile(all(&h, &CODEX, None, &prefs), &prefs)),
+            ["Principal", "Code · ai-profiles"]
+        );
+        assert_eq!(prefs.mode, "multi");
         std::fs::remove_dir_all(h).unwrap();
     }
 
