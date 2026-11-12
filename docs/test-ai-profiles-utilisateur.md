@@ -33,7 +33,9 @@ Ouvrez l'app de cette façon plutôt qu'avec un double-clic. Dans le Terminal, c
 open -a "Quota Monitor" --stdout ~/Desktop/quota-monitor-test.log --stderr ~/Desktop/quota-monitor-test.log
 ```
 
-Le journal s'écrit alors dans le fichier **`quota-monitor-test.log` sur votre Bureau**. Il ne contient que des messages d'erreur courts : aucun jeton, mot de passe ou identifiant secret n'y est écrit. Il peut rester vide, et c'est normal.
+Le journal s'écrit alors dans le fichier **`quota-monitor-test.log` sur votre Bureau**. Il ne contient que des messages d'erreur courts : aucun jeton, mot de passe ou identifiant secret n'y est écrit. La ligne « Quota Monitor update failed: Updater does not have any endpoints set. » est normale : elle vient des mises à jour désactivées.
+
+Pour vérifier que c'est bien la version de test, cliquez sur l'icône Quota Monitor dans la barre des menus. Tout en bas du menu, vous devez lire **Quota Monitor v3.2.1-test.aiprofiles.1**.
 
 ## 3. Étape 1 : un seul profil Claude
 
