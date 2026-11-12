@@ -527,6 +527,32 @@ impl Session {
     }
 }
 
+/// Option A (`official_refresh`): let the official Codex CLI renew an
+/// ai-profiles session. `getAuthStatus {includeToken:true}` makes Codex 0.164
+/// load the auth of THIS `CODEX_HOME` and refresh it when it is within its own
+/// 5-minute window (`force`: refresh even outside it, after a 401) — no model
+/// request, no login, no browser. The returned token is only tested for
+/// presence and dropped; Quota Monitor re-reads `auth.json` afterwards.
+pub(crate) fn official_renew(
+    exe: &PathBuf,
+    home: &std::path::Path,
+    force: bool,
+) -> crate::official_refresh::Outcome {
+    use crate::official_refresh::Outcome;
+    let Ok(mut session) = Session::start_in(exe, Arc::new(Shared::default()), Some(home)) else {
+        return Outcome::Failed;
+    };
+    match session.call(
+        "getAuthStatus",
+        json!({"includeToken": true, "refreshToken": force}),
+    ) {
+        Ok(v) if v.get("authToken").is_some_and(Value::is_string) => Outcome::Renewed,
+        // Refresh refused (revoked/expired grant): Codex reports no token.
+        Ok(v) if v.get("authToken").is_some_and(Value::is_null) => Outcome::Revoked,
+        _ => Outcome::Failed,
+    }
+}
+
 pub fn normalize(result: &Value) -> Result<Vec<QuotaPayload>, String> {
     let buckets: Vec<(String, &Value)> =
         if let Some(map) = result.get("rateLimitsByLimitId").and_then(Value::as_object) {
@@ -1084,6 +1110,8 @@ pub(crate) struct Reading {
     pub last_checked: Option<String>,
     /// Earned reset credits reported by this account's own rate-limit read.
     pub available_resets: Option<u64>,
+    /// ai-profiles homes only: renewal by the official Codex CLI (option A).
+    pub renewal: Option<crate::official_refresh::Renewal>,
 }
 impl Reading {
     fn new(phase: &str, message: &str) -> Self {
@@ -1220,7 +1248,43 @@ const CREDENTIAL_RATE_LIMITED_SECS: u64 = 900;
 /// before expiry (CLI protocol, own grant only — `oauth_refresh`). The
 /// answer goes through the same `normalize` as app-server's rate limits and
 /// the same identity fingerprint as `account/read`.
+///
+/// ai-profiles homes (option A) are never renewed by Quota Monitor: the
+/// official Codex CLI renews them (`official_renew`) before the read, and once
+/// more after a 401 on a token that was not locally expired.
 fn poll_credential(w: &ExtraWorker, home: &Path, failures: &mut u32) -> (Reading, Duration) {
+    if !matches!(w.transport, Transport::ManagedCredential { .. }) {
+        return poll_credential_once(w, home, failures);
+    }
+    let renew = |force: bool| {
+        crate::ai_profiles::renew_codex(home, chrono::Utc::now().timestamp(), force, || {
+            match (w.executable)() {
+                Some(exe) => official_renew(&exe, home, force),
+                None => crate::official_refresh::Outcome::Failed,
+            }
+        })
+    };
+    let mut renewal = renew(false);
+    let mut polled = poll_credential_once(w, home, failures);
+    // A 401 on a token just renewed is not retried with another rotation.
+    let recent = renewal
+        .renewed_at
+        .is_some_and(|at| chrono::Utc::now().timestamp() - at < 30 * 60);
+    if polled.0.phase == "expired" && renewal.state != "reconnect" && !recent {
+        renewal = renew(true);
+        if renewal.state == "renewed" {
+            polled = poll_credential_once(w, home, failures);
+        }
+    }
+    if renewal.state == "reconnect" && polled.0.phase != "ready" {
+        polled.0 = Reading::new("expired", crate::ai_profiles::RECONNECT);
+        polled.0.last_checked = Some(chrono::Utc::now().to_rfc3339());
+    }
+    polled.0.renewal = Some(renewal);
+    polled
+}
+
+fn poll_credential_once(w: &ExtraWorker, home: &Path, failures: &mut u32) -> (Reading, Duration) {
     use crate::oauth_usage::ReadError;
     let now = || Some(chrono::Utc::now().to_rfc3339());
     let floor =
@@ -1631,6 +1695,8 @@ pub struct CodexAccount {
     pub rows: Vec<QuotaPayload>,
     /// Name of an earlier account returning the same identity (not added up).
     pub duplicate_of: Option<String>,
+    /// ai-profiles homes only: active / renewed / reconnect / retrying.
+    pub renewal: Option<crate::official_refresh::Renewal>,
     #[serde(skip)]
     pub raw_rows: Vec<QuotaPayload>,
     #[serde(skip)]
@@ -1660,6 +1726,7 @@ pub(crate) fn account_view(
                 identity: p.identity,
                 last_checked: p.status.last_checked.clone(),
                 available_resets: p.status.available_resets,
+                renewal: None,
             })
             .unwrap_or_else(|| Reading::new("starting", "Connexion à Codex…"))
     } else if !enabled {
@@ -1704,6 +1771,7 @@ pub(crate) fn account_view(
         last_checked: reading.last_checked,
         available_resets,
         duplicate_of: None,
+        renewal: reading.renewal,
         identity: reading.identity,
     }
 }
@@ -2374,8 +2442,51 @@ done
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Fake official Codex for option A: `codex app-server` answering
+    /// `initialize` + `getAuthStatus` like 0.164. `ok` renews the home it was
+    /// launched on (`CODEX_HOME`) by installing `fixture-renewed`, as the CLI's
+    /// own refresh does; `revoked` = refresh refused (no token); `fail` = crash.
+    #[cfg(unix)]
+    fn official_codex(root: &std::path::Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = root.join("official.log");
+        let exe = root.join("official-codex");
+        let script = r#"#!/bin/sh
+mode=$(cat "$CODEX_HOME/fixture-mode" 2>/dev/null || echo ok)
+[ "$mode" = fail ] && { printf 'fail|%s|%s\n' "$CODEX_HOME" "$*" >> '@LOG@'; exit 3; }
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  [ -z "$id" ] && continue
+  case "$method" in
+    initialize) printf '{"id":%s,"result":{}}\n' "$id" ;;
+    getAuthStatus)
+      printf '%s|%s|%s|%s\n' "$mode" "$CODEX_HOME" "$*" "$line" >> '@LOG@'
+      if [ "$mode" = revoked ]; then
+        printf '{"id":%s,"result":{"authMethod":"chatgpt","authToken":null,"requiresOpenaiAuth":true}}\n' "$id"
+      else
+        cp "$CODEX_HOME/fixture-renewed" "$CODEX_HOME/auth.json"
+        printf '{"id":%s,"result":{"authMethod":"chatgpt","authToken":"SYNTHETIC-RETURNED","requiresOpenaiAuth":true}}\n' "$id"
+      fi ;;
+    *) printf '{"id":%s,"error":{"code":-1,"message":"unexpected"}}\n' "$id" ;;
+  esac
+done
+"#
+        .replace("@LOG@", log.to_str().unwrap());
+        fs::write(&exe, script).unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
+        (exe, log)
+    }
+
+    /// Option A through `poll_extra`: a dormant ai-profiles Codex home is
+    /// renewed by the official `codex app-server` (`getAuthStatus`, its own
+    /// `CODEX_HOME`) at each expiry over several cycles; a refused renewal
+    /// reads « À reconnecter » without looping; a reconnection through
+    /// ai-profiles resumes; a crashing tool backs off. Quota Monitor sends only
+    /// usage GETs (never the OAuth token endpoint) and never writes `auth.json`.
+    #[cfg(unix)]
     #[test]
-    fn ai_profiles_codex_collector_reloads_owner_credentials_without_any_refresh_or_cli() {
+    fn ai_profiles_codex_dormant_home_is_renewed_only_by_official_codex_over_cycles() {
         use crate::oauth_usage::test_support::{jwt, Reply, Server};
         let root = scratch("managed-http");
         let home = root.join("home");
@@ -2385,12 +2496,11 @@ done
         let metadata = home.join("Library/Application Support/ai-profiles/profiles.json");
         fs::write(&metadata, meta).unwrap();
         let now = chrono::Utc::now().timestamp();
-        let auth = |exp: i64| {
-            json!({"tokens":{"access_token":jwt(&json!({"exp":exp})),"refresh_token":"SYNTHETIC-SHARED","account_id":"acct-managed","id_token":jwt(&json!({"email":"test@example.invalid","https://api.openai.com/auth":{"chatgpt_account_id":"acct-managed"}}))}}).to_string()
+        let auth = |exp: i64, tag: &str| {
+            json!({"tokens":{"access_token":jwt(&json!({"exp":exp,"tag":tag})),"refresh_token":"SYNTHETIC-SHARED","account_id":"acct-managed","id_token":jwt(&json!({"email":"test@example.invalid","https://api.openai.com/auth":{"chatgpt_account_id":"acct-managed"}}))}}).to_string()
         };
         let path = cli.join("auth.json");
-        let initial = auth(now + 600);
-        fs::write(&path, &initial).unwrap();
+        fs::write(&path, auth(now + 3600, "A")).unwrap();
         let prefs = crate::claude_accounts::AccountPrefs {
             mode: "multi".into(),
             ..Default::default()
@@ -2400,18 +2510,14 @@ done
         let plan = credential_plan(found);
         assert_eq!(plan.len(), 1);
         assert!(plan[0].managed);
-        let server = Server::start(vec![
+        let usage = |used: u32| {
             Reply::json(
                 200,
-                r#"{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":23,"limit_window_seconds":18000,"reset_at":4102444800}}}"#,
-            ),
-            Reply::json(
-                200,
-                r#"{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":39,"limit_window_seconds":18000,"reset_at":4102444800}}}"#,
-            ),
-            Reply::json(401, "{}"),
-            Reply::json(429, "{}").with_header("retry-after", "60"),
-        ]);
+                &format!(r#"{{"plan_type":"plus","rate_limit":{{"primary_window":{{"used_percent":{used},"limit_window_seconds":18000,"reset_at":4102444800}}}}}}"#),
+            )
+        };
+        let server = Server::start([11, 22, 23, 33, 34, 55].map(usage).into());
+        let (exe, log) = official_codex(&root);
         let store = Arc::new(Mutex::new(AccountStore::default()));
         let worker = ExtraWorker {
             id: plan[0].profile.id.clone(),
@@ -2421,47 +2527,84 @@ done
             primary_home: None,
             shared: Arc::new(Shared::default()),
             store,
-            executable: Box::new(|| panic!("managed home must never launch Codex")),
+            executable: Box::new(move || Some(exe.clone())),
             interval: Box::new(|_| 30),
             changed: Box::new(|| {}),
             first_poll: Instant::now(),
         };
         let mut failures = 0;
-        let (first, delay) = poll_extra(&worker, &mut None, &mut failures);
+        let mut poll = || poll_extra(&worker, &mut None, &mut failures).0;
+        let launches = || {
+            fs::read_to_string(&log)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+        let bearer = |n: usize| Server::header(&server.requests()[n], "authorization").unwrap();
+
+        // Far from expiry: read only, Codex is not launched.
+        let first = poll();
         assert_eq!(first.phase, "ready");
-        assert_eq!(first.plan_type.as_deref(), Some("plus"));
-        assert_eq!(first.rows.as_ref().unwrap()[0].used_percent, Some(23.0));
-        assert!(delay.as_secs() >= 120);
-        assert_eq!(fs::read_to_string(&path).unwrap(), initial);
-        fs::write(&path, auth(now - 1)).unwrap();
-        let (expired, _) = poll_extra(&worker, &mut None, &mut failures);
-        assert_eq!(expired.phase, "expired");
-        assert!(expired.rows.is_none());
-        assert_eq!(server.requests().len(), 1);
-        let fresh = auth(now + 7200);
-        fs::write(&path, &fresh).unwrap();
-        let (second, _) = poll_extra(&worker, &mut None, &mut failures);
-        assert_eq!(second.phase, "ready");
-        assert_eq!(second.plan_type.as_deref(), Some("pro"));
-        assert_eq!(second.rows.as_ref().unwrap()[0].used_percent, Some(39.0));
-        assert_eq!(first.identity, second.identity);
-        let (revoked, _) = poll_extra(&worker, &mut None, &mut failures);
+        assert_eq!(first.rows.as_ref().unwrap()[0].used_percent, Some(11.0));
+        assert_eq!(first.renewal.as_ref().unwrap().state, "active");
+        assert_eq!(launches(), 0);
+
+        // Dormant expiry over several cycles: renewed each time by Codex.
+        for (cycle, (left, tag)) in [(60, "B"), (-1, "C")].into_iter().enumerate() {
+            fs::write(&path, auth(now + left, "OLD")).unwrap();
+            let renewed = auth(now + 7200, tag);
+            fs::write(cli.join("fixture-renewed"), &renewed).unwrap();
+            let reading = poll();
+            assert_eq!(reading.phase, "ready");
+            let renewal = reading.renewal.unwrap();
+            assert_eq!((renewal.state, renewal.tool), ("renewed", "codex"));
+            assert_eq!(launches(), cycle + 1);
+            let token = serde_json::from_str::<Value>(&renewed).unwrap()["tokens"]["access_token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(bearer(1 + 2 * cycle), format!("Bearer {token}"));
+            assert_eq!(poll().renewal.unwrap().state, "renewed");
+            assert_eq!(launches(), cycle + 1, "nothing to renew on the next cycle");
+        }
+        let lines = fs::read_to_string(&log).unwrap();
+        assert!(lines.contains(&format!("ok|{}|app-server|", cli.display())), "{lines}");
+        assert!(lines.contains(r#""includeToken":true"#));
+        assert!(!lines.contains("login"));
+
+        // Refused renewal: « À reconnecter », no quota, no loop.
+        fs::write(&path, auth(now - 1, "DEAD")).unwrap();
+        fs::write(cli.join("fixture-mode"), "revoked").unwrap();
+        let dead = fs::read_to_string(&path).unwrap();
+        let revoked = poll();
         assert_eq!(revoked.phase, "expired");
         assert!(revoked.rows.is_none());
         assert!(revoked.message.contains("ai-profiles"));
-        assert!(!revoked.message.contains("aip "));
-        let (limited, pause) = poll_extra(&worker, &mut None, &mut failures);
-        assert_eq!(limited.phase, "error");
-        assert!(pause.as_secs() >= 60);
-        assert_eq!(fs::read_to_string(&path).unwrap(), fresh);
-        assert_eq!(fs::read_to_string(&metadata).unwrap(), meta);
-        assert!(!cli.join("auth.json.lock").exists());
+        assert_eq!(revoked.renewal.unwrap().state, "reconnect");
+        for _ in 0..3 {
+            assert_eq!(poll().renewal.unwrap().state, "reconnect");
+        }
+        assert_eq!(launches(), 3, "a revoked home is never retried in a loop");
+        assert_eq!(fs::read_to_string(&path).unwrap(), dead, "Quota Monitor wrote no credential");
+
+        // Reconnected through ai-profiles: monitoring resumes by itself.
+        fs::write(&path, auth(now + 7200, "RECONNECTED")).unwrap();
+        let back = poll();
+        assert_eq!(back.phase, "ready");
+        assert_eq!(back.rows.as_ref().unwrap()[0].used_percent, Some(55.0));
+        assert_eq!(back.renewal.unwrap().state, "active");
+
+        // A crashing tool: retried later (backoff), never immediately.
+        fs::write(&path, auth(now - 1, "STALE")).unwrap();
+        fs::write(cli.join("fixture-mode"), "fail").unwrap();
+        assert_eq!(poll().renewal.unwrap().state, "retrying");
+        assert_eq!(poll().renewal.unwrap().state, "retrying");
+        assert_eq!(launches(), 4);
+
         let requests = server.requests();
-        assert_eq!(requests.len(), 4);
+        assert_eq!(requests.len(), 6);
         assert!(requests.iter().all(|r| r.starts_with("GET /wham/usage ")));
-        assert!(requests
-            .iter()
-            .all(|r| Server::header(r, "chatgpt-account-id").as_deref() == Some("acct-managed")));
+        assert!(!cli.join("auth.json.lock").exists());
+        assert_eq!(fs::read_to_string(&metadata).unwrap(), meta);
         fs::remove_dir_all(root).unwrap();
     }
 

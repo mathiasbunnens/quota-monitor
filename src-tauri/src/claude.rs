@@ -200,6 +200,9 @@ pub struct ClaudeSnapshot {
     pub plan_type: Option<String>,
     /// Paid extra usage on top of the subscription: enabled / limit reached.
     pub extra_usage: Option<ExtraUsage>,
+    /// ai-profiles profiles only: renewal by the official Claude Code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renewal: Option<crate::official_refresh::Renewal>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -296,6 +299,7 @@ pub fn compute(enabled: bool, configured: bool, file: FileState, now: i64) -> Cl
         },
         plan_type: None,
         extra_usage: None,
+        renewal: None,
     };
     if !enabled {
         snap.message = "Claude est désactivé dans les Réglages.".into();
@@ -851,16 +855,35 @@ fn poll_profile(
     changed();
     let previous = store.lock().unwrap().snapshot(&profile.id);
     let snap = if account.collect == crate::account_sources::Collect::ManagedCredential {
-        managed_snapshot(
-            crate::ai_profiles::read_claude(
-                Path::new(&profile.path),
-                base,
-                crate::oauth_usage::DEFAULT_TIMEOUT,
-                unix_now(),
-            ),
-            previous,
-            unix_now(),
-        )
+        // Option A: renewed only by the official Claude Code on this profile's
+        // own config dir, never by Quota Monitor (`official_refresh`).
+        let home = Path::new(&profile.path);
+        let cwd = profile_workspace(dir, &profile.id);
+        let renew = |force| crate::ai_profiles::renew_claude(home, executable, &cwd, unix_now(), force);
+        let read = || crate::ai_profiles::read_claude(home, base, crate::oauth_usage::DEFAULT_TIMEOUT, unix_now());
+        let mut renewal = renew(false);
+        let mut result = read();
+        let recent = renewal.renewed_at.is_some_and(|at| unix_now() - at < 30 * 60);
+        if matches!(
+            result,
+            Err(crate::ai_profiles::ClaudeError::Read(crate::oauth_usage::ReadError::Unauthorized))
+        ) && renewal.state != "reconnect"
+            && !recent
+        {
+            // 401 on a token not locally expired: let Claude Code try once.
+            renewal = renew(true);
+            if renewal.state == "renewed" {
+                result = read();
+            }
+        }
+        let mut snap = managed_snapshot(result, previous, unix_now());
+        if renewal.state == "reconnect" && snap.metrics.is_empty() {
+            snap.state = "error";
+            snap.error_kind = Some("session_expired");
+            snap.message = crate::ai_profiles::RECONNECT.into();
+        }
+        snap.renewal = Some(renewal);
+        snap
     } else if account.collect == crate::account_sources::Collect::Credential {
         // aip snapshot: its own saved token, over HTTPS, no child process;
         // renewed first under aip's own lock when it is about to expire.
@@ -2145,10 +2168,50 @@ cat >/dev/null
         }
     }
 
+    /// Fake official Claude Code for option A: answers `initialize` +
+    /// `get_usage` like the real one and, in `ok` mode, renews the profile it
+    /// was launched on (`CLAUDE_CONFIG_DIR`) by installing `fixture-renewed`,
+    /// as Claude Code's own refresh does. `revoked` = refresh refused
+    /// (signed out), `fail` = crash before answering.
+    #[cfg(unix)]
+    fn official_claude(root: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let exe = root.join("official-claude");
+        let script = r#"#!/bin/sh
+dir="$CLAUDE_CONFIG_DIR"
+mode=$(cat "$dir/fixture-mode" 2>/dev/null || echo ok)
+printf 'argv=%s|config=%s|mode=%s\n' "$*" "$dir" "$mode" >> '@LOG@'
+[ "$mode" = fail ] && exit 1
+read init
+printf '%s\n' '{"type":"control_response","response":{"request_id":"init","subtype":"success","response":{}}}'
+read usage
+if [ "$mode" = revoked ]; then
+  printf '%s\n' '{"type":"control_response","response":{"request_id":"usage","subtype":"success","response":{"rate_limits_available":false,"subscription_type":null}}}'
+else
+  cp "$dir/fixture-renewed" "$dir/.credentials.json"
+  printf '%s\n' '{"type":"control_response","response":{"request_id":"usage","subtype":"success","response":{"rate_limits_available":true,"subscription_type":"max","rate_limits":{}}}}'
+fi
+cat >/dev/null
+"#
+        .replace("@LOG@", log.to_str().unwrap());
+        fs::write(&exe, script).unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
+        exe
+    }
+
+    /// Option A through the production path (`collection_plan` →
+    /// `poll_profile`): a dormant ai-profiles profile is renewed by the
+    /// official Claude Code on its own config dir at each expiry, over several
+    /// cycles; a refused renewal reads « À
+    /// reconnecter » without looping; a reconnection through ai-profiles
+    /// resumes. Quota Monitor only sends GETs (never an OAuth token endpoint)
+    /// and never writes the credential file.
+    #[cfg(unix)]
     #[test]
-    fn ai_profiles_collector_reads_repeated_cycles_without_cli_or_refresh() {
+    fn ai_profiles_dormant_profile_is_renewed_only_by_official_claude_over_cycles() {
         use crate::oauth_usage::test_support::{Reply, Server};
         let root = std::env::temp_dir().join(format!("qm-managed-claude-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let home = root.canonicalize().unwrap();
         let cli = home.join("Library/Application Support/ai-profiles/profiles/work/cli-config");
@@ -2165,8 +2228,8 @@ cat >/dev/null
         let credential = |expires: i64, token: &str| {
             json!({"claudeAiOauth":{"accessToken":token,"refreshToken":"SYNTHETIC-SHARED","expiresAt":expires*1000,"subscriptionType":"max"}}).to_string()
         };
-        let initial = credential(unix_now() + 600, "SYNTHETIC-OLD");
-        fs::write(cli.join(".credentials.json"), &initial).unwrap();
+        let creds = cli.join(".credentials.json");
+        fs::write(&creds, credential(unix_now() + 3600, "SYNTHETIC-A")).unwrap();
         let prefs = crate::claude_accounts::AccountPrefs {
             mode: "multi".into(),
             ..Default::default()
@@ -2176,75 +2239,87 @@ cat >/dev/null
             .iter()
             .find(|a| a.profile.name == "Travail · ai-profiles")
             .unwrap();
-        assert!(a.launch.is_none());
+        assert!(a.launch.is_none(), "never collected through a CLI");
         let log = home.join("cli.log");
-        let exe = routing_cli(&home, &log);
-        let server = Server::start(vec![
-            Reply::json(200, r#"{"account":{"uuid":"account-work"}}"#),
-            Reply::json(
-                200,
-                r#"{"five_hour":{"utilization":18,"resets_at":"2099-01-01T00:00:00Z"}}"#,
-            ),
-            Reply::json(200, r#"{"account":{"uuid":"account-work"}}"#),
-            Reply::json(
-                200,
-                r#"{"five_hour":{"utilization":29,"resets_at":"2099-01-01T00:00:00Z"}}"#,
-            ),
-        ]);
+        let exe = official_claude(&home, &log);
+        let launches = || {
+            fs::read_to_string(&log)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+        let profile = r#"{"account":{"uuid":"account-work"}}"#;
+        let usage = |used: u32| {
+            format!(r#"{{"five_hour":{{"utilization":{used},"resets_at":"2099-01-01T00:00:00Z"}}}}"#)
+        };
+        let mut replies = Vec::new();
+        for used in [11, 22, 23, 33, 34, 55] {
+            replies.push(Reply::json(200, profile));
+            replies.push(Reply::json(200, &usage(used)));
+        }
+        let server = Server::start(replies);
         let store = std::sync::Mutex::new(crate::claude_accounts::RefreshStore::new());
-        assert!(poll_profile(
-            &store,
-            a,
-            Some(&exe),
-            &home,
-            &server.base,
-            || {}
-        ));
-        let snap = store.lock().unwrap().snapshot(&a.profile.id).unwrap();
-        assert_eq!(snap.state, "ready");
-        assert_eq!(snap.metrics[0].used_percent, Some(18.0));
-        assert_eq!(snap.plan_type.as_deref(), Some("max"));
-        assert_eq!(
-            fs::read_to_string(cli.join(".credentials.json")).unwrap(),
-            initial
-        );
-        fs::write(
-            cli.join(".credentials.json"),
-            credential(unix_now() - 1, "SYNTHETIC-OLD"),
-        )
-        .unwrap();
-        assert!(poll_profile(
-            &store,
-            a,
-            Some(&exe),
-            &home,
-            &server.base,
-            || {}
-        ));
-        let snap = store.lock().unwrap().snapshot(&a.profile.id).unwrap();
+        let poll = || {
+            assert!(poll_profile(&store, a, Some(&exe), &home, &server.base, || {}));
+            store.lock().unwrap().snapshot(&a.profile.id).unwrap()
+        };
+        let bearer = |n: usize| Server::header(&server.requests()[n], "authorization").unwrap();
+
+        // Far from expiry: read only, the official tool is not launched.
+        let snap = poll();
+        assert_eq!(snap.metrics[0].used_percent, Some(11.0));
+        assert_eq!(snap.renewal.as_ref().unwrap().state, "active");
+        assert_eq!(launches(), 0);
+
+        // Dormant expiry, several cycles: renewed each time by Claude Code.
+        for (cycle, (left, token)) in [(60, "SYNTHETIC-B"), (-1, "SYNTHETIC-C")]
+            .into_iter()
+            .enumerate()
+        {
+            fs::write(&creds, credential(unix_now() + left, "SYNTHETIC-OLD")).unwrap();
+            fs::write(cli.join("fixture-renewed"), credential(unix_now() + 7200, token)).unwrap();
+            let snap = poll();
+            assert_eq!(snap.state, "ready");
+            let renewal = snap.renewal.clone().unwrap();
+            assert_eq!((renewal.state, renewal.tool), ("renewed", "claude"));
+            assert_eq!(launches(), cycle + 1);
+            assert_eq!(bearer(2 + 4 * cycle), format!("Bearer {token}"));
+            // Next cycle: nothing to renew, no launch.
+            assert_eq!(poll().renewal.unwrap().state, "renewed");
+            assert_eq!(launches(), cycle + 1);
+        }
+        let lines = fs::read_to_string(&log).unwrap();
+        assert!(lines.contains(&format!("config={}|", cli.display())), "{lines}");
+        assert!(lines.contains("--input-format stream-json"));
+        assert!(!lines.contains("login"));
+
+        // Refused renewal: « À reconnecter », no quota, no loop.
+        fs::write(&creds, credential(unix_now() - 1, "SYNTHETIC-DEAD")).unwrap();
+        fs::write(cli.join("fixture-mode"), "revoked").unwrap();
+        let dead = fs::read_to_string(&creds).unwrap();
+        let snap = poll();
+        assert_eq!(snap.renewal.as_ref().unwrap().state, "reconnect");
         assert_eq!(snap.error_kind, Some("session_expired"));
         assert!(snap.metrics.is_empty());
-        assert_eq!(server.requests().len(), 2);
-        let fresh = credential(unix_now() + 7200, "SYNTHETIC-NEW");
-        fs::write(cli.join(".credentials.json"), &fresh).unwrap();
-        assert!(poll_profile(
-            &store,
-            a,
-            Some(&exe),
-            &home,
-            &server.base,
-            || {}
-        ));
-        let snap = store.lock().unwrap().snapshot(&a.profile.id).unwrap();
+        assert!(snap.message.contains("ai-profiles"));
+        for _ in 0..3 {
+            assert_eq!(poll().renewal.unwrap().state, "reconnect");
+        }
+        assert_eq!(launches(), 3, "a revoked profile is never retried in a loop");
+        assert_eq!(fs::read_to_string(&creds).unwrap(), dead, "Quota Monitor wrote no credential");
+
+        // Reconnected through ai-profiles: monitoring resumes by itself.
+        fs::write(&creds, credential(unix_now() + 7200, "SYNTHETIC-RECONNECTED")).unwrap();
+        let snap = poll();
         assert_eq!(snap.state, "ready");
-        assert_eq!(snap.metrics[0].used_percent, Some(29.0));
-        assert!(!log.exists(), "managed home never launches a CLI");
+        assert_eq!(snap.metrics[0].used_percent, Some(55.0));
+        assert_eq!(snap.renewal.unwrap().state, "active");
+        assert_eq!(launches(), 3);
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 12);
+        assert!(requests.iter().all(|r| r.starts_with("GET /api/oauth/")));
+        assert!(!requests.iter().any(|r| r.contains("token")));
         assert_eq!(fs::read_to_string(&metadata).unwrap(), meta);
-        assert_eq!(
-            fs::read_to_string(cli.join(".credentials.json")).unwrap(),
-            fresh
-        );
-        assert!(server.requests().iter().all(|r| r.starts_with("GET ")));
         fs::remove_dir_all(home).unwrap();
     }
 

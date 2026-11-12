@@ -16,6 +16,7 @@ mod menu_fixture;
 #[cfg(target_os = "macos")]
 pub use menu_fixture::menu_tracking_fixture;
 mod ntfy;
+mod official_refresh;
 pub mod oauth_refresh;
 pub mod oauth_usage;
 mod prefs;
@@ -2945,6 +2946,7 @@ pub fn quota_ui_smoke(directory: &str) {
             identity,
             last_checked: None,
             available_resets: None,
+            renewal: None,
         };
         let view = codex::PrimaryView {
             status: codex::Status {

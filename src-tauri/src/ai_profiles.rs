@@ -1,10 +1,15 @@
 //! bartekczyz/ai-profiles at 26bf0e8b25a1908474ccf822200bb76698ae06cb.
 //! Discovery and read-only usage transport. No wrapper/CLI execution or mutation.
-//! Credentials are reloaded each cycle; only the owning CLI/manager renews them.
+//! Credentials are reloaded each cycle; only the official CLI renews them, run on
+//! the profile's own config dir (`official_refresh`, option A). Quota Monitor
+//! never calls an OAuth token endpoint and never writes a credential.
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-use crate::oauth_usage::{self, ReadError};
+use crate::{
+    oauth_usage::{self, ReadError},
+    official_refresh,
+};
 use std::time::Duration;
 
 pub fn root(home: &Path) -> PathBuf {
@@ -232,6 +237,82 @@ pub fn read_codex(
     }
     Ok(oauth_usage::codex_usage(credential, &raw))
 }
+
+/// Current connection of a Claude profile (token fingerprint + expiry), read
+/// only. `None` when no token is stored (e.g. cleared by Claude Code after a
+/// refused renewal).
+pub fn claude_seen(home: &Path) -> Option<official_refresh::Seen> {
+    let c = load_claude_with(home, &read_keychain).ok()?;
+    Some(official_refresh::Seen {
+        expires_at: c.expires_at(),
+        fingerprint: official_refresh::fingerprint(c.token()),
+    })
+}
+pub fn codex_seen(home: &Path) -> Option<official_refresh::Seen> {
+    let c = oauth_usage::load_codex(home).ok()?;
+    Some(official_refresh::Seen {
+        expires_at: c.expires_at(),
+        fingerprint: official_refresh::fingerprint(c.token()),
+    })
+}
+
+fn force_due(seen: Option<official_refresh::Seen>, now: i64) -> Option<official_refresh::Seen> {
+    seen.map(|s| official_refresh::Seen {
+        expires_at: Some(now),
+        ..s
+    })
+}
+
+/// Renew a Claude profile through the official Claude Code (`initialize` +
+/// `get_usage` with `CLAUDE_CONFIG_DIR` = this profile's raw path: Claude Code
+/// refreshes on its own within 5 min of expiry, no model request). `force`:
+/// the provider answered 401 to a token that is not locally expired.
+pub fn renew_claude(
+    home: &Path,
+    executable: Option<&Path>,
+    cwd: &Path,
+    now: i64,
+    force: bool,
+) -> official_refresh::Renewal {
+    let key = format!("claude:{}", home.display());
+    let mut seen = claude_seen(home);
+    if force {
+        seen = force_due(seen, now);
+    }
+    let Some(exe) = executable else {
+        return official_refresh::status(&key, "claude", now);
+    };
+    official_refresh::ensure(
+        &key,
+        "claude",
+        seen,
+        now,
+        || match crate::claude_cli::read_usage_for(exe, cwd, home) {
+            Ok(v) if v["rate_limits_available"] == true => official_refresh::Outcome::Renewed,
+            Ok(v) if v["rate_limits_available"] == false => official_refresh::Outcome::Revoked,
+            _ => official_refresh::Outcome::Failed,
+        },
+        || claude_seen(home),
+    )
+}
+
+/// Renew a Codex profile through `run` (the official `codex app-server` with
+/// `CODEX_HOME` = this profile, `codex::official_renew`).
+pub fn renew_codex(
+    home: &Path,
+    now: i64,
+    force: bool,
+    run: impl FnOnce() -> official_refresh::Outcome,
+) -> official_refresh::Renewal {
+    let key = format!("codex:{}", home.display());
+    let mut seen = codex_seen(home);
+    if force {
+        seen = force_due(seen, now);
+    }
+    official_refresh::ensure(&key, "codex", seen, now, run, || codex_seen(home))
+}
+
+pub const RECONNECT: &str = "ai-profiles : connexion refusée par le fournisseur lors du renouvellement par l’outil officiel. À reconnecter : relancez la connexion de ce profil dans ai-profiles.";
 
 // Unit tests MUST NOT touch the real Keychain. Tests inject a synthetic reader.
 #[cfg(any(test, not(target_os = "macos")))]
