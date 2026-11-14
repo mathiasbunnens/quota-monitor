@@ -2357,13 +2357,20 @@ done
                 .lines()
                 .map(|l| l.split('|').nth(1).unwrap())
                 .collect();
+            // Inspect launch paths, not the whole JSON log: the application
+            // version itself may contain "profiles" (e.g. test.aiprofiles.1).
+            assert!(
+                homes
+                    .iter()
+                    .all(|home| !Path::new(home).starts_with(&profiles)),
+                "{calls}"
+            );
             assert_eq!(
                 homes.into_iter().collect::<Vec<_>>(),
                 [work.to_str().unwrap()],
                 "{calls}"
             );
             // aip homes (auto-discovered, symlinked spelling, saved by hand): never.
-            assert!(!calls.contains(crate::aip::PROFILES_DIR), "{calls}");
             assert!(!calls.contains(".codex-boulot-link"), "{calls}");
             for line in calls.lines() {
                 let method = line.split('|').next().unwrap();
