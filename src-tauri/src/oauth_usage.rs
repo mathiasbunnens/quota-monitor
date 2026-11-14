@@ -1030,10 +1030,12 @@ mod tests {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             format!("http://{}", l.local_addr().unwrap())
         };
-        assert_eq!(
+        // Windows reports a refused loopback connect as a timeout after its
+        // connect retries; both are transient transport failures.
+        assert!(matches!(
             read_claude_profile(&dir, &dead, T, NOW).err(),
-            Some(ReadError::Transport)
-        );
+            Some(ReadError::Transport) | Some(ReadError::Timeout)
+        ));
         // A bearer never goes to a non-loopback plain-HTTP base.
         assert_eq!(
             read_claude_profile(&dir, "http://example.invalid", T, NOW).err(),

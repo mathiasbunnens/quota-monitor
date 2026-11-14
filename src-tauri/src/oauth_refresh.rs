@@ -874,6 +874,7 @@ mod tests {
     /// token path with the refresh grant → new tokens written (other fields
     /// kept, 0600) → usage read with the new bearer → a later cycle reads
     /// again without any refresh.
+    #[cfg(unix)]
     #[test]
     fn claude_expiring_snapshot_is_renewed_written_and_read_then_left_alone() {
         let root = scratch("claude-cycle");
@@ -954,6 +955,7 @@ mod tests {
     /// aip's rules: no `expiresAt` → refresh; margin exactly 5 min; the
     /// response without a new refresh token keeps the old one; `expires_in`
     /// absent → 1 h, clamped to [60 s, 1 day]; hex snapshot written as JSON.
+    #[cfg(unix)]
     #[test]
     fn claude_refresh_rules_match_aip() {
         assert!(claude_needs_refresh(&json!({"claudeAiOauth": {}}), NOW));
@@ -1007,6 +1009,7 @@ mod tests {
     /// (+retry-after), 5xx, non-JSON, timeout, connection refused. No answer
     /// writes the file, no error carries a token, and an expired token is
     /// never sent to the usage API.
+    #[cfg(unix)]
     #[test]
     fn claude_refresh_failures_are_classified_and_leak_nothing() {
         let root = scratch("claude-errors");
@@ -1082,6 +1085,7 @@ mod tests {
     /// 401 on a token the file says is valid: one bounded renewal, then the
     /// usage read again; a second 401 is final. When another process
     /// already replaced the token, that token is used without any POST.
+    #[cfg(unix)]
     #[test]
     fn claude_rejected_token_is_renewed_once_or_replaced_by_the_file() {
         let root = scratch("claude-401");
@@ -1192,6 +1196,7 @@ mod tests {
 
     /// Two collectors in this process on the same expired snapshot: one
     /// rotation, both end with the new token.
+    #[cfg(unix)]
     #[test]
     fn claude_concurrent_renewals_rotate_once() {
         let root = scratch("claude-concurrent");
@@ -1468,6 +1473,7 @@ mod tests {
     /// Independent grant (marker lists an older import only): JSON POST with
     /// the CLI's client id, tokens + `last_refresh` persisted (other fields
     /// kept, 0600), usage read with the new bearer, later cycle left alone.
+    #[cfg(unix)]
     #[test]
     fn codex_independent_grant_is_renewed_with_the_cli_protocol() {
         let root = scratch("codex-cycle");
@@ -1622,6 +1628,7 @@ mod tests {
 
     /// Codex failure paths on the token endpoint (the CLI's codes), the
     /// bounded 401 retry, the margin rule and an opaque token.
+    #[cfg(unix)]
     #[test]
     fn codex_refresh_failures_margin_and_rejected_token() {
         let root = scratch("codex-errors");
