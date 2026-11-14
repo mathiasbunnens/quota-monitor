@@ -68,14 +68,13 @@ jobs:
           releaseBody: |
             Application macOS, Windows et Linux pour surveiller les quotas Codex et Claude.
 
-            Version 3.2.0.
+            Version 3.2.1.
 
             Nouveautés :
-            - Suivi de plusieurs comptes Claude et Codex (profils isolés), avec renommage, visibilité et ajout par dossier.
-            - Mode Compacte : barres 5 h / 7 j par compte, compte à rebours de réinitialisation en direct, barre Fable fine.
-            - Réglages › Affichage réorganisé : une seule liste « libellé / contrôle », sélecteurs uniformes.
-            - Ajout de compte : icône dossier intégrée au champ, correction du saut visuel au clic sur « + ».
-            - Mode Application : la fenêtre s'adapte à la hauteur de son contenu.
+            - Profils ai-profiles / aip : détection automatique des comptes Claude et Codex et lecture de leurs quotas.
+            - Renouvellement des sessions dormantes via les outils officiels Claude Code et Codex (aucun jeton copié, aucune connexion propre à l'application).
+            - Un profil dont la session ne peut plus être renouvelée est signalé « À reconnecter ».
+            - Mise à jour de sécurité de la dépendance quinn-proto (0.11.19).
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
