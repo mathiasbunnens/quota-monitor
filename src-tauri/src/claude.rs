@@ -859,14 +859,26 @@ fn poll_profile(
         // own config dir, never by Quota Monitor (`official_refresh`).
         let home = Path::new(&profile.path);
         let cwd = profile_workspace(dir, &profile.id);
-        let renew = |force| crate::ai_profiles::renew_claude(home, executable, &cwd, unix_now(), force);
-        let read = || crate::ai_profiles::read_claude(home, base, crate::oauth_usage::DEFAULT_TIMEOUT, unix_now());
+        let renew =
+            |force| crate::ai_profiles::renew_claude(home, executable, &cwd, unix_now(), force);
+        let read = || {
+            crate::ai_profiles::read_claude(
+                home,
+                base,
+                crate::oauth_usage::DEFAULT_TIMEOUT,
+                unix_now(),
+            )
+        };
         let mut renewal = renew(false);
         let mut result = read();
-        let recent = renewal.renewed_at.is_some_and(|at| unix_now() - at < 30 * 60);
+        let recent = renewal
+            .renewed_at
+            .is_some_and(|at| unix_now() - at < 30 * 60);
         if matches!(
             result,
-            Err(crate::ai_profiles::ClaudeError::Read(crate::oauth_usage::ReadError::Unauthorized))
+            Err(crate::ai_profiles::ClaudeError::Read(
+                crate::oauth_usage::ReadError::Unauthorized
+            ))
         ) && renewal.state != "reconnect"
             && !recent
         {
@@ -2143,7 +2155,9 @@ cat >/dev/null
             crate::ai_profiles::ClaudeError::Changed,
             crate::ai_profiles::ClaudeError::IdentityUnavailable,
             crate::ai_profiles::ClaudeError::Read(crate::oauth_usage::ReadError::Timeout),
-            crate::ai_profiles::ClaudeError::Read(crate::oauth_usage::ReadError::RateLimited(Some(60))),
+            crate::ai_profiles::ClaudeError::Read(crate::oauth_usage::ReadError::RateLimited(
+                Some(60),
+            )),
         ] {
             let previous = managed_snapshot(
                 Ok(
@@ -2249,7 +2263,9 @@ cat >/dev/null
         };
         let profile = r#"{"account":{"uuid":"account-work"}}"#;
         let usage = |used: u32| {
-            format!(r#"{{"five_hour":{{"utilization":{used},"resets_at":"2099-01-01T00:00:00Z"}}}}"#)
+            format!(
+                r#"{{"five_hour":{{"utilization":{used},"resets_at":"2099-01-01T00:00:00Z"}}}}"#
+            )
         };
         let mut replies = Vec::new();
         for used in [11, 22, 23, 33, 34, 55] {
@@ -2259,7 +2275,14 @@ cat >/dev/null
         let server = Server::start(replies);
         let store = std::sync::Mutex::new(crate::claude_accounts::RefreshStore::new());
         let poll = || {
-            assert!(poll_profile(&store, a, Some(&exe), &home, &server.base, || {}));
+            assert!(poll_profile(
+                &store,
+                a,
+                Some(&exe),
+                &home,
+                &server.base,
+                || {}
+            ));
             store.lock().unwrap().snapshot(&a.profile.id).unwrap()
         };
         let bearer = |n: usize| Server::header(&server.requests()[n], "authorization").unwrap();
@@ -2276,7 +2299,11 @@ cat >/dev/null
             .enumerate()
         {
             fs::write(&creds, credential(unix_now() + left, "SYNTHETIC-OLD")).unwrap();
-            fs::write(cli.join("fixture-renewed"), credential(unix_now() + 7200, token)).unwrap();
+            fs::write(
+                cli.join("fixture-renewed"),
+                credential(unix_now() + 7200, token),
+            )
+            .unwrap();
             let snap = poll();
             assert_eq!(snap.state, "ready");
             let renewal = snap.renewal.clone().unwrap();
@@ -2288,7 +2315,10 @@ cat >/dev/null
             assert_eq!(launches(), cycle + 1);
         }
         let lines = fs::read_to_string(&log).unwrap();
-        assert!(lines.contains(&format!("config={}|", cli.display())), "{lines}");
+        assert!(
+            lines.contains(&format!("config={}|", cli.display())),
+            "{lines}"
+        );
         assert!(lines.contains("--input-format stream-json"));
         assert!(!lines.contains("login"));
 
@@ -2304,11 +2334,23 @@ cat >/dev/null
         for _ in 0..3 {
             assert_eq!(poll().renewal.unwrap().state, "reconnect");
         }
-        assert_eq!(launches(), 3, "a revoked profile is never retried in a loop");
-        assert_eq!(fs::read_to_string(&creds).unwrap(), dead, "Quota Monitor wrote no credential");
+        assert_eq!(
+            launches(),
+            3,
+            "a revoked profile is never retried in a loop"
+        );
+        assert_eq!(
+            fs::read_to_string(&creds).unwrap(),
+            dead,
+            "Quota Monitor wrote no credential"
+        );
 
         // Reconnected through ai-profiles: monitoring resumes by itself.
-        fs::write(&creds, credential(unix_now() + 7200, "SYNTHETIC-RECONNECTED")).unwrap();
+        fs::write(
+            &creds,
+            credential(unix_now() + 7200, "SYNTHETIC-RECONNECTED"),
+        )
+        .unwrap();
         let snap = poll();
         assert_eq!(snap.state, "ready");
         assert_eq!(snap.metrics[0].used_percent, Some(55.0));

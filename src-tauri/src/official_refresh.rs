@@ -201,7 +201,17 @@ mod tests {
     fn far_from_expiry_runs_nothing() {
         forget("t-far");
         let runs = Cell::new(0);
-        let r = ensure("t-far", "claude", seen(10_000, 1), 0, || { runs.set(1); Outcome::Renewed }, || None);
+        let r = ensure(
+            "t-far",
+            "claude",
+            seen(10_000, 1),
+            0,
+            || {
+                runs.set(1);
+                Outcome::Renewed
+            },
+            || None,
+        );
         assert_eq!(runs.get(), 0);
         assert_eq!(r.state, "active");
     }
@@ -219,7 +229,10 @@ mod tests {
                 "codex",
                 seen(exp, cycle),
                 now,
-                || { runs.set(runs.get() + 1); Outcome::Renewed },
+                || {
+                    runs.set(runs.get() + 1);
+                    Outcome::Renewed
+                },
                 || seen(next, cycle + 1),
             );
             assert_eq!(r.state, "renewed");
@@ -233,30 +246,95 @@ mod tests {
     fn revoked_latches_reconnect_without_loop_until_connection_changes() {
         forget("t-rev");
         let runs = Cell::new(0);
-        let run = || { runs.set(runs.get() + 1); Outcome::Revoked };
-        assert_eq!(ensure("t-rev", "claude", seen(0, 7), 100, run, || None).state, "reconnect");
+        let run = || {
+            runs.set(runs.get() + 1);
+            Outcome::Revoked
+        };
+        assert_eq!(
+            ensure("t-rev", "claude", seen(0, 7), 100, run, || None).state,
+            "reconnect"
+        );
         for now in [200, 5_000, 90_000] {
-            let r = ensure("t-rev", "claude", seen(0, 7), now, || { runs.set(runs.get() + 1); Outcome::Revoked }, || None);
+            let r = ensure(
+                "t-rev",
+                "claude",
+                seen(0, 7),
+                now,
+                || {
+                    runs.set(runs.get() + 1);
+                    Outcome::Revoked
+                },
+                || None,
+            );
             assert_eq!(r.state, "reconnect");
         }
         assert_eq!(runs.get(), 1, "never re-run against a revoked connection");
         // Credential cleared by the CLI: still « À reconnecter ».
-        assert_eq!(ensure("t-rev", "claude", None, 100_000, || Outcome::Renewed, || None).state, "reconnect");
+        assert_eq!(
+            ensure(
+                "t-rev",
+                "claude",
+                None,
+                100_000,
+                || Outcome::Renewed,
+                || None
+            )
+            .state,
+            "reconnect"
+        );
         // User reconnected via ai-profiles: new fingerprint, fresh token.
-        assert_eq!(ensure("t-rev", "claude", seen(200_000, 8), 100_001, || Outcome::Renewed, || None).state, "active");
+        assert_eq!(
+            ensure(
+                "t-rev",
+                "claude",
+                seen(200_000, 8),
+                100_001,
+                || Outcome::Renewed,
+                || None
+            )
+            .state,
+            "active"
+        );
     }
 
     #[test]
     fn tool_success_without_fresh_token_is_a_failure_with_backoff() {
         forget("t-down");
         let runs = Cell::new(0);
-        let r = ensure("t-down", "codex", seen(50, 3), 0, || { runs.set(1); Outcome::Renewed }, || seen(50, 3));
+        let r = ensure(
+            "t-down",
+            "codex",
+            seen(50, 3),
+            0,
+            || {
+                runs.set(1);
+                Outcome::Renewed
+            },
+            || seen(50, 3),
+        );
         assert_eq!(r.state, "retrying");
         // Within backoff: no run.
-        let r = ensure("t-down", "codex", seen(50, 3), 30, || { runs.set(2); Outcome::Renewed }, || seen(9_999, 4));
+        let r = ensure(
+            "t-down",
+            "codex",
+            seen(50, 3),
+            30,
+            || {
+                runs.set(2);
+                Outcome::Renewed
+            },
+            || seen(9_999, 4),
+        );
         assert_eq!((r.state, runs.get()), ("retrying", 1));
         // After the 60 s backoff: retried, then a doubled backoff on failure.
-        ensure("t-down", "codex", seen(50, 3), 61, || Outcome::Failed, || None);
+        ensure(
+            "t-down",
+            "codex",
+            seen(50, 3),
+            61,
+            || Outcome::Failed,
+            || None,
+        );
         assert_eq!(with("t-down", |e| e.retry_at), 61 + 120);
     }
 
@@ -272,7 +350,17 @@ mod tests {
             || {
                 // A second poll while the first renewal is still running.
                 let ran = Cell::new(false);
-                let r = ensure("t-busy", "claude", seen(0, 1), 10, || { ran.set(true); Outcome::Renewed }, || None);
+                let r = ensure(
+                    "t-busy",
+                    "claude",
+                    seen(0, 1),
+                    10,
+                    || {
+                        ran.set(true);
+                        Outcome::Renewed
+                    },
+                    || None,
+                );
                 inner.set(Some((ran.get(), r.state)));
                 Outcome::Failed
             },
@@ -288,7 +376,10 @@ mod tests {
         let r = ensure(
             "t-none",
             "claude",
-            Some(Seen { expires_at: None, fingerprint: 1 }),
+            Some(Seen {
+                expires_at: None,
+                fingerprint: 1,
+            }),
             0,
             || panic!("must not run"),
             || None,

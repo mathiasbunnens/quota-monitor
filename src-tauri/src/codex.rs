@@ -1185,7 +1185,9 @@ struct ExtraHandle {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Transport {
     /// Own `codex app-server` child with `CODEX_HOME` = the raw followed value.
-    AppServer { launch: PathBuf },
+    AppServer {
+        launch: PathBuf,
+    },
     /// aip home: `auth.json` loaded in memory, one HTTPS usage read, no child
     /// process; renewed before expiry when the home owns its grant
     /// (`oauth_usage`, `oauth_refresh`).
@@ -2513,7 +2515,9 @@ done
         let usage = |used: u32| {
             Reply::json(
                 200,
-                &format!(r#"{{"plan_type":"plus","rate_limit":{{"primary_window":{{"used_percent":{used},"limit_window_seconds":18000,"reset_at":4102444800}}}}}}"#),
+                &format!(
+                    r#"{{"plan_type":"plus","rate_limit":{{"primary_window":{{"used_percent":{used},"limit_window_seconds":18000,"reset_at":4102444800}}}}}}"#
+                ),
             )
         };
         let server = Server::start([11, 22, 23, 33, 34, 55].map(usage).into());
@@ -2567,7 +2571,10 @@ done
             assert_eq!(launches(), cycle + 1, "nothing to renew on the next cycle");
         }
         let lines = fs::read_to_string(&log).unwrap();
-        assert!(lines.contains(&format!("ok|{}|app-server|", cli.display())), "{lines}");
+        assert!(
+            lines.contains(&format!("ok|{}|app-server|", cli.display())),
+            "{lines}"
+        );
         assert!(lines.contains(r#""includeToken":true"#));
         assert!(!lines.contains("login"));
 
@@ -2584,7 +2591,11 @@ done
             assert_eq!(poll().renewal.unwrap().state, "reconnect");
         }
         assert_eq!(launches(), 3, "a revoked home is never retried in a loop");
-        assert_eq!(fs::read_to_string(&path).unwrap(), dead, "Quota Monitor wrote no credential");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            dead,
+            "Quota Monitor wrote no credential"
+        );
 
         // Reconnected through ai-profiles: monitoring resumes by itself.
         fs::write(&path, auth(now + 7200, "RECONNECTED")).unwrap();

@@ -16,9 +16,9 @@ mod menu_fixture;
 #[cfg(target_os = "macos")]
 pub use menu_fixture::menu_tracking_fixture;
 mod ntfy;
-mod official_refresh;
 pub mod oauth_refresh;
 pub mod oauth_usage;
+mod official_refresh;
 mod prefs;
 mod settings_focus;
 #[cfg(target_os = "macos")]
