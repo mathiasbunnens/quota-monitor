@@ -1,4 +1,4 @@
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 mod account_menu;
 pub mod account_sources;
 mod activity;
