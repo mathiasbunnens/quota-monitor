@@ -509,16 +509,18 @@ dependencies = [
 
 [[package]]
 name = "chatgpt-quota-monitor"
-version = "3.2.0"
+version = "3.2.1-test.aiprofiles.1"
 dependencies = [
  "block2",
  "chrono",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "tauri",
  "tauri-build",

@@ -54,7 +54,10 @@ export type CodexAccount = ClaudeProfile & {
   tracked: boolean;
   available: boolean;
   refreshing: boolean;
-  phase: CodexStatus["phase"] | "unavailable";
+  /** `expired`: aip home whose saved token no longer works and could not be renewed
+   *  (refused by the provider, or a grant still shared with the source session);
+   *  `blocked`: incomplete aip home (no auth.json), never read. */
+  phase: CodexStatus["phase"] | "unavailable" | "blocked" | "expired";
   message: string;
   planType: string | null;
   lastChecked: string | null;
@@ -62,6 +65,7 @@ export type CodexAccount = ClaudeProfile & {
   duplicateOf: string | null;
   /** Earned resets of this account only (null: unknown or not connected). */
   availableResets: number | null;
+  renewal?: Renewal | null;
 };
 export type Preferences = {
   claudeAccounts: ClaudeAccountsPreferences;
@@ -105,4 +109,14 @@ export type ClaudeSnapshot = {
   capability: { refresh: "event_only" | "on_demand" | "none" };
   planType: string | null;
   extraUsage: { enabled: boolean; limitReached: boolean } | null;
+  /** ai-profiles profiles only: renewal by the official CLI (never by Quota Monitor). */
+  renewal?: Renewal | null;
+};
+/** `active`: nothing to renew yet; `renewed`: renewed by the official CLI;
+ *  `retrying`: the CLI failed (network/timeout), retried after a backoff;
+ *  `reconnect`: the provider refused the renewal — reconnect via ai-profiles. */
+export type Renewal = {
+  state: "active" | "renewed" | "retrying" | "reconnect";
+  tool: "claude" | "codex";
+  renewedAt: number | null;
 };
