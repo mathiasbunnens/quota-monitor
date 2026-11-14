@@ -200,6 +200,9 @@ pub struct ClaudeSnapshot {
     pub plan_type: Option<String>,
     /// Paid extra usage on top of the subscription: enabled / limit reached.
     pub extra_usage: Option<ExtraUsage>,
+    /// ai-profiles profiles only: renewal by the official Claude Code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renewal: Option<crate::official_refresh::Renewal>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -296,6 +299,7 @@ pub fn compute(enabled: bool, configured: bool, file: FileState, now: i64) -> Cl
         },
         plan_type: None,
         extra_usage: None,
+        renewal: None,
     };
     if !enabled {
         snap.message = "Claude est désactivé dans les Réglages.".into();
@@ -520,9 +524,12 @@ fn collect_accounts(app: &tauri::AppHandle, fable: Option<bool>) -> Vec<AccountS
         .into_iter()
         .map(|a| {
             let store = LIVE.lock().unwrap();
-            let snap = store.snapshot(&a.profile.id).unwrap_or_else(|| {
-                compute(p.claude_enabled, executable, FileState::Missing, unix_now())
-            });
+            let snap = stored_view(
+                &a,
+                store.snapshot(&a.profile.id),
+                p.claude_enabled,
+                executable,
+            );
             let refreshing = store.refreshing(&a.profile.id);
             drop(store);
             let mut profile = a.profile;
@@ -536,6 +543,46 @@ fn collect_accounts(app: &tauri::AppHandle, fable: Option<bool>) -> Vec<AccountS
             }
         })
         .collect()
+}
+/// Last collected snapshot of an account, else its initial state. A blocked
+/// account (incomplete aip profile) is shown through the existing error
+/// channel with the reason, no metrics and no plan: nothing was read. An aip
+/// snapshot read with its own credential does not need Claude Code at all.
+pub(crate) fn stored_view(
+    account: &crate::claude_accounts::Discovered,
+    stored: Option<ClaudeSnapshot>,
+    enabled: bool,
+    executable: bool,
+) -> ClaudeSnapshot {
+    let credential = matches!(
+        account.collect,
+        crate::account_sources::Collect::Credential
+            | crate::account_sources::Collect::ManagedCredential
+    );
+    let configured = executable || credential;
+    if let Some(blocker) = account.blocker() {
+        let mut snap = compute(enabled, configured, FileState::Missing, unix_now());
+        snap.state = "error";
+        snap.error_kind = Some("profile_blocked");
+        snap.message = crate::claude_accounts::blocked_message(blocker).into();
+        return snap;
+    }
+    stored.unwrap_or_else(|| {
+        let mut snap = compute(enabled, configured, FileState::Missing, unix_now());
+        if credential {
+            snap.source = Some(Source {
+                kind: USAGE_API_SOURCE,
+                documentation_url: if account.collect
+                    == crate::account_sources::Collect::ManagedCredential
+                {
+                    "https://github.com/bartekczyz/ai-profiles"
+                } else {
+                    USAGE_API_DOC_URL
+                },
+            });
+        }
+        snap
+    })
 }
 /// Per-account projection. `fable: Some(enabled)` is the display view (v3.1.0
 /// Fable visibility + "Limite Fable" label); `None` keeps raw metrics.
@@ -628,7 +675,7 @@ pub(crate) fn display_metrics(metrics: &[Metric]) -> Vec<Metric> {
 
 fn prepare_snapshot(mut snap: ClaudeSnapshot, enabled: bool, available: bool) -> ClaudeSnapshot {
     snap.enabled = enabled;
-    snap.source = Some(Source {
+    snap.source.get_or_insert(Source {
         kind: "official_cli_control",
         documentation_url: "https://code.claude.com/docs/en/cli-reference",
     });
@@ -660,7 +707,15 @@ fn prepare_snapshot(mut snap: ClaudeSnapshot, enabled: bool, available: bool) ->
             "Claude Code introuvable. Vérifiez son installation et redémarrez Quota Monitor."
                 .into();
     } else if snap.observed_at.is_none() && snap.error_kind.is_none() {
-        snap.message = "Lecture des quotas via Claude Code…".into();
+        snap.message = if snap
+            .source
+            .as_ref()
+            .is_some_and(|s| s.kind == USAGE_API_SOURCE)
+        {
+            "Lecture des quotas via l’API d’usage…".into()
+        } else {
+            "Lecture des quotas via Claude Code…".into()
+        };
     }
     snap
 }
@@ -704,29 +759,161 @@ fn refresh_live(app: &tauri::AppHandle) {
         return;
     };
     // Refresh is serial and each call uses a distinct canonical profile path.
-    for a in profiles(app, &p) {
+    let now = std::time::Instant::now();
+    for a in collection_plan(profiles(app, &p)) {
         if GENERATION.load(Ordering::Acquire) != generation || !prefs::current(app).claude_enabled {
             break;
         }
-        poll_profile(&LIVE, &a, executable.as_deref(), &dir, || {
-            crate::publish_quotas(app)
-        });
+        let credential = matches!(
+            a.collect,
+            crate::account_sources::Collect::Credential
+                | crate::account_sources::Collect::ManagedCredential
+        );
+        if credential && !credential_due(&CREDENTIAL_NEXT, &a.profile.id, now) {
+            continue; // the usage API is polled at most every CREDENTIAL_MIN_SECS
+        }
+        poll_profile(
+            &LIVE,
+            &a,
+            executable.as_deref(),
+            &dir,
+            crate::oauth_usage::CLAUDE_USAGE_BASE,
+            || crate::publish_quotas(app),
+        );
+        if credential {
+            let rate_limited = LIVE
+                .lock()
+                .unwrap()
+                .snapshot(&a.profile.id)
+                .is_some_and(|s| s.error_kind == Some("rate_limited"));
+            schedule_credential(&CREDENTIAL_NEXT, &a.profile.id, now, rate_limited);
+        }
     }
 }
+/// Source kind of a snapshot read over the provider's usage API (aip profile).
+pub(crate) const USAGE_API_SOURCE: &str = "provider_usage_api";
+const USAGE_API_DOC_URL: &str = "https://github.com/dqn/aip";
+/// Floor between two usage-API reads of one aip profile (the endpoint is
+/// rate-limited per token; the CLI path has no such floor).
+const CREDENTIAL_MIN_SECS: u64 = 120;
+/// Pause after an HTTP 429.
+const CREDENTIAL_RATE_LIMITED_SECS: u64 = 900;
+static CREDENTIAL_NEXT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+fn credential_due(
+    next: &std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    id: &str,
+    now: std::time::Instant,
+) -> bool {
+    next.lock().unwrap().get(id).is_none_or(|due| *due <= now)
+}
+fn schedule_credential(
+    next: &std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    id: &str,
+    now: std::time::Instant,
+    rate_limited: bool,
+) {
+    let secs = if rate_limited {
+        CREDENTIAL_RATE_LIMITED_SECS
+    } else {
+        CREDENTIAL_MIN_SECS
+    };
+    next.lock()
+        .unwrap()
+        .insert(id.to_string(), now + Duration::from_secs(secs));
+}
+/// Accounts the serial collector reads, in discovery order: launched (primary,
+/// `~/.claude-*` homes) or read over the usage API (aip snapshots). Blocked
+/// accounts (incomplete aip profiles) are skipped: their `launch` is `None`
+/// like the primary's, so polling one would read the primary again.
+pub(crate) fn collection_plan(
+    found: Vec<crate::claude_accounts::Discovered>,
+) -> Vec<crate::claude_accounts::Discovered> {
+    found
+        .into_iter()
+        .filter(|a| a.blocker().is_none())
+        .collect()
+}
+/// `base` is the usage-API base for aip snapshots (`CLAUDE_USAGE_BASE` in
+/// production, a loopback server in tests); the CLI path ignores it.
 fn poll_profile(
     store: &std::sync::Mutex<crate::claude_accounts::RefreshStore>,
     account: &crate::claude_accounts::Discovered,
     executable: Option<&Path>,
     dir: &Path,
+    base: &str,
     mut changed: impl FnMut(),
 ) -> bool {
+    if account.blocker().is_some() {
+        return false; // listed and explained by `stored_view`, never launched
+    }
     let profile = &account.profile;
     let Some(ticket) = store.lock().unwrap().begin(&profile.id) else {
         return false;
     };
     changed();
     let previous = store.lock().unwrap().snapshot(&profile.id);
-    let snap = if let Some(exe) = executable {
+    let snap = if account.collect == crate::account_sources::Collect::ManagedCredential {
+        // Option A: renewed only by the official Claude Code on this profile's
+        // own config dir, never by Quota Monitor (`official_refresh`).
+        let home = Path::new(&profile.path);
+        let cwd = profile_workspace(dir, &profile.id);
+        let renew =
+            |force| crate::ai_profiles::renew_claude(home, executable, &cwd, unix_now(), force);
+        let read = || {
+            crate::ai_profiles::read_claude(
+                home,
+                base,
+                crate::oauth_usage::DEFAULT_TIMEOUT,
+                unix_now(),
+            )
+        };
+        let mut renewal = renew(false);
+        let mut result = read();
+        let recent = renewal
+            .renewed_at
+            .is_some_and(|at| unix_now() - at < 30 * 60);
+        if matches!(
+            result,
+            Err(crate::ai_profiles::ClaudeError::Read(
+                crate::oauth_usage::ReadError::Unauthorized
+            ))
+        ) && renewal.state != "reconnect"
+            && !recent
+        {
+            // 401 on a token not locally expired: let Claude Code try once.
+            renewal = renew(true);
+            if renewal.state == "renewed" {
+                result = read();
+            }
+        }
+        let mut snap = managed_snapshot(result, previous, unix_now());
+        if renewal.state == "reconnect" && snap.metrics.is_empty() {
+            snap.state = "error";
+            snap.error_kind = Some("session_expired");
+            snap.message = crate::ai_profiles::RECONNECT.into();
+        }
+        snap.renewal = Some(renewal);
+        snap
+    } else if account.collect == crate::account_sources::Collect::Credential {
+        // aip snapshot: its own saved token, over HTTPS, no child process;
+        // renewed first under aip's own lock when it is about to expire.
+        let now = unix_now();
+        let result = crate::oauth_refresh::read_claude_profile(
+            Path::new(&profile.path),
+            base,
+            crate::oauth_usage::DEFAULT_TIMEOUT,
+            now,
+        );
+        credential_snapshot(
+            result,
+            &profile.name,
+            Path::new(&profile.path),
+            previous,
+            now,
+        )
+    } else if let Some(exe) = executable {
         let cwd = profile_workspace(dir, &profile.id);
         let result = collect(account, exe, &cwd);
         result_snapshot_for(result, previous, unix_now(), account.launch.as_deref())
@@ -742,15 +929,18 @@ fn poll_profile(
 /// Primary: exactly as 3.1.0 — inherit the app environment untouched (Claude
 /// Code derives its credential slot from CLAUDE_CONFIG_DIR's presence/value, so
 /// forcing it, even to ~/.claude, signs the child out). Extra profiles: the
-/// path string as discovered/entered, never canonicalized.
+/// path string as discovered/entered, never canonicalized. Blocked accounts
+/// are refused here too (defence in depth behind `collection_plan`).
 fn collect(
     account: &crate::claude_accounts::Discovered,
     exe: &Path,
     cwd: &Path,
 ) -> Result<Value, &'static str> {
-    match account.launch.as_deref() {
-        None => crate::claude_cli::read_usage(exe, cwd),
-        Some(config) => crate::claude_cli::read_usage_for(exe, cwd, config),
+    use crate::account_sources::Collect;
+    match (account.collect, account.launch.as_deref()) {
+        (Collect::Inherit, _) => crate::claude_cli::read_usage(exe, cwd),
+        (Collect::Isolated, Some(config)) => crate::claude_cli::read_usage_for(exe, cwd, config),
+        _ => Err("profile_blocked"),
     }
 }
 fn profile_workspace(dir: &Path, id: &str) -> PathBuf {
@@ -760,6 +950,166 @@ fn profile_workspace(dir: &Path, id: &str) -> PathBuf {
         .fold(dir.join("claude-cli-workspaces"), |p, part| {
             p.join(std::str::from_utf8(part).unwrap())
         })
+}
+/// Snapshot of an aip profile read over the usage API. A read answer goes
+/// through the same parser as Claude Code's `get_usage`; a session problem is
+/// an account-specific, actionable error with no quota at all; a transient
+/// problem keeps the last values (marked error, not refreshed). `folder` is
+/// the aip profile folder (its name is the `aip switch` argument).
+pub(crate) fn credential_snapshot(
+    result: Result<Value, crate::oauth_usage::ReadError>,
+    name: &str,
+    folder: &Path,
+    previous: Option<ClaudeSnapshot>,
+    now: i64,
+) -> ClaudeSnapshot {
+    let mut snap = match result {
+        Ok(value) if value["rate_limits_available"] == true => {
+            let mut s = usage_snapshot(&value, now);
+            s.message = "Quotas lus via l’API d’usage avec la sauvegarde du profil aip.".into();
+            s
+        }
+        Ok(_) => error_snapshot(
+            compute(true, true, FileState::Missing, now),
+            "malformed",
+            format!("Réponse de l’API d’usage inexploitable pour « {name} »."),
+        ),
+        Err(err) => {
+            // aip's own name is the canonical folder (a `~/.claude-*` link
+            // into the profiles folder keeps its spelling, not its name).
+            let aip_name = crate::claude_accounts::normalized(folder)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| name.to_string());
+            let (kind, message) = credential_error(err, name, &aip_name);
+            let base = previous
+                .filter(|_| err.transient())
+                .unwrap_or_else(|| compute(true, true, FileState::Missing, now));
+            error_snapshot(base, kind, message)
+        }
+    };
+    snap.source = Some(Source {
+        kind: USAGE_API_SOURCE,
+        documentation_url: USAGE_API_DOC_URL,
+    });
+    snap.capability = Capability {
+        refresh: "on_demand",
+    };
+    snap
+}
+fn managed_snapshot(
+    result: Result<Value, crate::ai_profiles::ClaudeError>,
+    previous: Option<ClaudeSnapshot>,
+    now: i64,
+) -> ClaudeSnapshot {
+    use crate::ai_profiles::ClaudeError;
+    let err = result.as_ref().err().copied();
+    let mapped = result.map_err(|e| match e {
+        ClaudeError::Read(r) => r,
+        _ => crate::oauth_usage::ReadError::Malformed,
+    });
+    let mut snap = credential_snapshot(mapped, "ai-profiles", Path::new(""), previous, now);
+    snap.source = Some(Source {
+        kind: USAGE_API_SOURCE,
+        documentation_url: "https://github.com/bartekczyz/ai-profiles",
+    });
+    snap.message = match err {
+        None => "Quotas ai-profiles lus en lecture seule ; renouvellement assuré par le CLI/manager.".into(),
+        Some(ClaudeError::Read(e)) => crate::ai_profiles::codex_error(e),
+        Some(ClaudeError::IdentityUnavailable) => "ai-profiles : identité de connexion non vérifiable (.claude.json ou API de profil indisponible) ; quotas masqués par sécurité.".into(),
+        Some(ClaudeError::AccountMismatch) => "ai-profiles : la connexion appartient à un autre compte (collision Keychain ou import). Quotas masqués ; aucun compte modifié.".into(),
+        Some(ClaudeError::Changed) => "ai-profiles : connexion modifiée pendant la lecture ; nouvelle tentative au prochain cycle.".into(),
+    };
+    if err.is_some() {
+        // Identity is checked anew each cycle. A failed probe cannot prove that
+        // the previous metrics still belong to the current manager connection.
+        snap.metrics.clear();
+        snap.plan_type = None;
+        snap.extra_usage = None;
+    }
+    if matches!(
+        err,
+        Some(
+            ClaudeError::IdentityUnavailable | ClaudeError::AccountMismatch | ClaudeError::Changed
+        )
+    ) {
+        snap.error_kind = Some("identity_unverified");
+    }
+    snap
+}
+fn error_snapshot(mut snap: ClaudeSnapshot, kind: &'static str, message: String) -> ClaudeSnapshot {
+    snap.state = "error";
+    snap.error_kind = Some(kind);
+    snap.message = message;
+    snap
+}
+/// Error kind + wording for one usage-API failure. Never a token, a path or a
+/// server body; `aip_name` is the profile folder name (aip's own argument).
+fn credential_error(
+    err: crate::oauth_usage::ReadError,
+    name: &str,
+    aip_name: &str,
+) -> (&'static str, String) {
+    use crate::oauth_usage::ReadError;
+    let switch = shell_word(aip_name);
+    match err {
+        ReadError::CredentialUnreadable => (
+            "credential_unreadable",
+            format!("Sauvegarde credentials.json du profil aip « {name} » illisible. Refaites « aip save claude {switch} » depuis ce compte."),
+        ),
+        ReadError::NoToken => (
+            "not_signed_in",
+            format!("Profil aip « {name} » : sa sauvegarde ne contient aucun jeton de connexion claude.ai."),
+        ),
+        ReadError::Expired | ReadError::Unauthorized | ReadError::RefreshRejected => (
+            "session_expired",
+            format!("Session du profil aip « {name} » expirée ou révoquée et renouvellement automatique refusé par Anthropic. Pour la renouveler : « aip switch {switch} », lancez Claude Code, puis revenez à votre profil habituel."),
+        ),
+        ReadError::NoRefreshToken => (
+            "session_expired",
+            format!("Session du profil aip « {name} » expirée et sa sauvegarde n’a pas de jeton de renouvellement. Refaites « aip save claude {switch} » depuis ce compte."),
+        ),
+        ReadError::SharedGrant => (
+            "session_expired",
+            format!("Session du profil aip « {name} » expirée ; sa sauvegarde partage sa connexion avec un autre profil (même jeton), Quota Monitor ne la renouvelle donc pas. Refaites « aip save claude {switch} » depuis ce compte."),
+        ),
+        ReadError::RefreshUnavailable => (
+            "session_expired",
+            format!("Session du profil aip « {name} » expirée et renouvellement impossible ici (fichier credentials.json non ordinaire ou verrou indisponible). « aip switch {switch} », lancez Claude Code, puis revenez."),
+        ),
+        ReadError::RefreshLocked => (
+            "transport",
+            format!("Renouvellement de « {name} » reporté : un autre processus (aip) tient son verrou. Dernières valeurs éventuellement conservées."),
+        ),
+        ReadError::RefreshUnsaved => (
+            "credential_unsaved",
+            format!("Jetons de « {name} » renouvelés par Anthropic mais impossibles à enregistrer dans credentials.json (permissions, disque). Nouvelle tentative au prochain cycle ; vérifiez le dossier du profil aip."),
+        ),
+        ReadError::Forbidden => (
+            "forbidden",
+            format!("Anthropic refuse la lecture des quotas avec le jeton du profil aip « {name} » (droits insuffisants : un jeton « setup-token » ne suffit pas)."),
+        ),
+        ReadError::RateLimited(_) => (
+            "rate_limited",
+            format!("Trop de lectures pour « {name} » : l’API d’usage impose une pause, nouvelle tentative plus tard. Dernières valeurs éventuellement conservées."),
+        ),
+        ReadError::Timeout | ReadError::Transport => (
+            "transport",
+            format!("Lecture des quotas de « {name} » impossible (réseau ou délai dépassé). Dernières valeurs éventuellement conservées."),
+        ),
+        ReadError::Http(code) => (
+            "http_error",
+            format!("API d’usage Anthropic : HTTP {code} pour « {name} ». Dernières valeurs éventuellement conservées."),
+        ),
+        ReadError::Malformed => (
+            "malformed",
+            format!("Réponse de l’API d’usage illisible pour « {name} »."),
+        ),
+        ReadError::InsecureBase => (
+            "transport",
+            "Adresse de l’API d’usage refusée (HTTPS requis).".into(),
+        ),
+    }
 }
 /// `launch` is the account's CLAUDE_CONFIG_DIR (None = primary, inherited env).
 pub(crate) fn result_snapshot_for(
@@ -904,6 +1254,9 @@ pub fn start_watcher(app: tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    /// Usage-API base for CLI-path tests: never contacted (no aip credential
+    /// there), production constant kept so a regression would be visible.
+    const CLI_BASE: &str = crate::oauth_usage::CLAUDE_USAGE_BASE;
     use super::*;
 
     const NOW: i64 = 1_800_000_000;
@@ -1111,8 +1464,18 @@ cat >/dev/null
                 launch: Some(path.clone()),
                 available: true,
                 visible: true,
+                collect: crate::account_sources::Collect::Isolated,
+                origin: crate::account_sources::Origin::Manual,
+                aliases: vec![],
             };
-            assert!(poll_profile(&store, &account, Some(&exe), &root, || {}));
+            assert!(poll_profile(
+                &store,
+                &account,
+                Some(&exe),
+                &root,
+                CLI_BASE,
+                || {}
+            ));
             let profile = account.profile.clone();
             accounts.push(account);
             assert_eq!(
@@ -1170,6 +1533,7 @@ cat >/dev/null
             &accounts[0],
             Some(&exe),
             &root,
+            CLI_BASE,
             || panic!("overlap")
         ));
         store.lock().unwrap().invalidate();
@@ -1183,6 +1547,7 @@ cat >/dev/null
             &accounts[0],
             Some(&exe),
             &root,
+            CLI_BASE,
             || store.lock().unwrap().invalidate()
         ));
         assert_eq!(store.lock().unwrap().snapshot(&profiles[0].id), cached);
@@ -1228,7 +1593,14 @@ cat >/dev/null
         let primary = found.iter().find(|a| a.primary).unwrap();
         let exe = env_probe_cli(&home);
         let store = std::sync::Mutex::new(crate::claude_accounts::RefreshStore::new());
-        assert!(poll_profile(&store, primary, Some(&exe), &home, || {}));
+        assert!(poll_profile(
+            &store,
+            primary,
+            Some(&exe),
+            &home,
+            CLI_BASE,
+            || {}
+        ));
         let seen =
             fs::read_to_string(profile_workspace(&home, &primary.profile.id).join("profile-seen"))
                 .unwrap();
@@ -1315,7 +1687,14 @@ cat >/dev/null
         ];
         for (account, expected) in found[1..].iter().zip(expected) {
             assert_eq!(account.launch.as_deref(), Some(Path::new(&expected)));
-            assert!(poll_profile(&store, account, Some(&exe), &home, || {}));
+            assert!(poll_profile(
+                &store,
+                account,
+                Some(&exe),
+                &home,
+                CLI_BASE,
+                || {}
+            ));
             let seen = fs::read_to_string(
                 profile_workspace(&home, &account.profile.id).join("profile-seen"),
             )
@@ -1346,6 +1725,786 @@ cat >/dev/null
         assert_eq!(work.state, "ready");
         assert_eq!(work.metrics[0].used_percent, Some(10.0));
         fs::remove_dir_all(root).unwrap();
+    }
+    /// Synthetic Claude Code: records every launch (argv, the CLAUDE_CONFIG_DIR
+    /// it received, the control requests it was sent) in `log`, answers
+    /// initialize + get_usage with a per-account percentage. Never reads files.
+    #[cfg(unix)]
+    fn routing_cli(root: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let exe = root.join("routing-claude");
+        let script = r#"#!/bin/sh
+LOG='@LOG@'
+seen="${CLAUDE_CONFIG_DIR-<unset>}"
+read init
+printf '%s\n' '{"type":"control_response","response":{"request_id":"init","subtype":"success","response":{}}}'
+read usage
+case "$seen" in
+  *claude-work) used=22 ;;
+  *) used=11 ;;
+esac
+printf 'argv=%s|config=%s|requests=%s,%s\n' "$*" "$seen" \
+  "$(printf '%s' "$init" | sed 's/.*"subtype":"\([a-z_]*\)".*/\1/')" \
+  "$(printf '%s' "$usage" | sed 's/.*"subtype":"\([a-z_]*\)".*/\1/')" >> "$LOG"
+printf '{"type":"control_response","response":{"request_id":"usage","subtype":"success","response":{"rate_limits_available":true,"subscription_type":"pro","rate_limits":{"five_hour":{"utilization":%s,"resets_at":"2030-01-01T00:00:00Z"}}}}}\n' "$used"
+cat >/dev/null
+"#
+        .replace("@LOG@", log.to_str().unwrap());
+        fs::write(&exe, script).unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
+        exe
+    }
+    #[cfg(unix)]
+    #[test]
+    fn aip_snapshots_are_never_launched_and_each_collectable_account_is_read_once_with_its_own_env()
+    {
+        let root = std::env::temp_dir().join(format!("qm-aip-routing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".claude-work")).unwrap();
+        let home = root.canonicalize().unwrap();
+        let profiles = home.join(".claude").join(crate::aip::PROFILES_DIR);
+        for (name, payload) in [("perso", true), ("boulot", true), ("vide", false)] {
+            fs::create_dir_all(profiles.join(name)).unwrap();
+            if payload {
+                fs::write(
+                    profiles.join(name).join(crate::aip::CLAUDE_PAYLOAD),
+                    "SYNTHETIC-SENTINEL-NOT-A-CREDENTIAL",
+                )
+                .unwrap();
+            }
+        }
+        fs::write(profiles.join(crate::aip::CURRENT_MARKER), "perso\n").unwrap();
+        // A second spelling of an aip snapshot (symlinked sibling) must not
+        // become a launchable home either.
+        std::os::unix::fs::symlink(profiles.join("boulot"), home.join(".claude-boulot-link"))
+            .unwrap();
+        let log = home.join("launches.log");
+        let exe = routing_cli(&home, &log);
+        let files_before: Vec<_> = ["perso", "boulot"]
+            .iter()
+            .map(|n| fs::read(profiles.join(n).join(crate::aip::CLAUDE_PAYLOAD)).unwrap())
+            .collect();
+        let current_before = fs::read(profiles.join(crate::aip::CURRENT_MARKER)).unwrap();
+        let env_before = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let prefs = crate::claude_accounts::AccountPrefs {
+            mode: "multi".into(),
+            ..Default::default()
+        };
+        let found = crate::claude_accounts::discover(&home, None, &prefs);
+        let store = std::sync::Mutex::new(crate::claude_accounts::RefreshStore::new());
+        // Same loop as refresh_live, twice (startup + one refresh).
+        for _ in 0..2 {
+            for a in collection_plan(found.clone()) {
+                assert!(poll_profile(&store, &a, Some(&exe), &home, CLI_BASE, || {}));
+            }
+        }
+        let launches: Vec<String> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect();
+        let inherited = env_before
+            .as_ref()
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<unset>".into());
+        let work = format!("{}/.claude-work", home.display());
+        // Exactly primary + ~/.claude-work per pass: the primary (also aip's
+        // `perso`) is read once, the snapshots never.
+        let configs: Vec<String> = launches
+            .iter()
+            .map(|l| {
+                l.split("|config=")
+                    .nth(1)
+                    .unwrap()
+                    .split('|')
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            configs,
+            [inherited.clone(), work.clone(), inherited, work],
+            "{launches:#?}"
+        );
+        for l in &launches {
+            assert!(l.contains("|requests=initialize,get_usage"), "{l}");
+            assert!(!l.contains(crate::aip::PROFILES_DIR), "{l}");
+            for verb in ["switch", "login", "logout", "auth", "setup-token"] {
+                assert!(!l.split('|').next().unwrap().contains(verb), "{verb}: {l}");
+            }
+        }
+        // Blocked accounts (incomplete profile): a direct poll refuses without launching.
+        assert_eq!(found.iter().filter(|a| a.blocker().is_some()).count(), 1);
+        for a in found.iter().filter(|a| a.blocker().is_some()) {
+            assert!(!poll_profile(
+                &store,
+                a,
+                Some(&exe),
+                &home,
+                CLI_BASE,
+                || panic!("launched")
+            ));
+            assert!(store.lock().unwrap().snapshot(&a.profile.id).is_none());
+        }
+        assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 4);
+        // Per-account values went to the right account.
+        let by_name = |n: &str| found.iter().find(|a| a.profile.name == n).unwrap();
+        let used = |n: &str| {
+            store
+                .lock()
+                .unwrap()
+                .snapshot(&by_name(n).profile.id)
+                .unwrap()
+                .metrics[0]
+                .used_percent
+        };
+        assert_eq!((used("Principal"), used("work")), (Some(11.0), Some(22.0)));
+        // The incomplete profile is explained, not collected; the snapshot
+        // whose payload is not a credential was read (no CLI) and reports an
+        // honest, account-specific error with no quota.
+        let vide = found.iter().find(|a| a.profile.name == "vide").unwrap();
+        let view = stored_view(vide, None, true, true);
+        assert_eq!(
+            (view.state, view.error_kind),
+            ("error", Some("profile_blocked"))
+        );
+        assert!(view.metrics.is_empty() && view.plan_type.is_none());
+        assert!(view.message.contains("aip"), "{}", view.message);
+        let shown = account_view(view, true, vide.available, Some(true));
+        assert_eq!(shown.error_kind, Some("profile_blocked"));
+        let boulot = found.iter().find(|a| a.profile.name == "boulot").unwrap();
+        let read = store.lock().unwrap().snapshot(&boulot.profile.id).unwrap();
+        assert_eq!(
+            (read.state, read.error_kind),
+            ("error", Some("credential_unreadable"))
+        );
+        assert!(read.metrics.is_empty() && read.plan_type.is_none());
+        assert!(
+            read.message.contains("aip save claude boulot"),
+            "{}",
+            read.message
+        );
+        assert_eq!(read.source.as_ref().unwrap().kind, USAGE_API_SOURCE);
+        // Without Claude Code installed, the snapshot is still configured.
+        assert_eq!(
+            stored_view(boulot, None, true, false).state,
+            "waiting_for_data"
+        );
+        // Nothing changed: environment, aip payloads, aip's active profile.
+        assert_eq!(std::env::var_os("CLAUDE_CONFIG_DIR"), env_before);
+        let files_after: Vec<_> = ["perso", "boulot"]
+            .iter()
+            .map(|n| fs::read(profiles.join(n).join(crate::aip::CLAUDE_PAYLOAD)).unwrap())
+            .collect();
+        assert_eq!(files_after, files_before);
+        assert_eq!(
+            fs::read(profiles.join(crate::aip::CURRENT_MARKER)).unwrap(),
+            current_before
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    /// End to end on the new path: two aip snapshots (synthetic tokens, no
+    /// real account) are read over a loopback usage API, each with its own
+    /// token, straight into the per-account store the UI reads from; the fake
+    /// CLI is never launched for them; session errors are account-specific
+    /// and carry no quota; transient errors keep the last values.
+    #[cfg(unix)]
+    #[test]
+    fn aip_snapshots_are_read_over_the_usage_api_with_their_own_tokens_without_any_launch() {
+        use crate::oauth_usage::test_support::{Reply, Server};
+        let root = std::env::temp_dir().join(format!("qm-aip-http-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".claude")).unwrap();
+        let home = root.canonicalize().unwrap();
+        let profiles = home.join(".claude").join(crate::aip::PROFILES_DIR);
+        let now = unix_now();
+        let credential = |name: &str, plan: &str, expires: i64| {
+            fs::create_dir_all(profiles.join(name)).unwrap();
+            fs::write(
+                profiles.join(name).join(crate::aip::CLAUDE_PAYLOAD),
+                json!({"claudeAiOauth": {"accessToken": format!("sk-ant-oat01-SYNTHETIC-{name}"),
+                    "refreshToken": format!("sk-ant-ort01-SYNTHETIC-{name}"), "expiresAt": expires * 1000,
+                    "scopes": ["user:inference", "user:profile"], "subscriptionType": plan}})
+                .to_string(),
+            )
+            .unwrap();
+        };
+        credential("boulot", "max", now + 3600);
+        credential("perso", "pro", now + 3600);
+        credential("stale", "pro", now - 10);
+        fs::write(profiles.join(crate::aip::CURRENT_MARKER), "perso\n").unwrap();
+        let log = home.join("launches.log");
+        let exe = routing_cli(&home, &log);
+        let before: Vec<_> = ["boulot", "perso", "stale"]
+            .iter()
+            .map(|n| fs::read(profiles.join(n).join(crate::aip::CLAUDE_PAYLOAD)).unwrap())
+            .collect();
+        let body = |five: f64, seven: f64| {
+            format!(
+                r#"{{"five_hour":{{"utilization":{five},"resets_at":"2099-01-01T00:00:00Z"}},
+                    "seven_day":{{"utilization":{seven},"resets_at":"2099-01-02T00:00:00Z"}},
+                    "limits":[{{"kind":"weekly_scoped","percent":5,"resets_at":"2099-01-02T00:00:00Z","scope":{{"model":{{"display_name":"Fable"}}}}}}],
+                    "extra_usage":{{"is_enabled":false}}}}"#
+            )
+        };
+        let prefs = crate::claude_accounts::AccountPrefs {
+            mode: "multi".into(),
+            ..Default::default()
+        };
+        let found = crate::claude_accounts::discover(&home, None, &prefs);
+        assert_eq!(names_of(&found), ["Principal", "boulot", "stale"]);
+        assert_eq!(
+            found[0].aliases,
+            ["perso"],
+            "_current folded into the primary"
+        );
+        let store = std::sync::Mutex::new(crate::claude_accounts::RefreshStore::new());
+        // One answer per request, in collection order (serial): boulot's
+        // usage read, then stale's renewal attempt (expired locally: the
+        // provider is asked for a refresh, never for usage) refused.
+        let server = Server::start(vec![
+            Reply::json(200, &body(31.0, 64.0)),
+            Reply::json(400, r#"{"error":"invalid_grant"}"#),
+        ]);
+        for a in collection_plan(found.clone()) {
+            assert!(poll_profile(
+                &store,
+                &a,
+                Some(&exe),
+                &home,
+                &server.base,
+                || {}
+            ));
+        }
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert_eq!(
+            Server::header(&requests[0], "authorization").as_deref(),
+            Some("Bearer sk-ant-oat01-SYNTHETIC-boulot")
+        );
+        assert!(
+            requests[1].starts_with("POST /v1/oauth/token HTTP/1.1"),
+            "{}",
+            requests[1]
+        );
+        assert!(
+            requests[1].contains("refresh_token=sk-ant-ort01-SYNTHETIC-stale")
+                && !requests[1].contains("sk-ant-oat01"),
+            "the refresh grant, never the access token: {}",
+            requests[1]
+        );
+        let snap = |name: &str| {
+            let a = found.iter().find(|a| a.profile.name == name).unwrap();
+            store.lock().unwrap().snapshot(&a.profile.id).unwrap()
+        };
+        let boulot = snap("boulot");
+        assert_eq!(boulot.state, "ready");
+        assert_eq!(boulot.plan_type.as_deref(), Some("max"));
+        let used: Vec<_> = boulot
+            .metrics
+            .iter()
+            .map(|m| (m.id, m.used_percent))
+            .collect();
+        assert_eq!(
+            used,
+            [
+                ("claude:five_hour", Some(31.0)),
+                ("claude:seven_day", Some(64.0)),
+                ("claude:weekly_fable", Some(5.0))
+            ]
+        );
+        assert_eq!(
+            boulot.metrics[0].reset_at.as_deref(),
+            Some("2099-01-01T00:00:00Z")
+        );
+        assert_eq!(boulot.source.as_ref().unwrap().kind, USAGE_API_SOURCE);
+        let stale = snap("stale");
+        assert_eq!(
+            (stale.state, stale.error_kind),
+            ("error", Some("session_expired"))
+        );
+        assert!(
+            stale.metrics.is_empty() && stale.plan_type.is_none(),
+            "no invented quota"
+        );
+        assert!(
+            stale.message.contains("aip switch stale"),
+            "{}",
+            stale.message
+        );
+        assert!(!stale.message.contains("SYNTHETIC"));
+        // The primary went through the CLI exactly once; no snapshot ever did.
+        let launches = fs::read_to_string(&log).unwrap();
+        assert_eq!(launches.lines().count(), 1, "{launches}");
+        assert!(!launches.contains(crate::aip::PROFILES_DIR), "{launches}");
+        // The display view carries the read values (Fable kept, label applied).
+        let view = account_view(boulot.clone(), true, true, Some(true));
+        assert_eq!(view.state, "ready");
+        assert_eq!(view.metrics.len(), 3);
+        assert_eq!(
+            crate::account_menu::claude_state(&AccountSnapshot {
+                profile: found[1].profile.clone(),
+                primary: false,
+                available: true,
+                refreshing: false,
+                snapshot: view,
+            })
+            .0,
+            "Connecté"
+        );
+        assert_eq!(
+            crate::account_menu::claude_state(&AccountSnapshot {
+                profile: found[2].profile.clone(),
+                primary: false,
+                available: true,
+                refreshing: false,
+                snapshot: account_view(stale, true, true, Some(true)),
+            })
+            .0,
+            "Session expirée"
+        );
+        // Later reads: 401 clears the quota (session gone), 429 and a timeout
+        // keep the last good values flagged as not refreshed.
+        let a = found
+            .iter()
+            .find(|a| a.profile.name == "boulot")
+            .unwrap()
+            .clone();
+        let server = Server::start(vec![Reply::json(429, "{}"), Reply::hang()]);
+        poll_profile(&store, &a, Some(&exe), &home, &server.base, || {});
+        let limited = snap("boulot");
+        assert_eq!(
+            (limited.state, limited.error_kind),
+            ("error", Some("rate_limited"))
+        );
+        assert_eq!(
+            limited.metrics[0].used_percent,
+            Some(31.0),
+            "last values kept"
+        );
+        let timed = std::time::Instant::now();
+        poll_profile(&store, &a, Some(&exe), &home, &server.base, || {});
+        assert!(
+            timed.elapsed() < Duration::from_secs(30),
+            "bounded by the HTTP timeout"
+        );
+        let out = snap("boulot");
+        assert_eq!(out.error_kind, Some("transport"));
+        assert_eq!(out.metrics[0].used_percent, Some(31.0));
+        drop(server);
+        // 401 on a token the file still holds: one renewal attempt, refused
+        // by the provider → the session is gone, no quota kept.
+        let server = Server::start(vec![
+            Reply::json(401, r#"{"error":{"type":"authentication_error"}}"#),
+            Reply::json(400, r#"{"error":"invalid_grant"}"#),
+        ]);
+        poll_profile(&store, &a, Some(&exe), &home, &server.base, || {});
+        let gone = snap("boulot");
+        assert_eq!(
+            (gone.state, gone.error_kind),
+            ("error", Some("session_expired"))
+        );
+        assert!(gone.metrics.is_empty() && gone.plan_type.is_none());
+        assert_eq!(server.requests().len(), 2, "exactly one bounded retry");
+        // Nothing written (every renewal was refused): credentials, marker;
+        // nothing launched meanwhile.
+        let after: Vec<_> = ["boulot", "perso", "stale"]
+            .iter()
+            .map(|n| fs::read(profiles.join(n).join(crate::aip::CLAUDE_PAYLOAD)).unwrap())
+            .collect();
+        assert_eq!(after, before);
+        assert_eq!(
+            fs::read_to_string(profiles.join(crate::aip::CURRENT_MARKER)).unwrap(),
+            "perso\n"
+        );
+        assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 1);
+        // The production loop polls the usage API at most every CREDENTIAL_MIN_SECS.
+        let gate = std::sync::Mutex::new(std::collections::HashMap::new());
+        let t0 = std::time::Instant::now();
+        assert!(credential_due(&gate, "x", t0));
+        schedule_credential(&gate, "x", t0, false);
+        assert!(!credential_due(
+            &gate,
+            "x",
+            t0 + Duration::from_secs(CREDENTIAL_MIN_SECS - 1)
+        ));
+        assert!(credential_due(
+            &gate,
+            "x",
+            t0 + Duration::from_secs(CREDENTIAL_MIN_SECS)
+        ));
+        schedule_credential(&gate, "x", t0, true);
+        assert!(!credential_due(
+            &gate,
+            "x",
+            t0 + Duration::from_secs(CREDENTIAL_MIN_SECS)
+        ));
+        assert!(credential_due(
+            &gate,
+            "x",
+            t0 + Duration::from_secs(CREDENTIAL_RATE_LIMITED_SECS)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ai_profiles_identity_failure_never_retains_previous_account_metrics() {
+        for error in [
+            crate::ai_profiles::ClaudeError::AccountMismatch,
+            crate::ai_profiles::ClaudeError::Changed,
+            crate::ai_profiles::ClaudeError::IdentityUnavailable,
+            crate::ai_profiles::ClaudeError::Read(crate::oauth_usage::ReadError::Timeout),
+            crate::ai_profiles::ClaudeError::Read(crate::oauth_usage::ReadError::RateLimited(
+                Some(60),
+            )),
+        ] {
+            let previous = managed_snapshot(
+                Ok(
+                    json!({"rate_limits_available":true,"subscription_type":"max","rate_limits":{"five_hour":{"utilization":10,"resets_at":"2099-01-01T00:00:00Z"}}}),
+                ),
+                None,
+                unix_now(),
+            );
+            let projected = account_view(previous.clone(), true, true, None);
+            assert_eq!(
+                projected.source.unwrap().documentation_url,
+                "https://github.com/bartekczyz/ai-profiles"
+            );
+            let next = managed_snapshot(Err(error), Some(previous), unix_now());
+            assert!(next.error_kind.is_some());
+            assert!(next.metrics.is_empty());
+            assert!(next.plan_type.is_none());
+            assert_eq!(
+                next.source.unwrap().documentation_url,
+                "https://github.com/bartekczyz/ai-profiles"
+            );
+        }
+    }
+
+    /// Fake official Claude Code for option A: answers `initialize` +
+    /// `get_usage` like the real one and, in `ok` mode, renews the profile it
+    /// was launched on (`CLAUDE_CONFIG_DIR`) by installing `fixture-renewed`,
+    /// as Claude Code's own refresh does. `revoked` = refresh refused
+    /// (signed out), `fail` = crash before answering.
+    #[cfg(unix)]
+    fn official_claude(root: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let exe = root.join("official-claude");
+        let script = r#"#!/bin/sh
+dir="$CLAUDE_CONFIG_DIR"
+mode=$(cat "$dir/fixture-mode" 2>/dev/null || echo ok)
+printf 'argv=%s|config=%s|mode=%s\n' "$*" "$dir" "$mode" >> '@LOG@'
+[ "$mode" = fail ] && exit 1
+read init
+printf '%s\n' '{"type":"control_response","response":{"request_id":"init","subtype":"success","response":{}}}'
+read usage
+if [ "$mode" = revoked ]; then
+  printf '%s\n' '{"type":"control_response","response":{"request_id":"usage","subtype":"success","response":{"rate_limits_available":false,"subscription_type":null}}}'
+else
+  cp "$dir/fixture-renewed" "$dir/.credentials.json"
+  printf '%s\n' '{"type":"control_response","response":{"request_id":"usage","subtype":"success","response":{"rate_limits_available":true,"subscription_type":"max","rate_limits":{}}}}'
+fi
+cat >/dev/null
+"#
+        .replace("@LOG@", log.to_str().unwrap());
+        fs::write(&exe, script).unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
+        exe
+    }
+
+    /// Option A through the production path (`collection_plan` →
+    /// `poll_profile`): a dormant ai-profiles profile is renewed by the
+    /// official Claude Code on its own config dir at each expiry, over several
+    /// cycles; a refused renewal reads « À
+    /// reconnecter » without looping; a reconnection through ai-profiles
+    /// resumes. Quota Monitor only sends GETs (never an OAuth token endpoint)
+    /// and never writes the credential file.
+    #[cfg(unix)]
+    #[test]
+    fn ai_profiles_dormant_profile_is_renewed_only_by_official_claude_over_cycles() {
+        use crate::oauth_usage::test_support::{Reply, Server};
+        let root = std::env::temp_dir().join(format!("qm-managed-claude-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let home = root.canonicalize().unwrap();
+        let cli = home.join("Library/Application Support/ai-profiles/profiles/work/cli-config");
+        fs::create_dir_all(&cli).unwrap();
+        let metadata = home.join("Library/Application Support/ai-profiles/profiles.json");
+        let meta =
+            r#"{"profiles":[{"id":"work","name":"Travail","surfaces":{"cli":true,"gui":false}}]}"#;
+        fs::write(&metadata, meta).unwrap();
+        fs::write(
+            cli.join(".claude.json"),
+            r#"{"oauthAccount":{"accountUuid":"account-work"}}"#,
+        )
+        .unwrap();
+        let credential = |expires: i64, token: &str| {
+            json!({"claudeAiOauth":{"accessToken":token,"refreshToken":"SYNTHETIC-SHARED","expiresAt":expires*1000,"subscriptionType":"max"}}).to_string()
+        };
+        let creds = cli.join(".credentials.json");
+        fs::write(&creds, credential(unix_now() + 3600, "SYNTHETIC-A")).unwrap();
+        let prefs = crate::claude_accounts::AccountPrefs {
+            mode: "multi".into(),
+            ..Default::default()
+        };
+        let found = collection_plan(crate::claude_accounts::discover(&home, None, &prefs));
+        let a = found
+            .iter()
+            .find(|a| a.profile.name == "Travail · ai-profiles")
+            .unwrap();
+        assert!(a.launch.is_none(), "never collected through a CLI");
+        let log = home.join("cli.log");
+        let exe = official_claude(&home, &log);
+        let launches = || {
+            fs::read_to_string(&log)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+        let profile = r#"{"account":{"uuid":"account-work"}}"#;
+        let usage = |used: u32| {
+            format!(
+                r#"{{"five_hour":{{"utilization":{used},"resets_at":"2099-01-01T00:00:00Z"}}}}"#
+            )
+        };
+        let mut replies = Vec::new();
+        for used in [11, 22, 23, 33, 34, 55] {
+            replies.push(Reply::json(200, profile));
+            replies.push(Reply::json(200, &usage(used)));
+        }
+        let server = Server::start(replies);
+        let store = std::sync::Mutex::new(crate::claude_accounts::RefreshStore::new());
+        let poll = || {
+            assert!(poll_profile(
+                &store,
+                a,
+                Some(&exe),
+                &home,
+                &server.base,
+                || {}
+            ));
+            store.lock().unwrap().snapshot(&a.profile.id).unwrap()
+        };
+        let bearer = |n: usize| Server::header(&server.requests()[n], "authorization").unwrap();
+
+        // Far from expiry: read only, the official tool is not launched.
+        let snap = poll();
+        assert_eq!(snap.metrics[0].used_percent, Some(11.0));
+        assert_eq!(snap.renewal.as_ref().unwrap().state, "active");
+        assert_eq!(launches(), 0);
+
+        // Dormant expiry, several cycles: renewed each time by Claude Code.
+        for (cycle, (left, token)) in [(60, "SYNTHETIC-B"), (-1, "SYNTHETIC-C")]
+            .into_iter()
+            .enumerate()
+        {
+            fs::write(&creds, credential(unix_now() + left, "SYNTHETIC-OLD")).unwrap();
+            fs::write(
+                cli.join("fixture-renewed"),
+                credential(unix_now() + 7200, token),
+            )
+            .unwrap();
+            let snap = poll();
+            assert_eq!(snap.state, "ready");
+            let renewal = snap.renewal.clone().unwrap();
+            assert_eq!((renewal.state, renewal.tool), ("renewed", "claude"));
+            assert_eq!(launches(), cycle + 1);
+            assert_eq!(bearer(2 + 4 * cycle), format!("Bearer {token}"));
+            // Next cycle: nothing to renew, no launch.
+            assert_eq!(poll().renewal.unwrap().state, "renewed");
+            assert_eq!(launches(), cycle + 1);
+        }
+        let lines = fs::read_to_string(&log).unwrap();
+        assert!(
+            lines.contains(&format!("config={}|", cli.display())),
+            "{lines}"
+        );
+        assert!(lines.contains("--input-format stream-json"));
+        assert!(!lines.contains("login"));
+
+        // Refused renewal: « À reconnecter », no quota, no loop.
+        fs::write(&creds, credential(unix_now() - 1, "SYNTHETIC-DEAD")).unwrap();
+        fs::write(cli.join("fixture-mode"), "revoked").unwrap();
+        let dead = fs::read_to_string(&creds).unwrap();
+        let snap = poll();
+        assert_eq!(snap.renewal.as_ref().unwrap().state, "reconnect");
+        assert_eq!(snap.error_kind, Some("session_expired"));
+        assert!(snap.metrics.is_empty());
+        assert!(snap.message.contains("ai-profiles"));
+        for _ in 0..3 {
+            assert_eq!(poll().renewal.unwrap().state, "reconnect");
+        }
+        assert_eq!(
+            launches(),
+            3,
+            "a revoked profile is never retried in a loop"
+        );
+        assert_eq!(
+            fs::read_to_string(&creds).unwrap(),
+            dead,
+            "Quota Monitor wrote no credential"
+        );
+
+        // Reconnected through ai-profiles: monitoring resumes by itself.
+        fs::write(
+            &creds,
+            credential(unix_now() + 7200, "SYNTHETIC-RECONNECTED"),
+        )
+        .unwrap();
+        let snap = poll();
+        assert_eq!(snap.state, "ready");
+        assert_eq!(snap.metrics[0].used_percent, Some(55.0));
+        assert_eq!(snap.renewal.unwrap().state, "active");
+        assert_eq!(launches(), 3);
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 12);
+        assert!(requests.iter().all(|r| r.starts_with("GET /api/oauth/")));
+        assert!(!requests.iter().any(|r| r.contains("token")));
+        assert_eq!(fs::read_to_string(&metadata).unwrap(), meta);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    /// Autonomous upkeep through the production path (`collection_plan` →
+    /// `poll_profile` → store): a dormant snapshot about to expire is renewed
+    /// under aip's lock, written back (only its tokens), read with the new
+    /// bearer and displayed « Connecté »; `_current`, the primary (CLI, one
+    /// launch) and the other snapshots are untouched; the next cycle reads
+    /// without renewing.
+    #[cfg(unix)]
+    #[test]
+    fn aip_expiring_snapshot_is_renewed_under_aip_lock_then_read_and_left_alone() {
+        use crate::oauth_usage::test_support::{Reply, Server};
+        let root = std::env::temp_dir().join(format!("qm-aip-renew-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".claude")).unwrap();
+        let home = root.canonicalize().unwrap();
+        let profiles = home.join(".claude").join(crate::aip::PROFILES_DIR);
+        let now = unix_now();
+        let credential = |name: &str, expires: i64| {
+            fs::create_dir_all(profiles.join(name)).unwrap();
+            fs::write(
+                profiles.join(name).join(crate::aip::CLAUDE_PAYLOAD),
+                json!({"claudeAiOauth": {"accessToken": format!("sk-ant-oat01-SYNTHETIC-{name}"),
+                    "refreshToken": format!("sk-ant-ort01-SYNTHETIC-{name}"), "expiresAt": expires * 1000,
+                    "scopes": ["user:inference"], "subscriptionType": "max", "rateLimitTier": "t"}})
+                .to_string(),
+            )
+            .unwrap();
+        };
+        credential("perso", now + 7200);
+        credential("boulot", now + 120); // inside aip's 5 min margin
+        fs::write(profiles.join(crate::aip::CURRENT_MARKER), "perso\n").unwrap();
+        fs::write(profiles.join(crate::aip::ORDER_FILE), "perso\nboulot\n").unwrap();
+        let log = home.join("launches.log");
+        let exe = routing_cli(&home, &log);
+        let perso_before =
+            fs::read(profiles.join("perso").join(crate::aip::CLAUDE_PAYLOAD)).unwrap();
+        let prefs = crate::claude_accounts::AccountPrefs {
+            mode: "multi".into(),
+            ..Default::default()
+        };
+        let found = crate::claude_accounts::discover(&home, None, &prefs);
+        assert_eq!(names_of(&found), ["Principal", "boulot"]);
+        let store = std::sync::Mutex::new(crate::claude_accounts::RefreshStore::new());
+        let usage = r#"{"five_hour":{"utilization":21,"resets_at":"2099-01-01T00:00:00Z"},
+            "seven_day":{"utilization":42,"resets_at":"2099-01-02T00:00:00Z"},"limits":[]}"#;
+        let server = Server::start(vec![
+            Reply::json(
+                200,
+                r#"{"access_token":"sk-ant-oat01-SYNTHETIC-renewed","refresh_token":"sk-ant-ort01-SYNTHETIC-renewed","expires_in":28800,"token_type":"Bearer"}"#,
+            ),
+            Reply::json(200, usage),
+            Reply::json(200, usage),
+        ]);
+        for a in collection_plan(found.clone()) {
+            assert!(poll_profile(
+                &store,
+                &a,
+                Some(&exe),
+                &home,
+                &server.base,
+                || {}
+            ));
+        }
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(
+            requests[0].starts_with("POST /v1/oauth/token "),
+            "{}",
+            requests[0]
+        );
+        assert!(requests[0].contains("refresh_token=sk-ant-ort01-SYNTHETIC-boulot"));
+        assert_eq!(
+            Server::header(&requests[1], "authorization").as_deref(),
+            Some("Bearer sk-ant-oat01-SYNTHETIC-renewed")
+        );
+        let boulot = found.iter().find(|a| a.profile.name == "boulot").unwrap();
+        let snap = store.lock().unwrap().snapshot(&boulot.profile.id).unwrap();
+        assert_eq!((snap.state, snap.error_kind), ("ready", None));
+        assert_eq!(snap.metrics[0].used_percent, Some(21.0));
+        assert_eq!(
+            crate::account_menu::claude_state(&AccountSnapshot {
+                profile: boulot.profile.clone(),
+                primary: false,
+                available: true,
+                refreshing: false,
+                snapshot: account_view(snap, true, true, Some(true)),
+            })
+            .0,
+            "Connecté"
+        );
+        // Written back: only the tokens of that snapshot, aip's lock file
+        // beside it; everything else byte for byte identical.
+        let saved: Value = serde_json::from_slice(
+            &fs::read(profiles.join("boulot").join(crate::aip::CLAUDE_PAYLOAD)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved["claudeAiOauth"]["accessToken"],
+            "sk-ant-oat01-SYNTHETIC-renewed"
+        );
+        assert_eq!(
+            saved["claudeAiOauth"]["refreshToken"],
+            "sk-ant-ort01-SYNTHETIC-renewed"
+        );
+        assert_eq!(saved["claudeAiOauth"]["rateLimitTier"], "t");
+        assert!(saved["claudeAiOauth"]["expiresAt"].as_i64().unwrap() >= (now + 28_000) * 1000);
+        assert!(profiles
+            .join("boulot")
+            .join("credentials.json.lock")
+            .is_file());
+        assert_eq!(
+            fs::read(profiles.join("perso").join(crate::aip::CLAUDE_PAYLOAD)).unwrap(),
+            perso_before
+        );
+        assert_eq!(
+            fs::read_to_string(profiles.join(crate::aip::CURRENT_MARKER)).unwrap(),
+            "perso\n"
+        );
+        assert_eq!(
+            fs::read_to_string(profiles.join(crate::aip::ORDER_FILE)).unwrap(),
+            "perso\nboulot\n"
+        );
+        let launches = fs::read_to_string(&log).unwrap();
+        assert_eq!(launches.lines().count(), 1, "primary only: {launches}");
+        assert!(!launches.contains("security"), "{launches}");
+        // Next cycle: fresh token, usage read only.
+        assert!(poll_profile(
+            &store,
+            boulot,
+            Some(&exe),
+            &home,
+            &server.base,
+            || {}
+        ));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].starts_with("GET /api/oauth/usage "));
+        fs::remove_dir_all(root).unwrap();
+    }
+    fn names_of(found: &[crate::claude_accounts::Discovered]) -> Vec<String> {
+        found.iter().map(|a| a.profile.name.clone()).collect()
     }
     #[test]
     fn signed_out_reply_is_not_connected_not_an_empty_quota() {

@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -226,12 +226,16 @@ impl Provider {
     /// generation: an answer still in flight from the old child is rejected.
     pub fn reconcile(&self, app: &tauri::AppHandle) {
         let prefs = crate::prefs::current(app);
+        let mut primary_home: Option<PathBuf> = None;
         let wanted: Vec<_> = if prefs.codex_enabled {
-            discovered(app, &prefs)
-                .into_iter()
-                .filter(|a| !a.primary && a.tracked && a.available)
-                .take(crate::codex_accounts::MAX_EXTRA)
-                .collect()
+            let found = discovered(app, &prefs);
+            primary_home = found
+                .iter()
+                .find(|a| a.primary)
+                .map(|a| PathBuf::from(&a.profile.path));
+            let mut plan = collection_plan(found.clone());
+            plan.extend(credential_plan(found));
+            plan
         } else {
             vec![]
         };
@@ -241,7 +245,7 @@ impl Provider {
             let mut store = self.store.lock().unwrap();
             extras.retain(|id, handle| {
                 let keep = wanted.iter().any(|a| {
-                    &a.profile.id == id && a.launch.as_deref() == Some(handle.launch.as_path())
+                    &a.profile.id == id && Transport::of(a) == Some(handle.transport.clone())
                 });
                 if !keep {
                     // Worker exits within 250 ms; dropping its session stops the child.
@@ -256,14 +260,16 @@ impl Provider {
                     continue;
                 }
                 changed = true;
-                let launch = a.launch.clone().expect("followed extra has a launch home");
+                let transport = Transport::of(a).expect("planned extra has a transport");
                 let generation = store.register(&a.profile.id);
                 let shared = Arc::new(Shared::default());
                 let (tx, rx) = mpsc::channel();
                 let worker = ExtraWorker {
                     id: a.profile.id.clone(),
                     generation,
-                    launch: launch.clone(),
+                    transport: transport.clone(),
+                    usage_base: crate::oauth_usage::CODEX_USAGE_BASE.into(),
+                    primary_home: primary_home.clone(),
                     shared: shared.clone(),
                     store: self.store.clone(),
                     executable: {
@@ -290,7 +296,14 @@ impl Provider {
                     first_poll: Instant::now() + Duration::from_secs(2 * index as u64 + 1),
                 };
                 std::thread::spawn(move || run_extra(worker, rx));
-                extras.insert(a.profile.id.clone(), ExtraHandle { shared, tx, launch });
+                extras.insert(
+                    a.profile.id.clone(),
+                    ExtraHandle {
+                        shared,
+                        tx,
+                        transport,
+                    },
+                );
             }
         }
         if changed {
@@ -511,6 +524,32 @@ impl Session {
     fn drain(&mut self) -> Vec<Value> {
         self.notices.extend(self.messages.try_iter().take(128));
         std::mem::take(&mut self.notices)
+    }
+}
+
+/// Option A (`official_refresh`): let the official Codex CLI renew an
+/// ai-profiles session. `getAuthStatus {includeToken:true}` makes Codex 0.164
+/// load the auth of THIS `CODEX_HOME` and refresh it when it is within its own
+/// 5-minute window (`force`: refresh even outside it, after a 401) — no model
+/// request, no login, no browser. The returned token is only tested for
+/// presence and dropped; Quota Monitor re-reads `auth.json` afterwards.
+pub(crate) fn official_renew(
+    exe: &PathBuf,
+    home: &std::path::Path,
+    force: bool,
+) -> crate::official_refresh::Outcome {
+    use crate::official_refresh::Outcome;
+    let Ok(mut session) = Session::start_in(exe, Arc::new(Shared::default()), Some(home)) else {
+        return Outcome::Failed;
+    };
+    match session.call(
+        "getAuthStatus",
+        json!({"includeToken": true, "refreshToken": force}),
+    ) {
+        Ok(v) if v.get("authToken").is_some_and(Value::is_string) => Outcome::Renewed,
+        // Refresh refused (revoked/expired grant): Codex reports no token.
+        Ok(v) if v.get("authToken").is_some_and(Value::is_null) => Outcome::Revoked,
+        _ => Outcome::Failed,
     }
 }
 
@@ -1071,6 +1110,8 @@ pub(crate) struct Reading {
     pub last_checked: Option<String>,
     /// Earned reset credits reported by this account's own rate-limit read.
     pub available_resets: Option<u64>,
+    /// ai-profiles homes only: renewal by the official Codex CLI (option A).
+    pub renewal: Option<crate::official_refresh::Renewal>,
 }
 impl Reading {
     fn new(phase: &str, message: &str) -> Self {
@@ -1138,7 +1179,36 @@ impl AccountStore {
 struct ExtraHandle {
     shared: Arc<Shared>,
     tx: Sender<ExtraAction>,
-    launch: PathBuf,
+    transport: Transport,
+}
+/// How one additional account is read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Transport {
+    /// Own `codex app-server` child with `CODEX_HOME` = the raw followed value.
+    AppServer {
+        launch: PathBuf,
+    },
+    /// aip home: `auth.json` loaded in memory, one HTTPS usage read, no child
+    /// process; renewed before expiry when the home owns its grant
+    /// (`oauth_usage`, `oauth_refresh`).
+    Credential {
+        home: PathBuf,
+    },
+    ManagedCredential {
+        home: PathBuf,
+    },
+}
+impl Transport {
+    fn of(a: &crate::codex_accounts::Discovered) -> Option<Self> {
+        match (&a.credential, &a.launch) {
+            (Some(home), _) if a.managed => Some(Self::ManagedCredential { home: home.clone() }),
+            (Some(home), _) => Some(Self::Credential { home: home.clone() }),
+            (None, Some(launch)) => Some(Self::AppServer {
+                launch: launch.clone(),
+            }),
+            (None, None) => None,
+        }
+    }
 }
 enum ExtraAction {
     Refresh,
@@ -1148,8 +1218,13 @@ enum ExtraAction {
 pub(crate) struct ExtraWorker {
     id: String,
     generation: u64,
-    /// Raw followed value, set as CODEX_HOME on this child only.
-    launch: PathBuf,
+    transport: Transport,
+    /// Usage-API base for `Transport::Credential` (`CODEX_USAGE_BASE` in
+    /// production, a loopback server in tests).
+    usage_base: String,
+    /// Primary home (raw `CODEX_HOME` or `~/.codex`): its grant is never
+    /// rotated from a profile that still shares it.
+    primary_home: Option<PathBuf>,
     shared: Arc<Shared>,
     store: Arc<Mutex<AccountStore>>,
     executable: Box<dyn Fn() -> Option<PathBuf> + Send>,
@@ -1165,15 +1240,229 @@ fn signed_out_message(launch: &std::path::Path) -> String {
     )
 }
 
+/// Floor between two usage-API reads of one aip home (per-token rate limit).
+const CREDENTIAL_MIN_SECS: u64 = 120;
+/// Pause after an HTTP 429 without `retry-after`.
+const CREDENTIAL_RATE_LIMITED_SECS: u64 = 900;
+
+/// Polling of one aip home over the usage API with the token saved in its
+/// `auth.json`: no child process, no login, no reset; the token is renewed
+/// before expiry (CLI protocol, own grant only — `oauth_refresh`). The
+/// answer goes through the same `normalize` as app-server's rate limits and
+/// the same identity fingerprint as `account/read`.
+///
+/// ai-profiles homes (option A) are never renewed by Quota Monitor: the
+/// official Codex CLI renews them (`official_renew`) before the read, and once
+/// more after a 401 on a token that was not locally expired.
+fn poll_credential(w: &ExtraWorker, home: &Path, failures: &mut u32) -> (Reading, Duration) {
+    if !matches!(w.transport, Transport::ManagedCredential { .. }) {
+        return poll_credential_once(w, home, failures);
+    }
+    let renew = |force: bool| {
+        crate::ai_profiles::renew_codex(home, chrono::Utc::now().timestamp(), force, || {
+            match (w.executable)() {
+                Some(exe) => official_renew(&exe, home, force),
+                None => crate::official_refresh::Outcome::Failed,
+            }
+        })
+    };
+    let mut renewal = renew(false);
+    let mut polled = poll_credential_once(w, home, failures);
+    // A 401 on a token just renewed is not retried with another rotation.
+    let recent = renewal
+        .renewed_at
+        .is_some_and(|at| chrono::Utc::now().timestamp() - at < 30 * 60);
+    if polled.0.phase == "expired" && renewal.state != "reconnect" && !recent {
+        renewal = renew(true);
+        if renewal.state == "renewed" {
+            polled = poll_credential_once(w, home, failures);
+        }
+    }
+    if renewal.state == "reconnect" && polled.0.phase != "ready" {
+        polled.0 = Reading::new("expired", crate::ai_profiles::RECONNECT);
+        polled.0.last_checked = Some(chrono::Utc::now().to_rfc3339());
+    }
+    polled.0.renewal = Some(renewal);
+    polled
+}
+
+fn poll_credential_once(w: &ExtraWorker, home: &Path, failures: &mut u32) -> (Reading, Duration) {
+    use crate::oauth_usage::ReadError;
+    let now = || Some(chrono::Utc::now().to_rfc3339());
+    let floor =
+        |plan: Option<&str>| Duration::from_secs((w.interval)(plan).max(CREDENTIAL_MIN_SECS));
+    let backoff = |failures: u32| {
+        Duration::from_secs((15 * (1 << failures)).max((w.interval)(None).max(CREDENTIAL_MIN_SECS)))
+    };
+    // aip's own name is the canonical folder (a `~/.codex-*` link into the
+    // profiles folder keeps its spelling, not its name).
+    let aip_name = crate::claude_accounts::normalized(home)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "profil".into());
+    let managed = matches!(w.transport, Transport::ManagedCredential { .. });
+    let read = if managed {
+        crate::ai_profiles::read_codex(
+            home,
+            &w.usage_base,
+            crate::oauth_usage::DEFAULT_TIMEOUT,
+            chrono::Utc::now().timestamp(),
+        )
+    } else {
+        crate::oauth_refresh::read_codex_home(
+            home,
+            &w.usage_base,
+            crate::oauth_usage::DEFAULT_TIMEOUT,
+            chrono::Utc::now().timestamp(),
+            // Renew before the CLI's own 5 min window and before the next poll
+            // could miss it: a CLI running on this home then adopts the fresh
+            // tokens on its guarded reload instead of racing for the grant.
+            2 * floor(None).as_secs() as i64,
+            w.primary_home.as_deref(),
+        )
+    };
+    match read {
+        Ok(usage) => match normalize(&usage.rate_limits) {
+            Ok(rows) => {
+                *failures = 0;
+                let delay = floor(usage.plan_type.as_deref());
+                let mut reading = Reading::new(
+                    "ready",
+                    if rows.is_empty() {
+                        "Connecté à ChatGPT. Aucune fenêtre de quota n’est disponible pour ce compte."
+                    } else {
+                        if managed {
+                            "Quotas ai-profiles lus en lecture seule ; session renouvelée par Codex/ai-profiles."
+                        } else {
+                            "Quotas lus via l’API d’usage ChatGPT avec la sauvegarde du profil aip."
+                        }
+                    },
+                );
+                reading.plan_type = usage.plan_type;
+                reading.identity = account_fingerprint(&json!({
+                    "account": {"email": usage.email},
+                    "workspaceRouting": {"chatgptAccountId": usage.account_id},
+                }));
+                reading.available_resets = available_resets(&usage.rate_limits);
+                reading.rows = Some(rows);
+                reading.last_checked = now();
+                (reading, delay)
+            }
+            Err(error) => {
+                *failures = (*failures + 1).min(4);
+                let mut reading = Reading::new("error", &error);
+                reading.last_checked = now();
+                (reading, backoff(*failures))
+            }
+        },
+        Err(err) => {
+            let switch = crate::claude::shell_word(&aip_name);
+            let (phase, message, delay) = match err {
+                ReadError::CredentialUnreadable => (
+                    "error",
+                    format!("Fichier auth.json du profil aip « {aip_name} » illisible. Refaites « aip save codex {switch} » depuis ce compte."),
+                    floor(None),
+                ),
+                ReadError::NoToken => (
+                    "signed_out",
+                    format!("Profil aip « {aip_name} » sans jeton ChatGPT (clé API ou déconnecté) : sélectionnez-le dans aip puis « aip codex login »."),
+                    floor(None).max(Duration::from_secs(120)),
+                ),
+                ReadError::Expired | ReadError::Unauthorized | ReadError::RefreshRejected => (
+                    "expired",
+                    format!("Session du profil aip « {aip_name} » expirée ou révoquée et renouvellement automatique refusé par OpenAI : sélectionnez-le dans aip puis lancez « aip codex login » pour la renouveler."),
+                    floor(None).max(Duration::from_secs(300)),
+                ),
+                ReadError::NoRefreshToken => (
+                    "expired",
+                    format!("Session du profil aip « {aip_name} » expirée et sans jeton de renouvellement : sélectionnez-le dans aip puis « aip codex login »."),
+                    floor(None).max(Duration::from_secs(300)),
+                ),
+                ReadError::SharedGrant => (
+                    "expired",
+                    format!("Session du profil aip « {aip_name} » expirée. Sa connexion est encore celle importée du compte principal (ou partagée avec un autre profil) : Quota Monitor ne la renouvelle pas, cela déconnecterait la session d’origine. Faites « aip codex login » une fois pour ce profil."),
+                    floor(None).max(Duration::from_secs(300)),
+                ),
+                ReadError::RefreshUnavailable => (
+                    "expired",
+                    format!("Session du profil aip « {aip_name} » expirée et renouvellement impossible ici (auth.json non ordinaire ou verrou indisponible) : « aip codex » pour ce profil."),
+                    floor(None).max(Duration::from_secs(300)),
+                ),
+                ReadError::RefreshLocked => (
+                    "error",
+                    format!("Renouvellement de « {aip_name} » reporté : un autre Quota Monitor tient son verrou."),
+                    floor(None),
+                ),
+                ReadError::RefreshUnsaved => (
+                    "error",
+                    format!("Jetons de « {aip_name} » renouvelés par OpenAI mais impossibles à enregistrer dans auth.json (permissions, disque). Nouvelle tentative au prochain cycle ; vérifiez le dossier du profil aip."),
+                    floor(None),
+                ),
+                ReadError::Forbidden => (
+                    "error",
+                    format!("ChatGPT refuse la lecture des quotas du profil aip « {aip_name} » (HTTP 403)."),
+                    floor(None),
+                ),
+                ReadError::RateLimited(retry) => (
+                    "error",
+                    format!("Trop de lectures pour « {aip_name} » : l’API d’usage impose une pause, nouvelle tentative plus tard."),
+                    Duration::from_secs(retry.unwrap_or(CREDENTIAL_RATE_LIMITED_SECS).clamp(60, 3600)),
+                ),
+                ReadError::Timeout | ReadError::Transport => {
+                    *failures = (*failures + 1).min(4);
+                    (
+                        "error",
+                        format!("Lecture des quotas de « {aip_name} » impossible (réseau ou délai dépassé)."),
+                        backoff(*failures),
+                    )
+                }
+                ReadError::Http(code) => {
+                    *failures = (*failures + 1).min(4);
+                    (
+                        "error",
+                        format!("API ChatGPT : HTTP {code} pour « {aip_name} »."),
+                        backoff(*failures),
+                    )
+                }
+                ReadError::Malformed => (
+                    "error",
+                    format!("Réponse d’usage ChatGPT illisible pour « {aip_name} »."),
+                    floor(None),
+                ),
+                ReadError::InsecureBase => (
+                    "error",
+                    "Adresse de l’API d’usage refusée (HTTPS requis).".into(),
+                    floor(None),
+                ),
+            };
+            let message = if managed {
+                crate::ai_profiles::codex_error(err)
+            } else {
+                message
+            };
+            let mut reading = Reading::new(phase, &message);
+            reading.last_checked = now();
+            (reading, delay)
+        }
+    }
+}
+
 /// Read-only polling of one additional environment: `account/read`
 /// (`refreshToken:false`), then `account/rateLimits/read` for a ChatGPT
 /// account only. Never logs in/out, never redeems a reset, never starts a
-/// turn. A signed-out home (`account: null`) is reported as such.
+/// turn. A signed-out home (`account: null`) is reported as such. An aip home
+/// (`Transport::Credential`) is read by [`poll_credential`] instead.
 fn poll_extra(
     w: &ExtraWorker,
     session: &mut Option<Session>,
     failures: &mut u32,
 ) -> (Reading, Duration) {
+    let launch = match &w.transport {
+        Transport::Credential { home } | Transport::ManagedCredential { home } => {
+            return poll_credential(w, home, failures)
+        }
+        Transport::AppServer { launch } => launch,
+    };
     let now = || Some(chrono::Utc::now().to_rfc3339());
     let backoff = |failures: u32, base: u64| Duration::from_secs((15 * (1 << failures)).max(base));
     if session.is_none() {
@@ -1186,7 +1475,7 @@ fn poll_extra(
                 Duration::from_secs(60),
             );
         };
-        match Session::start_in(&exe, w.shared.clone(), Some(&w.launch)) {
+        match Session::start_in(&exe, w.shared.clone(), Some(launch)) {
             Ok(value) => *session = Some(value),
             Err(error) => {
                 *failures = (*failures + 1).min(4);
@@ -1239,7 +1528,7 @@ fn poll_extra(
         Ok(None) => {
             // A new session later picks up a login made outside the app.
             *session = None;
-            let mut reading = Reading::new("signed_out", &signed_out_message(&w.launch));
+            let mut reading = Reading::new("signed_out", &signed_out_message(launch));
             reading.last_checked = now();
             (reading, Duration::from_secs((w.interval)(None).max(120)))
         }
@@ -1262,6 +1551,17 @@ fn run_extra(w: ExtraWorker, rx: Receiver<ExtraAction>) {
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(ExtraAction::Refresh) => next_poll = Instant::now(),
             Ok(ExtraAction::Redeem(key, reply)) => {
+                if matches!(
+                    w.transport,
+                    Transport::Credential { .. } | Transport::ManagedCredential { .. }
+                ) {
+                    // Read-only transport: no reset is ever spent for an aip home.
+                    let _ = reply.send(Err(
+                        "Réinitialisation indisponible pour un profil externe (lecture seule)."
+                            .into(),
+                    ));
+                    continue;
+                }
                 let ready = w
                     .store
                     .lock()
@@ -1328,6 +1628,41 @@ fn run_extra(w: ExtraWorker, rx: Receiver<ExtraAction>) {
     w.shared.kill_child();
 }
 
+/// Additional homes that get their own app-server child, in discovery order:
+/// followed, available, bounded by `MAX_EXTRA`. The primary is collected by
+/// the historical session. Blocked accounts (aip homes) are never launched:
+/// they are filtered on `blocker` AND on the launch value (defence in depth,
+/// a blocked entry has no `launch`).
+pub(crate) fn collection_plan(
+    found: Vec<crate::codex_accounts::Discovered>,
+) -> Vec<crate::codex_accounts::Discovered> {
+    found
+        .into_iter()
+        .filter(|a| {
+            !a.primary && a.tracked && a.available && a.blocker.is_none() && a.launch.is_some()
+        })
+        .take(crate::codex_accounts::MAX_EXTRA)
+        .collect()
+}
+/// aip homes read with their own credential, in discovery order (bounded
+/// apart from the app-server children): never launched, never the primary.
+pub(crate) fn credential_plan(
+    found: Vec<crate::codex_accounts::Discovered>,
+) -> Vec<crate::codex_accounts::Discovered> {
+    found
+        .into_iter()
+        .filter(|a| {
+            !a.primary
+                && a.tracked
+                && a.available
+                && a.blocker.is_none()
+                && a.launch.is_none()
+                && a.credential.is_some()
+        })
+        .take(crate::codex_accounts::MAX_EXTRA)
+        .collect()
+}
+
 /// Discovered environments for this app (names/paths only).
 pub(crate) fn discovered(
     app: &tauri::AppHandle,
@@ -1362,6 +1697,8 @@ pub struct CodexAccount {
     pub rows: Vec<QuotaPayload>,
     /// Name of an earlier account returning the same identity (not added up).
     pub duplicate_of: Option<String>,
+    /// ai-profiles homes only: active / renewed / reconnect / retrying.
+    pub renewal: Option<crate::official_refresh::Renewal>,
     #[serde(skip)]
     pub raw_rows: Vec<QuotaPayload>,
     #[serde(skip)]
@@ -1391,6 +1728,7 @@ pub(crate) fn account_view(
                 identity: p.identity,
                 last_checked: p.status.last_checked.clone(),
                 available_resets: p.status.available_resets,
+                renewal: None,
             })
             .unwrap_or_else(|| Reading::new("starting", "Connexion à Codex…"))
     } else if !enabled {
@@ -1400,6 +1738,9 @@ pub(crate) fn account_view(
             "unavailable",
             "Dossier CODEX_HOME indisponible : vérifiez qu’il existe encore.",
         )
+    } else if let Some(blocker) = d.blocker {
+        // Listed and explained, never read: no plan, no quota, no reset.
+        Reading::new("blocked", crate::codex_accounts::blocked_message(blocker))
     } else {
         slot.as_ref()
             .map(|(r, _)| r.clone())
@@ -1412,7 +1753,9 @@ pub(crate) fn account_view(
         vec![]
     };
     let mut profile = d.profile;
-    profile.visible = d.visible && enabled;
+    // A blocked home has nothing to draw: listed in the settings with its
+    // reason, never a quota card (same rule as React's `tracked` filter).
+    profile.visible = d.visible && enabled && d.blocker.is_none();
     let available_resets = (enabled && reading.phase == "ready")
         .then_some(reading.available_resets)
         .flatten();
@@ -1430,6 +1773,7 @@ pub(crate) fn account_view(
         last_checked: reading.last_checked,
         available_resets,
         duplicate_of: None,
+        renewal: reading.renewal,
         identity: reading.identity,
     }
 }
@@ -1757,7 +2101,11 @@ done
         let worker = ExtraWorker {
             id: id.into(),
             generation,
-            launch: launch.to_path_buf(),
+            transport: Transport::AppServer {
+                launch: launch.to_path_buf(),
+            },
+            usage_base: crate::oauth_usage::CODEX_USAGE_BASE.into(),
+            primary_home: None,
             shared: shared.clone(),
             store: store.clone(),
             executable: Box::new(move || Some(exe.clone())),
@@ -1897,6 +2245,817 @@ done
         result.unwrap();
     }
 
+    /// aip (dqn/aip v0.11.0) Codex homes next to ordinary homes. Synthetic
+    /// fixtures only: each aip home carries a fake `auth.json` sentinel and a
+    /// `fixture-identity` so that a wrongful launch would answer « ready » and
+    /// show up in the fake CLI's log.
+    #[cfg(unix)]
+    #[test]
+    fn aip_homes_are_never_launched_and_each_followed_home_is_read_once_with_its_raw_codex_home() {
+        let root = scratch("aip-routing");
+        let (exe, log) = fake_codex(&root);
+        let home = root.join("home");
+        let work = home.join(".codex-work");
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        fs::write(work.join("fixture-identity"), "work@example.invalid").unwrap();
+        fs::write(work.join("fixture-used"), "40").unwrap();
+        let profiles = home.join(".codex").join(crate::aip::PROFILES_DIR);
+        for (name, payload) in [("perso", true), ("boulot", true), ("vide", false)] {
+            let dir = profiles.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("fixture-identity"),
+                format!("aip-{name}@example.invalid"),
+            )
+            .unwrap();
+            if payload {
+                fs::write(
+                    dir.join(crate::aip::CODEX_PAYLOAD),
+                    "SYNTHETIC-SENTINEL-NOT-A-CREDENTIAL",
+                )
+                .unwrap();
+            }
+        }
+        fs::write(profiles.join(crate::aip::CURRENT_MARKER), "perso\n").unwrap();
+        // Other spellings of aip homes: a symlinked `~/.codex-*` sibling, and
+        // a folder the user had added by hand in 3.2.0 (saved entry, trailing
+        // separator kept) which keeps its 3.2.0 collection.
+        std::os::unix::fs::symlink(profiles.join("boulot"), home.join(".codex-boulot-link"))
+            .unwrap();
+        let manual = format!(
+            "{}{}",
+            profiles.join("perso").display(),
+            std::path::MAIN_SEPARATOR
+        );
+        let mut prefs = crate::claude_accounts::AccountPrefs {
+            mode: "multi".into(),
+            ..Default::default()
+        };
+        prefs.profiles.push(crate::claude_accounts::Profile {
+            id: crate::claude_accounts::identity(&crate::claude_accounts::normalized(
+                std::path::Path::new(&manual),
+            )),
+            path: manual.clone(),
+            name: "Perso".into(),
+            visible: true,
+        });
+        let tree = |dir: &std::path::Path| {
+            let mut out = vec![];
+            let mut stack = vec![dir.to_path_buf()];
+            while let Some(d) = stack.pop() {
+                for e in fs::read_dir(&d).unwrap().flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else {
+                        out.push((p.clone(), fs::read(&p).unwrap()));
+                    }
+                }
+            }
+            out.sort();
+            out
+        };
+        let aip_before = tree(&profiles);
+        let env_before = std::env::var_os("CODEX_HOME");
+        let found = crate::codex_accounts::discover(&home, None, &prefs);
+        let plan = collection_plan(found.clone());
+        assert_eq!(
+            plan.iter().map(|a| a.launch.clone()).collect::<Vec<_>>(),
+            [Some(work.clone())],
+            "only the ordinary home gets a child; every aip spelling is read by credential"
+        );
+        assert_eq!(
+            credential_plan(found.clone())
+                .iter()
+                .map(|a| a.credential.clone().unwrap())
+                .collect::<Vec<_>>(),
+            [home.join(".codex-boulot-link"), PathBuf::from(&manual)],
+            "raw spellings kept for the credential reads"
+        );
+        let store = Arc::new(Mutex::new(AccountStore::default()));
+        // Startup then one refresh: same plan, re-read.
+        let mut workers = vec![];
+        for a in &plan {
+            workers.push(spawn_extra(
+                &store,
+                &a.profile.id,
+                a.launch.as_deref().unwrap(),
+                &exe,
+            ));
+        }
+        let ids: Vec<&str> = plan.iter().map(|a| a.profile.id.as_str()).collect();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for(&store, &ids);
+            for (_, tx, _) in &workers {
+                tx.send(ExtraAction::Refresh).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            wait_for(&store, &ids);
+            let calls = fs::read_to_string(&log).unwrap();
+            let homes: std::collections::BTreeSet<&str> = calls
+                .lines()
+                .map(|l| l.split('|').nth(1).unwrap())
+                .collect();
+            // Inspect launch paths, not the whole JSON log: the application
+            // version itself may contain "profiles" (e.g. test.aiprofiles.1).
+            assert!(
+                homes
+                    .iter()
+                    .all(|home| !Path::new(home).starts_with(&profiles)),
+                "{calls}"
+            );
+            assert_eq!(
+                homes.into_iter().collect::<Vec<_>>(),
+                [work.to_str().unwrap()],
+                "{calls}"
+            );
+            // aip homes (auto-discovered, symlinked spelling, saved by hand): never.
+            assert!(!calls.contains(".codex-boulot-link"), "{calls}");
+            for line in calls.lines() {
+                let method = line.split('|').next().unwrap();
+                assert!(
+                    [
+                        "initialize",
+                        "initialized",
+                        "account/read",
+                        "account/rateLimits/read"
+                    ]
+                    .contains(&method),
+                    "unexpected call {method}"
+                );
+            }
+            assert!(!calls.contains("login") && !calls.contains("logout"));
+            let w = store.lock().unwrap().get(ids[0]).unwrap().0;
+            assert_eq!(w.phase, "ready");
+            assert_eq!(w.rows.as_ref().unwrap()[0].remaining, 60);
+        }));
+        for (shared, _, _) in &workers {
+            shared.stop.store(true, Ordering::Release);
+        }
+        for (_, tx, handle) in workers {
+            drop(tx);
+            handle.join().unwrap();
+        }
+        result.unwrap();
+        // Listed with their aip name (saved name wins); the incomplete one is
+        // explained and never read, the others are credential-read accounts.
+        let views: Vec<CodexAccount> = found
+            .iter()
+            .cloned()
+            .map(|d| account_view(d, true, None, None))
+            .collect();
+        let names: Vec<&str> = views.iter().map(|v| v.profile.name.as_str()).collect();
+        // The symlinked sibling is aip's « boulot » (first spelling keeps its
+        // place and raw path); `_current` is not folded into the primary.
+        assert_eq!(names, ["Principal", "boulot", "work", "Perso", "vide"]);
+        assert_eq!(
+            views[1].profile.path,
+            home.join(".codex-boulot-link").to_str().unwrap()
+        );
+        let vide = views.iter().find(|v| v.profile.name == "vide").unwrap();
+        assert_eq!(vide.phase, "blocked");
+        assert!(!vide.tracked && vide.rows.is_empty() && vide.plan_type.is_none());
+        assert!(vide.message.contains("aip"), "{}", vide.message);
+        assert!(redeem_route(&views, &vide.profile.id).is_err());
+        let boulot = views.iter().find(|v| v.profile.name == "boulot").unwrap();
+        assert!(
+            boulot.tracked && boulot.phase == "starting",
+            "{}",
+            boulot.phase
+        );
+        let perso = views.iter().find(|v| v.profile.name == "Perso").unwrap();
+        assert_eq!(perso.profile.path, manual, "raw saved path kept");
+        assert!(
+            perso.tracked && perso.phase != "blocked",
+            "saved entry kept, read by credential"
+        );
+        assert!(
+            found
+                .iter()
+                .find(|d| d.profile.name == "Perso")
+                .unwrap()
+                .profile
+                .visible,
+            "saved visibility kept in the preferences"
+        );
+        assert!(
+            views
+                .iter()
+                .all(|v| v.profile.visible == (v.phase != "blocked")),
+            "a blocked home never gets a quota card"
+        );
+        // Nothing changed: environment, aip files, aip's selected profile.
+        assert_eq!(std::env::var_os("CODEX_HOME"), env_before);
+        assert_eq!(tree(&profiles), aip_before);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Fake official Codex for option A: `codex app-server` answering
+    /// `initialize` + `getAuthStatus` like 0.164. `ok` renews the home it was
+    /// launched on (`CODEX_HOME`) by installing `fixture-renewed`, as the CLI's
+    /// own refresh does; `revoked` = refresh refused (no token); `fail` = crash.
+    #[cfg(unix)]
+    fn official_codex(root: &std::path::Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = root.join("official.log");
+        let exe = root.join("official-codex");
+        let script = r#"#!/bin/sh
+mode=$(cat "$CODEX_HOME/fixture-mode" 2>/dev/null || echo ok)
+[ "$mode" = fail ] && { printf 'fail|%s|%s\n' "$CODEX_HOME" "$*" >> '@LOG@'; exit 3; }
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  [ -z "$id" ] && continue
+  case "$method" in
+    initialize) printf '{"id":%s,"result":{}}\n' "$id" ;;
+    getAuthStatus)
+      printf '%s|%s|%s|%s\n' "$mode" "$CODEX_HOME" "$*" "$line" >> '@LOG@'
+      if [ "$mode" = revoked ]; then
+        printf '{"id":%s,"result":{"authMethod":"chatgpt","authToken":null,"requiresOpenaiAuth":true}}\n' "$id"
+      else
+        cp "$CODEX_HOME/fixture-renewed" "$CODEX_HOME/auth.json"
+        printf '{"id":%s,"result":{"authMethod":"chatgpt","authToken":"SYNTHETIC-RETURNED","requiresOpenaiAuth":true}}\n' "$id"
+      fi ;;
+    *) printf '{"id":%s,"error":{"code":-1,"message":"unexpected"}}\n' "$id" ;;
+  esac
+done
+"#
+        .replace("@LOG@", log.to_str().unwrap());
+        fs::write(&exe, script).unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
+        (exe, log)
+    }
+
+    /// Option A through `poll_extra`: a dormant ai-profiles Codex home is
+    /// renewed by the official `codex app-server` (`getAuthStatus`, its own
+    /// `CODEX_HOME`) at each expiry over several cycles; a refused renewal
+    /// reads « À reconnecter » without looping; a reconnection through
+    /// ai-profiles resumes; a crashing tool backs off. Quota Monitor sends only
+    /// usage GETs (never the OAuth token endpoint) and never writes `auth.json`.
+    #[cfg(unix)]
+    #[test]
+    fn ai_profiles_codex_dormant_home_is_renewed_only_by_official_codex_over_cycles() {
+        use crate::oauth_usage::test_support::{jwt, Reply, Server};
+        let root = scratch("managed-http");
+        let home = root.join("home");
+        let cli = home.join("Library/Application Support/ai-profiles/profiles/code/cli-config");
+        fs::create_dir_all(&cli).unwrap();
+        let meta = r#"{"profiles":[{"id":"code","app":"codex","name":"Code","surfaces":{"cli":true,"gui":true}}]}"#;
+        let metadata = home.join("Library/Application Support/ai-profiles/profiles.json");
+        fs::write(&metadata, meta).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let auth = |exp: i64, tag: &str| {
+            json!({"tokens":{"access_token":jwt(&json!({"exp":exp,"tag":tag})),"refresh_token":"SYNTHETIC-SHARED","account_id":"acct-managed","id_token":jwt(&json!({"email":"test@example.invalid","https://api.openai.com/auth":{"chatgpt_account_id":"acct-managed"}}))}}).to_string()
+        };
+        let path = cli.join("auth.json");
+        fs::write(&path, auth(now + 3600, "A")).unwrap();
+        let prefs = crate::claude_accounts::AccountPrefs {
+            mode: "multi".into(),
+            ..Default::default()
+        };
+        let found = crate::codex_accounts::discover(&home, None, &prefs);
+        assert!(collection_plan(found.clone()).is_empty());
+        let plan = credential_plan(found);
+        assert_eq!(plan.len(), 1);
+        assert!(plan[0].managed);
+        let usage = |used: u32| {
+            Reply::json(
+                200,
+                &format!(
+                    r#"{{"plan_type":"plus","rate_limit":{{"primary_window":{{"used_percent":{used},"limit_window_seconds":18000,"reset_at":4102444800}}}}}}"#
+                ),
+            )
+        };
+        let server = Server::start([11, 22, 23, 33, 34, 55].map(usage).into());
+        let (exe, log) = official_codex(&root);
+        let store = Arc::new(Mutex::new(AccountStore::default()));
+        let worker = ExtraWorker {
+            id: plan[0].profile.id.clone(),
+            generation: 0,
+            transport: Transport::of(&plan[0]).unwrap(),
+            usage_base: server.base.clone(),
+            primary_home: None,
+            shared: Arc::new(Shared::default()),
+            store,
+            executable: Box::new(move || Some(exe.clone())),
+            interval: Box::new(|_| 30),
+            changed: Box::new(|| {}),
+            first_poll: Instant::now(),
+        };
+        let mut failures = 0;
+        let mut poll = || poll_extra(&worker, &mut None, &mut failures).0;
+        let launches = || {
+            fs::read_to_string(&log)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+        let bearer = |n: usize| Server::header(&server.requests()[n], "authorization").unwrap();
+
+        // Far from expiry: read only, Codex is not launched.
+        let first = poll();
+        assert_eq!(first.phase, "ready");
+        assert_eq!(first.rows.as_ref().unwrap()[0].used_percent, Some(11.0));
+        assert_eq!(first.renewal.as_ref().unwrap().state, "active");
+        assert_eq!(launches(), 0);
+
+        // Dormant expiry over several cycles: renewed each time by Codex.
+        for (cycle, (left, tag)) in [(60, "B"), (-1, "C")].into_iter().enumerate() {
+            fs::write(&path, auth(now + left, "OLD")).unwrap();
+            let renewed = auth(now + 7200, tag);
+            fs::write(cli.join("fixture-renewed"), &renewed).unwrap();
+            let reading = poll();
+            assert_eq!(reading.phase, "ready");
+            let renewal = reading.renewal.unwrap();
+            assert_eq!((renewal.state, renewal.tool), ("renewed", "codex"));
+            assert_eq!(launches(), cycle + 1);
+            let token = serde_json::from_str::<Value>(&renewed).unwrap()["tokens"]["access_token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(bearer(1 + 2 * cycle), format!("Bearer {token}"));
+            assert_eq!(poll().renewal.unwrap().state, "renewed");
+            assert_eq!(launches(), cycle + 1, "nothing to renew on the next cycle");
+        }
+        let lines = fs::read_to_string(&log).unwrap();
+        assert!(
+            lines.contains(&format!("ok|{}|app-server|", cli.display())),
+            "{lines}"
+        );
+        assert!(lines.contains(r#""includeToken":true"#));
+        assert!(!lines.contains("login"));
+
+        // Refused renewal: « À reconnecter », no quota, no loop.
+        fs::write(&path, auth(now - 1, "DEAD")).unwrap();
+        fs::write(cli.join("fixture-mode"), "revoked").unwrap();
+        let dead = fs::read_to_string(&path).unwrap();
+        let revoked = poll();
+        assert_eq!(revoked.phase, "expired");
+        assert!(revoked.rows.is_none());
+        assert!(revoked.message.contains("ai-profiles"));
+        assert_eq!(revoked.renewal.unwrap().state, "reconnect");
+        for _ in 0..3 {
+            assert_eq!(poll().renewal.unwrap().state, "reconnect");
+        }
+        assert_eq!(launches(), 3, "a revoked home is never retried in a loop");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            dead,
+            "Quota Monitor wrote no credential"
+        );
+
+        // Reconnected through ai-profiles: monitoring resumes by itself.
+        fs::write(&path, auth(now + 7200, "RECONNECTED")).unwrap();
+        let back = poll();
+        assert_eq!(back.phase, "ready");
+        assert_eq!(back.rows.as_ref().unwrap()[0].used_percent, Some(55.0));
+        assert_eq!(back.renewal.unwrap().state, "active");
+
+        // A crashing tool: retried later (backoff), never immediately.
+        fs::write(&path, auth(now - 1, "STALE")).unwrap();
+        fs::write(cli.join("fixture-mode"), "fail").unwrap();
+        assert_eq!(poll().renewal.unwrap().state, "retrying");
+        assert_eq!(poll().renewal.unwrap().state, "retrying");
+        assert_eq!(launches(), 4);
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 6);
+        assert!(requests.iter().all(|r| r.starts_with("GET /wham/usage ")));
+        assert!(!cli.join("auth.json.lock").exists());
+        assert_eq!(fs::read_to_string(&metadata).unwrap(), meta);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn spawn_credential(
+        store: &Arc<Mutex<AccountStore>>,
+        id: &str,
+        home: &std::path::Path,
+        base: &str,
+        exe: &std::path::Path,
+    ) -> (
+        Arc<Shared>,
+        Sender<ExtraAction>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let generation = store.lock().unwrap().register(id);
+        let shared = Arc::new(Shared::default());
+        let (tx, rx) = mpsc::channel();
+        let exe = exe.to_path_buf();
+        let worker = ExtraWorker {
+            id: id.into(),
+            generation,
+            transport: Transport::Credential {
+                home: home.to_path_buf(),
+            },
+            usage_base: base.into(),
+            primary_home: None,
+            shared: shared.clone(),
+            store: store.clone(),
+            executable: Box::new(move || Some(exe.clone())),
+            interval: Box::new(|_| 3600),
+            changed: Box::new(|| {}),
+            first_poll: Instant::now(),
+        };
+        (
+            shared,
+            tx,
+            std::thread::spawn(move || run_extra(worker, rx)),
+        )
+    }
+
+    /// End to end on the new path: two aip Codex homes with synthetic
+    /// ChatGPT tokens are read by their own worker over a loopback usage API,
+    /// each with its own bearer and account header, into the same store the
+    /// UI reads from; the fake CLI is never launched; a copy of the primary's
+    /// account is flagged as the same account; session errors are specific;
+    /// a reset is refused on this read-only transport.
+    #[cfg(unix)]
+    #[test]
+    fn aip_homes_are_read_over_the_usage_api_with_their_own_tokens_without_any_child() {
+        use crate::oauth_usage::test_support::{jwt, Reply, Server};
+        let root = scratch("aip-http");
+        let (exe, log) = fake_codex(&root);
+        let home = root.join("home");
+        let profiles = home.join(".codex").join(crate::aip::PROFILES_DIR);
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let auth = |name: &str, email: &str, account: &str, exp: i64| {
+            let dir = profiles.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            let claims = json!({"email": email, "https://api.openai.com/auth": {"chatgpt_account_id": account, "chatgpt_plan_type": "plus"}});
+            let access = jwt(
+                &json!({"exp": exp, "https://api.openai.com/auth": {"chatgpt_account_id": account}}),
+            );
+            fs::write(
+                dir.join(crate::aip::CODEX_PAYLOAD),
+                json!({"OPENAI_API_KEY": null, "tokens": {"id_token": jwt(&claims), "access_token": access,
+                    "refresh_token": format!("SYNTHETIC-REFRESH-{name}"), "account_id": account},
+                    "last_refresh": "2026-01-01T00:00:00Z"})
+                .to_string(),
+            )
+            .unwrap();
+            dir
+        };
+        let perso = auth("perso", "perso@example.invalid", "acct-perso", now + 600);
+        let copy = auth("copy", "same@example.invalid", "acct-same", now + 600);
+        let stale = auth("stale", "old@example.invalid", "acct-old", now - 5);
+        fs::write(profiles.join(crate::aip::CURRENT_MARKER), "perso\n").unwrap();
+        let tree_before: Vec<_> = ["perso", "copy", "stale"]
+            .iter()
+            .map(|n| fs::read(profiles.join(n).join(crate::aip::CODEX_PAYLOAD)).unwrap())
+            .collect();
+        let prefs = crate::claude_accounts::AccountPrefs {
+            mode: "multi".into(),
+            ..Default::default()
+        };
+        let found = crate::codex_accounts::discover(&home, None, &prefs);
+        assert!(
+            collection_plan(found.clone()).is_empty(),
+            "no child for aip homes"
+        );
+        let plan = credential_plan(found.clone());
+        assert_eq!(
+            plan.iter()
+                .map(|a| a.credential.clone().unwrap())
+                .collect::<Vec<_>>(),
+            [copy.clone(), perso.clone(), stale.clone()]
+        );
+        let body = |used: u32| {
+            format!(
+                r#"{{"plan_type":"pro","rate_limit":{{"allowed":true,"limit_reached":false,
+                  "primary_window":{{"used_percent":{used},"limit_window_seconds":18000,"reset_after_seconds":60,"reset_at":{}}},
+                  "secondary_window":{{"used_percent":9,"limit_window_seconds":604800,"reset_after_seconds":60,"reset_at":{}}}}},
+                  "rate_limit_reset_credits":{{"available_count":1,"credits":[]}}}}"#,
+                now + 3600,
+                now + 86400
+            )
+        };
+        // Two answers in start order (copy, perso); stale never asks.
+        let server = Server::start(vec![
+            Reply::json(200, &body(40)),
+            Reply::json(200, &body(70)),
+        ]);
+        let store = Arc::new(Mutex::new(AccountStore::default()));
+        let mut workers = vec![];
+        for a in &plan {
+            workers.push(spawn_credential(
+                &store,
+                &a.profile.id,
+                a.credential.as_deref().unwrap(),
+                &server.base,
+                &exe,
+            ));
+            std::thread::sleep(Duration::from_millis(150)); // deterministic request order
+        }
+        let ids: Vec<&str> = plan.iter().map(|a| a.profile.id.as_str()).collect();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for(&store, &ids);
+            let requests = server.requests();
+            assert_eq!(requests.len(), 2, "{requests:?}");
+            let auths: Vec<_> = requests
+                .iter()
+                .map(|r| {
+                    (
+                        Server::header(r, "chatgpt-account-id").unwrap(),
+                        Server::header(r, "authorization")
+                            .unwrap()
+                            .starts_with("Bearer eyJ"),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                auths,
+                [
+                    ("acct-same".to_string(), true),
+                    ("acct-perso".to_string(), true)
+                ]
+            );
+            assert!(requests.iter().all(|r| r.starts_with("GET /wham/usage ")));
+            let reading = |id: &str| store.lock().unwrap().get(id).unwrap().0;
+            let c = reading(ids[0]);
+            assert_eq!(
+                (c.phase.as_str(), c.plan_type.as_deref()),
+                ("ready", Some("pro"))
+            );
+            let rows = c.rows.clone().unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_eq!((rows[0].remaining, rows[0].window_minutes), (60, Some(300)));
+            assert_eq!(
+                (rows[1].remaining, rows[1].window_minutes),
+                (91, Some(10080))
+            );
+            assert_eq!(c.available_resets, Some(1));
+            assert!(c.identity.is_some());
+            let p = reading(ids[1]);
+            assert_eq!(p.rows.as_ref().unwrap()[0].remaining, 30);
+            assert_ne!(
+                p.identity, c.identity,
+                "distinct accounts, distinct identities"
+            );
+            let s = reading(ids[2]);
+            assert_eq!(s.phase, "expired", "{}", s.message);
+            assert!(
+                s.rows.is_none() && s.plan_type.is_none(),
+                "no invented quota"
+            );
+            assert!(s.message.contains("aip codex"), "{}", s.message);
+            assert!(!s.message.contains("eyJ") && !s.message.contains("SYNTHETIC"));
+            // A reset is refused on the read-only transport, nothing sent.
+            let (reply_tx, reply_rx) = mpsc::channel();
+            workers[0]
+                .1
+                .send(ExtraAction::Redeem("key".into(), reply_tx))
+                .unwrap();
+            let refused = reply_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(refused.is_err(), "{refused:?}");
+            assert_eq!(server.requests().len(), 2);
+            // The copy of the primary's account is flagged, never added up.
+            let primary_identity =
+                account_fingerprint(&json!({"account": {"email": "Same@Example.invalid"}}));
+            let mut views: Vec<CodexAccount> = found
+                .iter()
+                .cloned()
+                .map(|d| {
+                    let slot = store.lock().unwrap().get(&d.profile.id);
+                    account_view(
+                        d,
+                        true,
+                        Some(&PrimaryView {
+                            status: Status {
+                                phase: "ready".into(),
+                                ..Status::default()
+                            },
+                            rows: vec![],
+                            identity: primary_identity,
+                        }),
+                        slot,
+                    )
+                })
+                .collect();
+            mark_duplicates(&mut views);
+            let copy_view = views.iter().find(|v| v.profile.name == "copy").unwrap();
+            assert_eq!(copy_view.duplicate_of.as_deref(), Some("Principal"));
+            assert_eq!(crate::account_menu::codex_state(copy_view).0, "Même compte");
+            let perso_view = views.iter().find(|v| v.profile.name == "perso").unwrap();
+            assert!(perso_view.duplicate_of.is_none() && perso_view.phase == "ready");
+            assert_eq!(perso_view.rows.len(), 2, "pair of windows displayed");
+            let stale_view = views.iter().find(|v| v.profile.name == "stale").unwrap();
+            assert_eq!(
+                crate::account_menu::codex_state(stale_view).0,
+                "Session expirée"
+            );
+            assert!(stale_view.rows.is_empty() && stale_view.available_resets.is_none());
+            assert!(redeem_route(&views, &stale_view.profile.id).is_err());
+        }));
+        for (shared, _, _) in &workers {
+            shared.stop.store(true, Ordering::Release);
+        }
+        for (_, tx, handle) in workers {
+            drop(tx);
+            handle.join().unwrap();
+        }
+        result.unwrap();
+        // Nothing launched, nothing written, selection untouched.
+        assert!(!log.exists() || fs::read_to_string(&log).unwrap().is_empty());
+        let tree_after: Vec<_> = ["perso", "copy", "stale"]
+            .iter()
+            .map(|n| fs::read(profiles.join(n).join(crate::aip::CODEX_PAYLOAD)).unwrap())
+            .collect();
+        assert_eq!(tree_after, tree_before);
+        assert_eq!(
+            fs::read_to_string(profiles.join(crate::aip::CURRENT_MARKER)).unwrap(),
+            "perso\n"
+        );
+        // Error classification of later reads, on one worker: 401 → expired,
+        // 429 → error with the provider's pause, 5xx → error with backoff.
+        let server = Server::start(vec![
+            Reply::json(401, "{}"),
+            Reply::json(429, "{}").with_header("retry-after", "120"),
+            Reply::json(503, "oops"),
+            Reply::json(200, "not json"),
+        ]);
+        let worker = ExtraWorker {
+            id: "x".into(),
+            generation: 0,
+            transport: Transport::Credential {
+                home: perso.clone(),
+            },
+            usage_base: server.base.clone(),
+            primary_home: None,
+            shared: Arc::new(Shared::default()),
+            store: Arc::new(Mutex::new(AccountStore::default())),
+            executable: Box::new(|| None),
+            interval: Box::new(|_| 60),
+            changed: Box::new(|| {}),
+            first_poll: Instant::now(),
+        };
+        let mut failures = 0;
+        let (r, _) = poll_credential(&worker, &perso, &mut failures);
+        assert_eq!(r.phase, "expired");
+        let (r, delay) = poll_credential(&worker, &perso, &mut failures);
+        assert_eq!(
+            (r.phase.as_str(), delay),
+            ("error", Duration::from_secs(120))
+        );
+        let (r, delay) = poll_credential(&worker, &perso, &mut failures);
+        assert!(
+            r.phase == "error" && r.message.contains("503") && delay >= Duration::from_secs(120)
+        );
+        let (r, _) = poll_credential(&worker, &perso, &mut failures);
+        assert!(
+            r.phase == "error" && r.message.contains("illisible"),
+            "{}",
+            r.message
+        );
+        assert!(r.rows.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Autonomous upkeep of aip Codex homes through the worker's own poll:
+    /// a home with its own grant (`aip codex login` done: the marker lists
+    /// only the old import) about to expire is renewed with the CLI's
+    /// protocol, written back and read; a home whose grant is still the
+    /// imported one (marker lists it) is read while valid and reported as
+    /// shared once dead, never rotated; `_current` and markers untouched.
+    #[cfg(unix)]
+    #[test]
+    fn aip_codex_homes_with_their_own_grant_are_renewed_imported_ones_never() {
+        use crate::oauth_usage::test_support::{jwt, Reply, Server};
+        let root = scratch("aip-renew");
+        let profiles = root.join(".codex").join(crate::aip::PROFILES_DIR);
+        let now = chrono::Utc::now().timestamp();
+        let auth = |name: &str, exp: i64, refresh: &str, marker: &str| {
+            let dir = profiles.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            let access = jwt(
+                &json!({"exp": exp, "https://api.openai.com/auth": {"chatgpt_account_id": "acct-1"}}),
+            );
+            fs::write(
+                dir.join(crate::aip::CODEX_PAYLOAD),
+                json!({"OPENAI_API_KEY": null, "tokens": {"id_token": jwt(&json!({"email": "a@example.invalid"})),
+                    "access_token": access, "refresh_token": refresh, "account_id": "acct-1"},
+                    "last_refresh": "2026-01-01T00:00:00Z"})
+                .to_string(),
+            )
+            .unwrap();
+            fs::write(dir.join(crate::oauth_refresh::CODEX_IMPORT_MARKER), marker).unwrap();
+            dir
+        };
+        let own = auth(
+            "own",
+            now + 400,
+            "SYNTHETIC-CODEX-REFRESH-own",
+            &format!(
+                "{}\n",
+                crate::oauth_refresh::fingerprint("SYNTHETIC-CODEX-REFRESH-import")
+            ),
+        );
+        let imported = auth(
+            "imported",
+            now + 400,
+            "SYNTHETIC-CODEX-REFRESH-shared",
+            &format!(
+                "{}\n",
+                crate::oauth_refresh::fingerprint("SYNTHETIC-CODEX-REFRESH-shared")
+            ),
+        );
+        fs::write(profiles.join(crate::aip::CURRENT_MARKER), "own\n").unwrap();
+        let imported_before = fs::read(imported.join(crate::aip::CODEX_PAYLOAD)).unwrap();
+        let usage = r#"{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":25,"limit_window_seconds":18000,"reset_at":1900000000},"secondary_window":null}}"#;
+        let new_access = jwt(
+            &json!({"exp": now + 7200, "https://api.openai.com/auth": {"chatgpt_account_id": "acct-1"}}),
+        );
+        let server = Server::start(vec![
+            Reply::json(200, &json!({"access_token": new_access, "refresh_token": "SYNTHETIC-CODEX-REFRESH-own2"}).to_string()),
+            Reply::json(200, usage),
+            Reply::json(200, usage),
+            Reply::json(200, usage),
+        ]);
+        let worker = |home: &PathBuf| ExtraWorker {
+            id: "x".into(),
+            generation: 0,
+            transport: Transport::Credential { home: home.clone() },
+            usage_base: server.base.clone(),
+            primary_home: Some(root.join(".codex")),
+            shared: Arc::new(Shared::default()),
+            store: Arc::new(Mutex::new(AccountStore::default())),
+            executable: Box::new(|| None),
+            interval: Box::new(|_| 60),
+            changed: Box::new(|| {}),
+            first_poll: Instant::now(),
+        };
+        let mut failures = 0;
+        let (r, _) = poll_credential(&worker(&own), &own, &mut failures);
+        assert_eq!(
+            (r.phase.as_str(), r.plan_type.as_deref()),
+            ("ready", Some("plus")),
+            "{}",
+            r.message
+        );
+        assert_eq!(r.rows.as_ref().unwrap()[0].remaining, 75);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(
+            requests[0].starts_with("POST /oauth/token ")
+                && requests[0].contains("SYNTHETIC-CODEX-REFRESH-own")
+        );
+        assert_eq!(
+            Server::header(&requests[1], "authorization").as_deref(),
+            Some(&*format!("Bearer {new_access}"))
+        );
+        let saved: Value =
+            serde_json::from_slice(&fs::read(own.join(crate::aip::CODEX_PAYLOAD)).unwrap())
+                .unwrap();
+        assert_eq!(
+            saved["tokens"]["refresh_token"],
+            "SYNTHETIC-CODEX-REFRESH-own2"
+        );
+        assert_eq!(saved["tokens"]["account_id"], "acct-1");
+        // Next poll: fresh, read only.
+        let (r, _) = poll_credential(&worker(&own), &own, &mut failures);
+        assert_eq!(r.phase, "ready");
+        assert_eq!(server.requests().len(), 3);
+        // Imported grant: read while valid, never rotated, explicit once dead.
+        let (r, _) = poll_credential(&worker(&imported), &imported, &mut failures);
+        assert_eq!(r.phase, "ready", "{}", r.message);
+        assert_eq!(server.requests().len(), 4);
+        let dead = auth(
+            "imported",
+            now - 5,
+            "SYNTHETIC-CODEX-REFRESH-shared",
+            &format!(
+                "{}\n",
+                crate::oauth_refresh::fingerprint("SYNTHETIC-CODEX-REFRESH-shared")
+            ),
+        );
+        let dead_before = fs::read(dead.join(crate::aip::CODEX_PAYLOAD)).unwrap();
+        let (r, delay) = poll_credential(&worker(&dead), &dead, &mut failures);
+        assert_eq!(r.phase, "expired");
+        assert!(
+            r.message.contains("aip codex login") && r.message.contains("importée"),
+            "{}",
+            r.message
+        );
+        assert!(r.rows.is_none() && delay >= Duration::from_secs(300));
+        assert_eq!(
+            server.requests().len(),
+            4,
+            "nothing sent for a shared grant"
+        );
+        assert_eq!(
+            fs::read(dead.join(crate::aip::CODEX_PAYLOAD)).unwrap(),
+            dead_before
+        );
+        assert_ne!(imported_before, dead_before);
+        assert_eq!(
+            fs::read_to_string(profiles.join(crate::aip::CURRENT_MARKER)).unwrap(),
+            "own\n"
+        );
+        assert!(!r.message.contains("SYNTHETIC") && !r.message.contains("eyJ"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn primary_session_inherits_the_app_environment_without_codex_home() {
@@ -1983,6 +3142,9 @@ done
             launch: (!primary).then(|| PathBuf::from(format!("/fixture/{name}"))),
             available,
             visible,
+            blocker: None,
+            credential: None,
+            managed: false,
         }
     }
     fn ready(identity: u64, used: f64) -> Reading {

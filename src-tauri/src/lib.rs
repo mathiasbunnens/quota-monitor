@@ -1,6 +1,9 @@
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 mod account_menu;
+pub mod account_sources;
 mod activity;
+mod ai_profiles;
+pub mod aip;
 mod claude;
 mod claude_accounts;
 mod claude_cli;
@@ -13,6 +16,9 @@ mod menu_fixture;
 #[cfg(target_os = "macos")]
 pub use menu_fixture::menu_tracking_fixture;
 mod ntfy;
+pub mod oauth_refresh;
+pub mod oauth_usage;
+mod official_refresh;
 mod prefs;
 mod settings_focus;
 #[cfg(target_os = "macos")]
@@ -870,7 +876,7 @@ const PANEL_ROW_HEIGHT: f64 = 48.0;
 #[cfg(target_os = "macos")]
 const PANEL_INNER_WIDTH: f64 = 276.0;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tone {
     Neutral,
@@ -1117,6 +1123,8 @@ fn codex_panel(
             non_empty(message, "Lecture de Codex impossible."),
             Tone::Error,
         )),
+        // aip home listed but never read (codex_accounts::blocked_message).
+        "blocked" => Some((non_empty(message, "Profil non collectable."), Tone::Neutral)),
         _ => Some((non_empty(message, "Connexion à Codex…"), Tone::Warning)),
     };
     PanelProvider {
@@ -2925,6 +2933,9 @@ pub fn quota_ui_smoke(directory: &str) {
             launch: (!primary).then(|| format!("/fixture/.codex-{name}").into()),
             available: true,
             visible: true,
+            blocker: None,
+            credential: None,
+            managed: false,
         };
         let reading = codex::Reading {
             phase: phase.into(),
@@ -2935,6 +2946,7 @@ pub fn quota_ui_smoke(directory: &str) {
             identity,
             last_checked: None,
             available_resets: None,
+            renewal: None,
         };
         let view = codex::PrimaryView {
             status: codex::Status {
@@ -4233,6 +4245,9 @@ mod tests {
             launch: (!primary).then(|| format!("/fixture/{name}").into()),
             available: true,
             visible,
+            blocker: None,
+            credential: None,
+            managed: false,
         };
         let status = codex::Status {
             phase: "ready".into(),

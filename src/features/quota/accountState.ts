@@ -1,15 +1,37 @@
-import type { ClaudeAccount, ClaudeSnapshot, CodexAccount, CodexStatus } from "./types";
+import type { ClaudeAccount, ClaudeSnapshot, CodexAccount, CodexStatus, Renewal } from "./types";
 
 export type Tone = "good" | "warning" | "error" | "neutral";
 /** [label shown, tone, actionable detail] — one source for Settings rows and Dashboard cards. */
 export type AccountState = [string, Tone, string];
 
+export const RECONNECT_HINT = "Connexion refusée au renouvellement : reconnectez ce profil dans ai-profiles.";
+
+/** ai-profiles: renewal by the official CLI on top of the connection state.
+ *  Connected → « Actif » or « Renouvelé via claude|codex »; refused renewal →
+ *  « À reconnecter » (never a quota). Other states (error, reading…) win. */
+function withRenewal(state: AccountState, renewal: Renewal | null | undefined, message: string): AccountState {
+  if (!renewal) return state;
+  if (renewal.state === "reconnect") return ["À reconnecter", "warning", message || RECONNECT_HINT];
+  if (state[0] !== "Connecté") return state;
+  if (renewal.state === "renewed") return ["Renouvelé via " + renewal.tool, "good", state[2]];
+  if (renewal.state === "retrying") return ["Actif", "warning", "Renouvellement par " + renewal.tool + " en échec, nouvel essai programmé."];
+  return ["Actif", state[1], state[2]];
+}
+
 /** Connection state of a Claude profile from its snapshot. */
 export function claudeSnapshotState(s: ClaudeSnapshot, available = true, refreshing = false): AccountState {
+  const state = baseClaudeState(s, available, refreshing);
+  return !available || refreshing || s.state === "disabled" ? state : withRenewal(state, s.renewal, s.message);
+}
+
+function baseClaudeState(s: ClaudeSnapshot, available: boolean, refreshing: boolean): AccountState {
   if (!available) return ["Indisponible", "neutral", "Dossier introuvable : vérifiez qu’il existe encore (disque, renommage)."];
   if (refreshing) return ["Actualisation…", "warning", ""];
   if (s.state === "disabled") return ["Désactivé", "neutral", ""];
   if (s.errorKind === "not_signed_in") return ["Non connecté", "warning", s.message || "Profil non connecté dans Claude Code."];
+  // aip snapshot whose saved token no longer works: actionable, never a quota.
+  if (s.errorKind === "session_expired") return ["Session expirée", "warning", s.message || "Session du profil aip expirée : réactivez-le dans aip pour la renouveler."];
+  if (s.errorKind === "profile_blocked") return ["Non collectable", "neutral", s.message || "Profil aip incomplet, rien à lire."];
   switch (s.state) {
     case "ready": return ["Connecté", "good", ""];
     case "stale": return ["Connecté", "warning", "Dernières valeurs conservées, nouvelle lecture en attente."];
@@ -24,13 +46,15 @@ export function accountState(account: ClaudeAccount): AccountState {
 }
 
 /** State of the primary Codex collector (no account list: older backend). */
-export function codexPhaseState(phase: CodexStatus["phase"] | "unavailable" | undefined, message = ""): AccountState {
+export function codexPhaseState(phase: CodexStatus["phase"] | "unavailable" | "blocked" | "expired" | undefined, message = ""): AccountState {
   switch (phase) {
     case "ready": return ["Connecté", "good", ""];
     case "signed_out": return ["Non connecté", "warning", message || "Dossier non connecté à Codex."];
     case "disabled": return ["Désactivé", "neutral", ""];
     case "missing": return ["Non installé", "neutral", message];
     case "error": return ["Erreur", "error", message || "Lecture impossible : vérifiez Codex CLI."];
+    case "expired": return ["Session expirée", "warning", message || "Session du profil aip expirée : relancez-le avec aip codex pour la renouveler."];
+    case "blocked": return ["Non collectable", "neutral", message || "Profil aip incomplet, rien à lire."];
     default: return ["Connexion…", "warning", ""];
   }
 }
@@ -40,5 +64,5 @@ export function codexAccountState(account: CodexAccount): AccountState {
   if (!account.available) return ["Indisponible", "neutral", "Dossier CODEX_HOME introuvable : vérifiez qu’il existe encore (disque, renommage)."];
   if (account.refreshing) return ["Actualisation…", "warning", ""];
   if (account.duplicateOf && account.phase === "ready") return ["Même compte", "warning", "Même compte que « " + account.duplicateOf + " » : quotas non additionnés."];
-  return codexPhaseState(account.phase, account.message);
+  return withRenewal(codexPhaseState(account.phase, account.message), account.renewal, account.message);
 }

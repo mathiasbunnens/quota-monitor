@@ -602,3 +602,47 @@ test('compact Fable has no visible caption and keeps accessible details; Classiq
     assert.doesNotMatch(classic, /window--fable|fable-caption/);
   }
 });
+
+// ---- aip : profil incomplet (non collectable) et instantané expiré ----
+test('a blocked aip snapshot reads « Non collectable » with its reason, not as an error', () => {
+  const { claudeSnapshotState } = require('./accountState.ts');
+  const message = 'Profil aip incomplet (aucune sauvegarde credentials.json) : rien à lire.';
+  const blocked = { ...snapshot, state: 'error', errorKind: 'profile_blocked', planType: null, metrics: [], message };
+  assert.deepEqual(claudeSnapshotState(blocked), ['Non collectable', 'neutral', message]);
+  assert.equal(claudeSnapshotState({ ...blocked, message: '' })[0], 'Non collectable');
+  // An unavailable folder still wins; other errors are unchanged.
+  assert.equal(claudeSnapshotState(blocked, false)[0], 'Indisponible');
+  assert.equal(claudeSnapshotState({ ...blocked, errorKind: 'timeout' })[1], 'error');
+});
+
+test('an aip snapshot whose token expired reads « Session expirée » with its own hint, never a quota', () => {
+  const { claudeSnapshotState } = require('./accountState.ts');
+  const message = 'Session du profil aip « boulot » expirée ou révoquée. Pour la renouveler : « aip switch boulot », lancez Claude Code, puis revenez à votre profil habituel.';
+  const expired = { ...snapshot, state: 'error', errorKind: 'session_expired', planType: null, metrics: [], message };
+  assert.deepEqual(claudeSnapshotState(expired), ['Session expirée', 'warning', message]);
+  assert.equal(claudeSnapshotState({ ...expired, message: '' })[0], 'Session expirée');
+  assert.equal(claudeSnapshotState(expired, false)[0], 'Indisponible');
+  // Other usage-API failures stay ordinary errors with their message.
+  for (const errorKind of ['rate_limited', 'transport', 'http_error', 'malformed', 'forbidden', 'credential_unreadable']) {
+    assert.deepEqual(claudeSnapshotState({ ...expired, errorKind, message: 'x' }), ['Erreur', 'error', 'x'], errorKind);
+  }
+});
+
+// ---- ai-profiles : renouvellement par l'outil officiel (option A) ----
+test('ai-profiles renewal states read Actif / Renouvelé via <cli> / À reconnecter, never a quota', () => {
+  const { claudeSnapshotState, codexAccountState, RECONNECT_HINT } = require('./accountState.ts');
+  const renewal = (state, tool = 'claude') => ({ state, tool, renewedAt: state === 'renewed' ? 1 : null });
+  assert.deepEqual(claudeSnapshotState({ ...snapshot, renewal: renewal('active') }).slice(0, 2), ['Actif', 'good']);
+  assert.deepEqual(claudeSnapshotState({ ...snapshot, renewal: renewal('renewed') }).slice(0, 2), ['Renouvelé via claude', 'good']);
+  assert.deepEqual(claudeSnapshotState({ ...snapshot, renewal: renewal('retrying') }).slice(0, 2), ['Actif', 'warning']);
+  const revoked = { ...snapshot, state: 'error', errorKind: 'session_expired', metrics: [], message: '', renewal: renewal('reconnect') };
+  assert.deepEqual(claudeSnapshotState(revoked), ['À reconnecter', 'warning', RECONNECT_HINT]);
+  // Without renewal (aip, primary) nothing changes; unavailable folder still wins.
+  assert.equal(claudeSnapshotState(snapshot)[0], 'Connecté');
+  assert.equal(claudeSnapshotState(revoked, false)[0], 'Indisponible');
+  // A transient error is not hidden behind « Actif ».
+  assert.equal(claudeSnapshotState({ ...snapshot, state: 'error', errorKind: 'transport', message: 'x', renewal: renewal('active') })[0], 'Erreur');
+  const codex = { id: 'c', name: 'c', path: '/fixtures/c', primary: false, visible: true, available: true, refreshing: false, phase: 'ready', message: '', duplicateOf: null };
+  assert.equal(codexAccountState({ ...codex, renewal: renewal('renewed', 'codex') })[0], 'Renouvelé via codex');
+  assert.equal(codexAccountState({ ...codex, phase: 'expired', renewal: renewal('reconnect', 'codex') })[0], 'À reconnecter');
+});
