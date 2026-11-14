@@ -2371,6 +2371,7 @@ cat >/dev/null
     /// bearer and displayed « Connecté »; `_current`, the primary (CLI, one
     /// launch) and the other snapshots are untouched; the next cycle reads
     /// without renewing.
+    #[cfg(unix)]
     #[test]
     fn aip_expiring_snapshot_is_renewed_under_aip_lock_then_read_and_left_alone() {
         use crate::oauth_usage::test_support::{Reply, Server};

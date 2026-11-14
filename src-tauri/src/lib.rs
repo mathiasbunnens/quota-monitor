@@ -876,7 +876,7 @@ const PANEL_ROW_HEIGHT: f64 = 48.0;
 #[cfg(target_os = "macos")]
 const PANEL_INNER_WIDTH: f64 = 276.0;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tone {
     Neutral,
